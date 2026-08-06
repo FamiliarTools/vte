@@ -925,6 +925,16 @@ Terminal::erase_image_rect(vte::grid::row_t rows,
 {
         auto const top = m_screen->cursor.row;
 
+        /* Set the boundary above the image to hard wrapped, the same way every other
+         * site that tears the contents apart in place does (see scroll_text_up()).
+         * Each covered row gets its own lower boundary torn apart in the loop below,
+         * but without this one the image's first row stays glued to the paragraph
+         * above it, and a rewrap then reflows that paragraph's text into the cells the
+         * image sits on. Since draw_rows() paints text over the images, the image ends
+         * up with text on top of it.
+         */
+        set_hard_wrapped(top - 1);
+
         /* FIXMEchpe: simplify! */
         for (auto i = 0; i < rows; ++i) {
                 auto const row = top + i;
