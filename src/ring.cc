@@ -29,6 +29,8 @@
 
 #include "cxx-utils.hh"
 
+#include <algorithm>
+
 /* We should be able to hold a single fullscreen 4K image at most.
  * 35MiB equals 3840 * 2160 * 4 plus a little extra. */
 #define IMAGE_FAST_MEMORY_USED_MAX (35 * 1024 * 1024)
@@ -228,6 +230,7 @@ Ring::image_gc_region() noexcept
 
                         /* Apparently this is the cleanest way to erase() with a reverse iterator... */
                         /* Unlink the image from m_image_by_top_map, then erase it from m_image_map */
+                        note_image_freed(image.get());
                         unlink_image_from_top_map(image.get());
                         rit = image_map_type::reverse_iterator{m_image_map.erase(std::next(rit).base())};
                         continue;
@@ -252,6 +255,7 @@ Ring::image_gc() noexcept
 
                 auto& image = m_image_map.begin()->second;
                 m_image_fast_memory_used -= image->resource_size();
+                note_image_freed(image.get());
                 unlink_image_from_top_map(image.get());
                 m_image_map.erase(m_image_map.begin());
         }
@@ -269,6 +273,7 @@ Ring::erase_image(Ring::image_by_top_map_type::iterator it) noexcept
         auto const priority = image->get_priority();
 
         m_image_fast_memory_used -= image->resource_size();
+        note_image_freed(image);
         auto const next = m_image_by_top_map.erase(it);
         m_image_map.erase(priority);
 
@@ -299,6 +304,99 @@ Ring::drop_images_before(row_t row) noexcept
 
                 it = erase_image(it);
         }
+}
+
+void
+Ring::drop_images_after(row_t row) noexcept
+{
+        /* Free every image that has a row at or after @row, i.e. that reaches past
+         * the last row the ring holds. The counterpart of drop_images_before() for
+         * the one path that destroys rows at the bottom instead of at the front:
+         * shrink(), which pulls m_end back and never consulted the image maps, so an
+         * image below the new end kept a row number that no longer exists.
+         *
+         * Unlike the top row, the bottom row is not the map's key, so there is no
+         * early exit: an image with a small top can still be tall enough to reach
+         * past @row. Shrinking is rare enough that the full walk does not matter.
+         */
+        for (auto it = m_image_by_top_map.begin();
+             it != m_image_by_top_map.end(); ) {
+                if (long(it->second->get_bottom()) < long(row)) {
+                        ++it;
+                        continue;
+                }
+
+                it = erase_image(it);
+        }
+}
+
+/*
+ * Ring::erase_images_in_rect:
+ * @top, @bottom, @left, @right: an inclusive rectangle in ring coordinates
+ * @damage_top, @damage_bottom: out, the rows the deleted images occupied
+ *
+ * Delete, whole, every image whose cells intersect the given rectangle; the
+ * image being placed by its own emission burst is held out. Returns whether
+ * anything was deleted, in which case the out parameters bound the rows that
+ * need repainting.
+ *
+ * An image is deleted in full even when only one of its cells is touched. The
+ * alternative, splitting the image and keeping the untouched part, costs several
+ * hundred lines of geometry for a fidelity no producer needs: cell erase is the
+ * only way a producer can take its image back, and they all erase at least the
+ * whole area they drew into.
+ *
+ * All comparisons are made in signed long. An image stores its position in int,
+ * a ring row is an unsigned long, and the callers legitimately pass rows derived
+ * from a cursor position minus one; mixing those in an unsigned comparison turns
+ * an empty rectangle into an enormous one.
+ */
+bool
+Ring::erase_images_in_rect(long top,
+                           long bottom,
+                           long left,
+                           long right,
+                           long* damage_top,
+                           long* damage_bottom) noexcept
+{
+        if (top > bottom || left > right)
+                return false;
+
+        auto deleted = false;
+
+        for (auto it = m_image_by_top_map.begin();
+             it != m_image_by_top_map.end(); ) {
+                auto const image = it->second;
+
+                /* The keys are the images' top rows, so once past @bottom no
+                 * image left can begin inside the rectangle either. There is no
+                 * such shortcut at the front: an image with a small top row can
+                 * be tall enough to reach into it.
+                 */
+                if (long(image->get_top()) > bottom)
+                        break;
+
+                if (image == m_placing_image ||
+                    long(image->get_bottom()) < top ||
+                    long(image->get_left()) > right ||
+                    long(image->get_left()) + long(image->get_width()) - 1 < left) {
+                        ++it;
+                        continue;
+                }
+
+                if (!deleted) {
+                        *damage_top = long(image->get_top());
+                        *damage_bottom = long(image->get_bottom());
+                        deleted = true;
+                } else {
+                        *damage_top = std::min(*damage_top, long(image->get_top()));
+                        *damage_bottom = std::max(*damage_bottom, long(image->get_bottom()));
+                }
+
+                it = erase_image(it);
+        }
+
+        return deleted;
 }
 
 void
@@ -997,7 +1095,9 @@ void
 Ring::discard_one_row()
 {
 	m_start++;
+#if WITH_SIXEL
         drop_images_before(m_start);
+#endif
 	if (G_UNLIKELY(m_start == m_writable)) {
 		reset_streams(m_writable);
 	} else if (m_start < m_writable) {
@@ -1121,6 +1221,13 @@ Ring::shrink(row_t max_len)
 
 	/* TODO May want to shrink down m_array */
 
+#if WITH_SIXEL
+        /* The rows past the new end are gone; an image anchored to one of them
+         * would keep being drawn at a row number the ring no longer has. */
+        if (has_images())
+                drop_images_after(m_end);
+#endif
+
 	validate();
 }
 
@@ -1231,7 +1338,9 @@ Ring::drop_scrollback(row_t position)
         ensure_writable(position);
 
         m_start = m_writable = position;
+#if WITH_SIXEL
         drop_images_before(m_start);
+#endif
         reset_streams(position);
 }
 
@@ -1875,6 +1984,13 @@ Ring::append_image(vte::Freeable<cairo_surface_t> surface,
                                    std::forward_as_tuple(image.get()));
 
         m_image_fast_memory_used += image->resource_size ();
+
+        /* From here until the caller says otherwise, this image is the one being
+         * placed, and the lifetime rules leave it alone. It has to be marked
+         * before the collectors run, because they can free it right back and
+         * note_image_freed() is what keeps the marker from dangling.
+         */
+        m_placing_image = image.get();
 
         image_gc_region();
         image_gc();
