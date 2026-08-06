@@ -1760,6 +1760,22 @@ public:
                                        vte::grid::column_t right);
 #endif
 
+        /* Repaint after the ring's own rules have moved or deleted an image
+         * behind the caller's back. Repainting everything is the right trade
+         * here: an image deleted for straddling the edge of a scrolled region
+         * reaches outside the rows the caller is about to invalidate, and this
+         * only ever happens on an event that is measurably rare in ordinary use
+         * (no real workload moves an image at all), so the alternative of
+         * tracking the damage precisely buys nothing.
+         */
+        inline void maybe_repaint_moved_images()
+        {
+                if (!m_screen->row_data->take_images_changed()) [[likely]]
+                        return;
+
+                invalidate_all();
+        }
+
         /* Delete every image that has a cell inside the given rectangle, which is
          * inclusive and in absolute coordinates: rows as m_screen->cursor.row
          * counts them, columns as the screen counts them.

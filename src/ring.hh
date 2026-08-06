@@ -337,6 +337,7 @@ public:
          * rule folds away at compile time rather than behind a preprocessor
          * conditional at each of its call sites. */
         static constexpr bool has_images() noexcept { return false; }
+        static constexpr bool take_images_changed() noexcept { return false; }
 
 #endif /* WITH_SIXEL */
 };
