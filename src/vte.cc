@@ -2872,6 +2872,10 @@ Terminal::scroll_text_up(scrolling_region const& scrolling_region,
         } else {
                 /* Scroll up partial rows. The line endings and the BiDi flags don't scroll. */
 
+                /* The cells move without the rows moving, so an image over the
+                 * region cannot follow its cells; it is erased along with them. */
+                erase_images_in_rect(top, bottom, left, right);
+
                 /* Make sure the area we're about to scroll is present in memory. */
                 long row = top;
                 for (row = top; row <= bottom; row++) {
@@ -2951,6 +2955,9 @@ Terminal::scroll_text_down(scrolling_region const& scrolling_region,
         } else {
                 /* Scroll down partial rows. The line endings and the BiDi flags don't scroll. */
 
+                /* As in scroll_text_up(): the cells move, the rows don't. */
+                erase_images_in_rect(top, bottom, left, right);
+
                 /* Make sure the area we're about to scroll is present in memory. */
                 long row = top;
                 for (row = top; row <= bottom; row++) {
@@ -3007,6 +3014,10 @@ Terminal::scroll_text_left(scrolling_region const& scrolling_region,
 
         const VteCell *cell = fill ? &m_color_defaults : &basic_cell;
 
+        /* DCH, SL and friends move cells sideways within their rows; an image
+         * has no way to follow them, so it goes. */
+        erase_images_in_rect(top, bottom, left, right);
+
         /* Scroll left in each row separately. */
         for (auto row = top; row <= bottom; row++) {
                 /* Make sure the area we're about to scroll is present in memory. */
@@ -3055,6 +3066,9 @@ Terminal::scroll_text_right(scrolling_region const& scrolling_region,
                 ring_append(false /* no fill */);
 
         const VteCell *cell = fill ? &m_color_defaults : &basic_cell;
+
+        /* As in scroll_text_left(): ICH, SR and insert mode move cells sideways. */
+        erase_images_in_rect(top, bottom, left, right);
 
         /* Scroll right in each row separately. */
         for (auto row = top; row <= bottom; row++) {
