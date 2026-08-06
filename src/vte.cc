@@ -3664,6 +3664,26 @@ Terminal::insert_single_width_chars(gunichar const *p, int len)
 #if WITH_SIXEL
 
 void
+Terminal::erase_images_in_rect_slow(vte::grid::row_t top,
+                                    vte::grid::row_t bottom,
+                                    vte::grid::column_t left,
+                                    vte::grid::column_t right)
+{
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+
+        if (!m_screen->row_data->erase_images_in_rect(top, bottom, left, right,
+                                                      &damage_top, &damage_bottom))
+                return;
+
+        /* The deleted images can reach outside the erased rectangle - that is the
+         * whole point of deleting them whole - so repaint the rows they occupied
+         * rather than the ones the caller is about to invalidate.
+         */
+        invalidate_rows(damage_top, damage_bottom);
+}
+
+void
 Terminal::insert_image(ProcessingContext& context,
                        vte::Freeable<cairo_surface_t> image_surface) /* throws */
 {
@@ -3690,7 +3710,18 @@ Terminal::insert_image(ProcessingContext& context,
 
         /* Erase characters under the image. Since this inserts content, we need
          * to update the processing context's bbox.
+         *
+         * append_image() has marked the new image as the one being placed, and
+         * that marker has to be dropped again once the burst below is over,
+         * however it ends: it is what holds the image out of its own erasing and
+         * scrolling, and leaving it set would exempt the image from the lifetime
+         * rules forever.
          */
+        struct PlacingGuard {
+                vte::base::Ring* ring;
+                ~PlacingGuard() { ring->set_placing_image(nullptr); }
+        } const placing_guard{m_screen->row_data};
+
         context.pre_GRAPHIC();
         erase_image_rect(height, width);
         context.post_GRAPHIC();
