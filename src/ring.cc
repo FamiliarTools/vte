@@ -258,6 +258,35 @@ Ring::image_gc() noexcept
 }
 
 void
+Ring::drop_images_before(row_t row) noexcept
+{
+        /* Free every image that now lies entirely before @row, i.e. whose last row has
+         * left the ring. Without this the maps grow without bound: the row-dropping
+         * paths advance m_start and m_end and never consult m_image_map, so an image
+         * scrolled out of the scrollback stayed resident until a reset. It is also what
+         * lets the ring evict images predictably rather than only under the size cap.
+         *
+         * m_image_by_top_map is ordered by top row, so an image whose top is at or after
+         * @row cannot possibly end before it: stopping at the first such entry is exact,
+         * not an approximation. An image straddling @row is KEPT - part of it is still in
+         * the ring - and it is dropped later when its bottom follows.
+         */
+        for (auto it = m_image_by_top_map.begin();
+             it != m_image_by_top_map.end() && it->first < row; ) {
+                auto const image = it->second;
+                if (image->get_bottom() >= row) {
+                        ++it;
+                        continue;
+                }
+
+                m_image_fast_memory_used -= image->resource_size();
+                auto const priority = image->get_priority();
+                it = m_image_by_top_map.erase(it);
+                m_image_map.erase(priority);
+        }
+}
+
+void
 Ring::unlink_image_from_top_map(vte::image::Image const* image) noexcept
 {
         auto [begin, end] = m_image_by_top_map.equal_range(image->get_top());
@@ -911,6 +940,7 @@ void
 Ring::discard_one_row()
 {
 	m_start++;
+        drop_images_before(m_start);
 	if (G_UNLIKELY(m_start == m_writable)) {
 		reset_streams(m_writable);
 	} else if (m_start < m_writable) {
@@ -1144,6 +1174,7 @@ Ring::drop_scrollback(row_t position)
         ensure_writable(position);
 
         m_start = m_writable = position;
+        drop_images_before(m_start);
         reset_streams(position);
 }
 
