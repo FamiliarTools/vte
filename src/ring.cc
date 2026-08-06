@@ -257,6 +257,24 @@ Ring::image_gc() noexcept
         }
 }
 
+Ring::image_by_top_map_type::iterator
+Ring::erase_image(Ring::image_by_top_map_type::iterator it) noexcept
+{
+        /* Free the image @it refers to and return an iterator to the next one.
+         *
+         * The priority has to be taken before unlinking, since erasing from
+         * m_image_map destroys the Image that m_image_by_top_map only points to.
+         */
+        auto const image = it->second;
+        auto const priority = image->get_priority();
+
+        m_image_fast_memory_used -= image->resource_size();
+        auto const next = m_image_by_top_map.erase(it);
+        m_image_map.erase(priority);
+
+        return next;
+}
+
 void
 Ring::drop_images_before(row_t row) noexcept
 {
@@ -279,10 +297,7 @@ Ring::drop_images_before(row_t row) noexcept
                         continue;
                 }
 
-                m_image_fast_memory_used -= image->resource_size();
-                auto const priority = image->get_priority();
-                it = m_image_by_top_map.erase(it);
-                m_image_map.erase(priority);
+                it = erase_image(it);
         }
 }
 
@@ -315,30 +330,72 @@ Ring::rebuild_image_top_map() /* throws */
         }
 }
 
-bool
+/* Re-anchor the images that belong to the old rows whose text now makes up the
+ * single new row @new_row_index, spanning [@text_start_ofs, @text_end_ofs) of the
+ * text stream. @it is the shared cursor into m_image_by_top_map, carried across
+ * the calls of one rewrap; both the map and the ranges are ordered by text
+ * offset, so one forward pass visits every image exactly once.
+ *
+ * Only the row moves. The column is left exactly as it is, because reflow simply
+ * has no opinion about it: frozen_row_column_to_text_offset() deliberately
+ * disregards an image's column (it maps column 0), and the cells under an image
+ * are blanked, so a text-offset round trip would anchor the image to whatever text
+ * reflowed into that row rather than to where the image is. The column is absolute
+ * and nothing about narrowing the window invalidates it: an image that no longer
+ * fits is merely clipped by the draw loop, and reappears intact when the window is
+ * widened again. Deleting it instead would lose a prompt-emitted image on every
+ * window retile, with nobody around to re-emit it.
+ *
+ * An image is dropped only when its position genuinely no longer exists: its row
+ * has left the ring, or its text offset cannot be mapped.
+ */
+void
 Ring::rewrap_images_in_range(Ring::image_by_top_map_type::iterator& it,
                              size_t text_start_ofs,
                              size_t text_end_ofs,
                              row_t new_row_index) noexcept
 {
-        for (auto const end = m_image_by_top_map.end();
-             it != end;
-             ++it) {
-                auto const& image = it->second;
+        while (it != m_image_by_top_map.end()) {
+                auto const image = it->second;
+                auto const top = image->get_top();
+
+                /* Rows outside the ring have no text offset to map through, and
+                 * frozen_row_column_to_text_offset() does not report that: below
+                 * m_start it clamps the position onto the first row of the ring
+                 * (which is why images below the scrollback start all used to pile
+                 * onto it), and at or past m_end it synthesises an offset past the
+                 * stream head (which used to leave the image holding a row number
+                 * in the old ring's numbering). Both fabricate a position for a row
+                 * that is gone, so the image goes with it.
+                 */
+                if (top < 0 || row_t(top) < m_start || row_t(top) >= m_end) {
+                        it = erase_image(it);
+                        continue;
+                }
+
                 auto ofs = CellTextOffset{};
+                if (!frozen_row_column_to_text_offset(top, 0, &ofs)) {
+                        it = erase_image(it);
+                        continue;
+                }
 
-                if (!frozen_row_column_to_text_offset(image->get_top(), 0, &ofs))
-                        return false;
-
+                /* Not this new row's text yet; a later call will place it. */
                 if (ofs.text_offset >= text_end_ofs)
                         break;
 
-                if (ofs.text_offset >= text_start_ofs && ofs.text_offset < text_end_ofs) {
-                        image->set_top(new_row_index);
+                /* Before the range: unreachable, as the ranges passed to the
+                 * successive calls tile the whole text stream and this pass runs in
+                 * offset order. Drop rather than skip, so that no image can survive
+                 * holding a row number from the old ring.
+                 */
+                if (ofs.text_offset < text_start_ofs) {
+                        it = erase_image(it);
+                        continue;
                 }
-        }
 
-        return true;
+                image->set_top(new_row_index);
+                ++it;
+        }
 }
 
 #endif /* WITH_SIXEL */
@@ -1549,11 +1606,10 @@ Ring::rewrap(column_t columns,
 						}
 
 #if WITH_SIXEL
-						if (!rewrap_images_in_range(image_it,
-                                                                            new_record.text_start_offset,
-                                                                            text_offset,
-                                                                            new_row_index))
-							goto err;
+						rewrap_images_in_range(image_it,
+                                                                       new_record.text_start_offset,
+                                                                       text_offset,
+                                                                       new_row_index);
 #endif
 
 						new_row_index++;
@@ -1609,11 +1665,10 @@ Ring::rewrap(column_t columns,
 		}
 
 #if WITH_SIXEL
-		if (!rewrap_images_in_range(image_it,
-                                            new_record.text_start_offset,
-                                            paragraph_end_text_offset,
-                                            new_row_index))
-			goto err;
+		rewrap_images_in_range(image_it,
+                                       new_record.text_start_offset,
+                                       paragraph_end_text_offset,
+                                       new_row_index);
 #endif
 
 		new_row_index++;
@@ -1660,6 +1715,14 @@ Ring::rewrap(column_t columns,
         } catch (...) {
                 vte::log_exception();
         }
+
+        /* Reflow can make the content longer than the ring holds, in which case the
+         * update above has just moved m_start forward and dropped rows off the front.
+         * This has to run after rebuild_image_top_map(), since drop_images_before()
+         * walks m_image_by_top_map in key order and the keys are only the new row
+         * numbers once the map has been rebuilt.
+         */
+        drop_images_before(m_start);
 #endif
 
 	_vte_debug_print(vte::debug::category::RING, "Ring after rewrapping:");
