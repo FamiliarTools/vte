@@ -287,5 +287,52 @@ DrawingCairo::draw_surface_with_color_mask(cairo_surface_t *surface,
         end_cairo(cr);
 }
 
+void
+DrawingCairo::draw_image(cairo_surface_t* surface,
+                         int x,
+                         int y,
+                         double width,
+                         double height) const
+{
+        g_assert(m_cr);
+        g_assert(surface);
+
+        _vte_debug_print(vte::debug::category::DRAW,
+                         "draw_image ({}, {}, {}, {})",
+                         x, y, width, height);
+
+        auto const surface_width = cairo_image_surface_get_width(surface);
+        auto const surface_height = cairo_image_surface_get_height(surface);
+        if (surface_width <= 0 || surface_height <= 0)
+                return;
+
+        cairo_save(m_cr);
+        cairo_set_operator(m_cr, CAIRO_OPERATOR_OVER);
+
+        /* cairo_paint() covers the whole clip region, so bound it to the
+         * destination rectangle; that also keeps the filter from bleeding
+         * sampled edge pixels into the neighbouring cells, which belong to the
+         * terminal and not to the image.
+         */
+        cairo_rectangle(m_cr, x, y, width, height);
+        cairo_clip(m_cr);
+
+        cairo_translate(m_cr, x, y);
+        cairo_scale(m_cr, width / surface_width, height / surface_height);
+        cairo_set_source_surface(m_cr, surface, 0, 0);
+
+        /* Clamp at the edges. Whenever the pattern matrix is not the identity -
+         * which on a HiDPI display happens from the device scale alone, even
+         * when the image maps 1:1 onto its cells - the default CAIRO_EXTEND_NONE
+         * makes the bilinear filter sample transparent pixels from beyond the
+         * surface, leaving a faded one pixel halo on all four edges.
+         */
+        cairo_pattern_set_extend(cairo_get_source(m_cr), CAIRO_EXTEND_PAD);
+
+        cairo_paint(m_cr);
+
+        cairo_restore(m_cr);
+}
+
 } // namespace view
 } // namespace vte

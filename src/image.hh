@@ -18,8 +18,13 @@
 
 #pragma once
 
-#include <pango/pangocairo.h>
 #include "cairo-glue.hh"
+
+#if VTE_GTK == 4
+#include <gdk/gdk.h>
+
+#include "refptr.hh"
+#endif
 
 namespace vte {
 
@@ -44,6 +49,14 @@ private:
         // Cell dimensions in pixels at time of image creation
         int m_cell_width;
         int m_cell_height;
+
+#if VTE_GTK == 4
+        /* Lazily created from the immutable m_surface, whose pixel buffer it
+         * shares (zero copy), so that resource_size() stays truthful and the
+         * ring's image GC remains the only eviction mechanism needed.
+         */
+        mutable vte::glib::RefPtr<GdkTexture> m_texture{};
+#endif
 
 public:
         Image(vte::Freeable<cairo_surface_t> surface,
@@ -80,6 +93,29 @@ public:
         inline constexpr auto get_height() const noexcept { return (m_height_pixels + m_cell_height - 1) / m_cell_height; }
         inline auto get_bottom() const noexcept { return m_top_cells + get_height() - 1; }
 
+        /* The image's display size at the given current cell dimensions. The
+         * image is stretched so that it keeps covering the same cells as when
+         * it was created; m_cell_width/m_cell_height are the cell dimensions
+         * that were in effect then. Fractional, since neither the ratio nor
+         * the result need be integral, and rounding here would accumulate a
+         * visible error over a large image.
+         */
+        inline constexpr auto get_width_pixels(long cell_width) const noexcept
+        {
+                return m_width_pixels * double(cell_width) / double(m_cell_width);
+        }
+
+        inline constexpr auto get_height_pixels(long cell_height) const noexcept
+        {
+                return m_height_pixels * double(cell_height) / double(m_cell_height);
+        }
+
+        inline auto get_surface() const noexcept { return m_surface.get(); }
+
+#if VTE_GTK == 4
+        GdkTexture* get_texture() const noexcept;
+#endif
+
         inline auto resource_size() const noexcept
         {
                 if (cairo_image_surface_get_stride(m_surface.get()) != 0)
@@ -88,12 +124,6 @@ public:
                 /* Not an image surface: Only the device knows for sure, so we guess */
                 return m_width_pixels * m_height_pixels * 4;
         }
-
-        void paint(cairo_t* cr,
-                   int offset_x,
-                   int offset_y,
-                   int cell_width,
-                   int cell_height) const noexcept;
 
 }; // class Image
 
