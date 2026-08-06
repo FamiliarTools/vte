@@ -3513,6 +3513,17 @@ Terminal::insert_char(gunichar c,
                 m_last_graphic_character = c_unmapped;
 	}
 
+        /* Text written over an image is a delete verb too, and it is the one
+         * the ring cannot see: it is an in-place write to cells, not a row
+         * operation. This is where the autowrap above has settled which row is
+         * going to be written, and where the combining-mark branch that writes
+         * somewhere else has already left.
+         */
+        erase_images_in_rect(m_screen->cursor.row,
+                             m_screen->cursor.row,
+                             col,
+                             col + columns - 1);
+
 	/* Make sure we have enough rows to hold this data. */
 	row = ensure_cursor();
 	g_assert(row != NULL);
@@ -3643,6 +3654,15 @@ Terminal::insert_single_width_chars(gunichar const *p, int len)
                                          m_screen->insert_delta);
                         g_free(utf8);
                 }
+
+                /* As in insert_char(): printing over an image deletes it. Once
+                 * per run rather than once per character, since the whole run
+                 * lands on one row and its extent is known here.
+                 */
+                erase_images_in_rect(m_screen->cursor.row,
+                                     m_screen->cursor.row,
+                                     col,
+                                     col + run - 1);
 
                 /* Make sure we have enough rows to hold this data. */
                 row = ensure_cursor();
