@@ -268,6 +268,7 @@ private:
         void image_gc_region() noexcept;
         void unlink_image_from_top_map(vte::image::Image const* image) noexcept;
         void rebuild_image_top_map() /* throws */;
+        void drop_images_before(row_t row) noexcept;
         bool rewrap_images_in_range(image_by_top_map_type::iterator& it,
                                     size_t text_start_ofs,
                                     size_t text_end_ofs,
