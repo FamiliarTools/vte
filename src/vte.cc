@@ -2904,6 +2904,8 @@ Terminal::scroll_text_up(scrolling_region const& scrolling_region,
                 /* We've modified the display. Make a note of it. */
                 m_text_deleted_flag = TRUE;
         }
+
+        maybe_repaint_moved_images();
 }
 
 /* Terminal::scroll_text_down:
@@ -2986,6 +2988,8 @@ Terminal::scroll_text_down(scrolling_region const& scrolling_region,
                 /* We've modified the display. Make a note of it. */
                 m_text_deleted_flag = TRUE;
         }
+
+        maybe_repaint_moved_images();
 }
 
 /* Terminal::scroll_text_left:

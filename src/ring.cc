@@ -399,6 +399,123 @@ Ring::erase_images_in_rect(long top,
         return deleted;
 }
 
+/*
+ * Ring::shift_images_for_insert:
+ * @position: the row about to be inserted at
+ *
+ * A row is being pushed in at @position, so every row from there down moves
+ * one further down. An image entirely below the seam moves with its rows; an
+ * image the seam runs through is destroyed, because its rows are no longer
+ * contiguous and there is no position it could keep that would still describe
+ * where its pixels are. Composed over the rows of a region scroll, this is the
+ * "an image inside the scrolled region moves, an image straddling its edge
+ * dies" rule that the region scroll needs.
+ *
+ * Inserting at the end of the ring is exempt. An image is anchored at the
+ * cursor before the rows it covers are created, so during its own emission it
+ * genuinely straddles the end; without this every sixel emitted at the bottom
+ * of the screen would classify itself as straddling and delete itself. Nothing
+ * else lives at or past the end, so the exemption cannot spare anything real.
+ *
+ * The keys of m_image_by_top_map are the images' top rows, and no image can be
+ * above row 0: the rules only ever move an image between existing rows, and
+ * the rewrap drops any image whose row left the ring. So the keys order the
+ * same way the rows do, and the walks below can stop on a key comparison.
+ */
+void
+Ring::shift_images_for_insert(row_t position) noexcept
+{
+        if (position == m_end)
+                return;
+
+        /* Destroyed: top strictly above the seam, bottom at or below it. */
+        for (auto it = m_image_by_top_map.begin();
+             it != m_image_by_top_map.end() && it->first < position; ) {
+                auto const image = it->second;
+                if (image == m_placing_image ||
+                    long(image->get_bottom()) < long(position)) {
+                        ++it;
+                        continue;
+                }
+
+                it = erase_image(it);
+                m_images_changed = true;
+        }
+
+        /* Moved: top at or below the seam. Walked backwards, so that a re-keyed
+         * entry (which always lands after every entry not yet visited, its key
+         * having just grown by one) cannot be visited twice.
+         */
+        auto it = m_image_by_top_map.end();
+        while (it != m_image_by_top_map.begin()) {
+                auto const cur = std::prev(it);
+                if (cur->first < position)
+                        break;
+
+                auto const at_begin = (cur == m_image_by_top_map.begin());
+                auto const before = at_begin ? cur : std::prev(cur);
+                auto const image = cur->second;
+
+                if (image != m_placing_image) {
+                        auto node = m_image_by_top_map.extract(cur);
+                        image->set_top(image->get_top() + 1);
+                        node.key() = row_t(image->get_top());
+                        m_image_by_top_map.insert(std::move(node));
+                        m_images_changed = true;
+                }
+
+                if (at_begin)
+                        break;
+
+                it = std::next(before);
+        }
+}
+
+/*
+ * Ring::shift_images_for_remove:
+ * @position: the row about to be removed
+ *
+ * The counterpart of shift_images_for_insert(): everything below @position
+ * moves one row up, an image containing @position loses one of its rows and is
+ * destroyed. There is no end-of-ring exemption to make here, since a row that
+ * is being removed exists by definition.
+ */
+void
+Ring::shift_images_for_remove(row_t position) noexcept
+{
+        /* Walked forwards, so that a re-keyed entry (whose key has just shrunk
+         * by one) always lands before every entry not yet visited.
+         */
+        for (auto it = m_image_by_top_map.begin();
+             it != m_image_by_top_map.end(); ) {
+                auto const image = it->second;
+                if (image == m_placing_image) {
+                        ++it;
+                        continue;
+                }
+
+                auto const top = long(image->get_top());
+                if (top > long(position)) {
+                        auto const next = std::next(it);
+                        auto node = m_image_by_top_map.extract(it);
+                        image->set_top(int(top - 1));
+                        node.key() = row_t(top - 1);
+                        m_image_by_top_map.insert(std::move(node));
+                        m_images_changed = true;
+                        it = next;
+                        continue;
+                }
+
+                if (long(image->get_bottom()) >= long(position)) {
+                        it = erase_image(it);
+                        m_images_changed = true;
+                        continue;
+                }
+
+                ++it;
+        }
+}
+
 void
 Ring::unlink_image_from_top_map(vte::image::Image const* image) noexcept
 {
@@ -1258,6 +1375,13 @@ Ring::insert(row_t position, guint8 bidi_flags)
 	vte_assert_cmpuint (position, >=, m_writable);
 	vte_assert_cmpuint (position, <=, m_end);
 
+#if WITH_SIXEL
+        /* After maybe_discard_one_row(), so that the maps are already pruned of
+         * whatever left the front of the ring. */
+        if (has_images())
+                shift_images_for_insert(position);
+#endif
+
         //FIXMEchpe WTF use better data structures!
 	tmp = *get_writable_index(m_end);
 	for (i = m_end; i > position; i--)
@@ -1295,6 +1419,11 @@ Ring::remove(row_t position)
 		return;
 
 	ensure_writable(position);
+
+#if WITH_SIXEL
+        if (has_images())
+                shift_images_for_remove(position);
+#endif
 
         //FIXMEchpe WTF as above
 	tmp = *get_writable_index(position);
