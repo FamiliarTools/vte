@@ -283,6 +283,30 @@ DrawingGsk::draw_surface_with_color_mask(GdkTexture *texture,
 }
 
 void
+DrawingGsk::draw_image(GdkTexture* texture,
+                       int x,
+                       int y,
+                       double width,
+                       double height) const
+{
+        g_assert(m_snapshot);
+        g_assert(texture);
+
+        _vte_debug_print(vte::debug::category::DRAW,
+                         "draw_image ({}, {}, {}, {})",
+                         x, y, width, height);
+
+        /* The bounds are in logical coordinates: the snapshot's transform
+         * already carries the device scale, so the renderer samples the
+         * texture at its native resolution at any (also fractional) scale,
+         * and nothing has to be re-rasterized when the scale changes.
+         */
+        auto const bounds = GRAPHENE_RECT_INIT(float(x), float(y),
+                                               float(width), float(height));
+        gtk_snapshot_append_texture(m_snapshot, texture, &bounds);
+}
+
+void
 DrawingGsk::begin_background(Rectangle const& rect,
                              size_t columns,
                              size_t rows)
