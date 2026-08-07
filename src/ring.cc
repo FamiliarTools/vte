@@ -241,6 +241,8 @@ Ring::image_gc_region() noexcept
         }
 
         cairo_region_destroy(region);
+
+        sync_has_images();
 }
 
 void
@@ -259,6 +261,8 @@ Ring::image_gc() noexcept
                 unlink_image_from_top_map(image.get());
                 m_image_map.erase(m_image_map.begin());
         }
+
+        sync_has_images();
 }
 
 Ring::image_by_top_map_type::iterator
@@ -276,6 +280,7 @@ Ring::erase_image(Ring::image_by_top_map_type::iterator it) noexcept
         note_image_freed(image);
         auto const next = m_image_by_top_map.erase(it);
         m_image_map.erase(priority);
+        sync_has_images();
 
         return next;
 }
@@ -1029,6 +1034,9 @@ Ring::reset()
         m_image_map.clear();
         m_next_image_priority = 0;
         m_image_fast_memory_used = 0;
+        m_placing_image = nullptr;
+        m_images_changed = false;
+        sync_has_images();
 #endif
 
         return m_end;
@@ -2120,6 +2128,8 @@ Ring::append_image(vte::Freeable<cairo_surface_t> surface,
          * note_image_freed() is what keeps the marker from dangling.
          */
         m_placing_image = image.get();
+
+        sync_has_images();
 
         image_gc_region();
         image_gc();
