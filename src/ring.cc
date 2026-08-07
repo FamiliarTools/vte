@@ -302,7 +302,7 @@ Ring::drop_images_before(row_t row) noexcept
         for (auto it = m_image_by_top_map.begin();
              it != m_image_by_top_map.end() && it->first < row; ) {
                 auto const image = it->second;
-                if (image->get_bottom() >= row) {
+                if (long(image->get_bottom()) >= long(row)) {
                         ++it;
                         continue;
                 }
