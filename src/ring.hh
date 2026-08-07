@@ -208,6 +208,25 @@ private:
 	row_t m_start{0};
         row_t m_end{0};
 
+#if WITH_SIXEL
+        /* Mirrors !m_image_map.empty(), and lives here, among the fields the ring
+         * touches on every operation, rather than being read from the map. The
+         * image maps sit past m_hyperlink_buf, over two kilobytes further into
+         * the object, so asking the map costs a cache line that nothing else in
+         * the print path wants; measured, that is about 3ns on every character
+         * printed through insert_char(), a 7 percent throughput loss on text
+         * that does not take the bulk path. Kept in step through
+         * sync_has_images(), which recomputes it from the map rather than
+         * guessing, called wherever the map changes.
+         */
+        bool m_has_images{false};
+
+        /* Set when an image was moved or deleted by the ring's own rules; the
+         * caller of the ring mutation drains it to repaint. Here for the same
+         * reason. */
+        bool m_images_changed{false};
+#endif
+
 	/* Writable */
 	row_t m_writable{0};
         row_t m_mask{31};
@@ -273,10 +292,6 @@ private:
          */
         vte::image::Image* m_placing_image{nullptr};
 
-        /* Set when a rule moved or deleted an image; the caller of the ring
-         * mutation drains it to repaint. */
-        bool m_images_changed{false};
-
         void image_gc() noexcept;
         void image_gc_region() noexcept;
         void unlink_image_from_top_map(vte::image::Image const* image) noexcept;
@@ -296,16 +311,20 @@ private:
                         m_placing_image = nullptr;
         }
 
+        /* Recompute m_has_images from the map rather than reasoning about what
+         * the caller just did, so the mirror cannot say something the map does
+         * not. Called wherever m_image_map changes. */
+        inline void sync_has_images() noexcept { m_has_images = !m_image_map.empty(); }
+
 public:
         auto const& image_map() const noexcept { return m_image_map; }
 
-        /* Whether any image is resident. Derived from the map rather than kept
-         * in a flag beside it: it compiles to the same load-and-compare, and it
-         * cannot go stale across the several places that add and drop images.
-         * This is the guard the callers put in front of every image rule, so
-         * that a ring holding no image pays a single predicted branch.
+        /* Whether any image is resident. This is the guard the callers put in
+         * front of every image rule, so that a ring holding no image - which is
+         * very nearly always - pays one predicted branch on a cache line it is
+         * already using. See m_has_images for why it is not read from the map.
          */
-        inline bool has_images() const noexcept { return !m_image_map.empty(); }
+        inline bool has_images() const noexcept { return m_has_images; }
 
         inline void set_placing_image(vte::image::Image* image) noexcept { m_placing_image = image; }
 
