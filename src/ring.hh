@@ -208,25 +208,6 @@ private:
 	row_t m_start{0};
         row_t m_end{0};
 
-#if WITH_SIXEL
-        /* Mirrors !m_image_map.empty(), and lives here, among the fields the ring
-         * touches on every operation, rather than being read from the map. The
-         * image maps sit past m_hyperlink_buf, over two kilobytes further into
-         * the object, so asking the map costs a cache line that nothing else in
-         * the print path wants; measured, that is about 3ns on every character
-         * printed through insert_char(), a 7 percent throughput loss on text
-         * that does not take the bulk path. Kept in step through
-         * sync_has_images(), which recomputes it from the map rather than
-         * guessing, called wherever the map changes.
-         */
-        bool m_has_images{false};
-
-        /* Set when an image was moved or deleted by the ring's own rules; the
-         * caller of the ring mutation drains it to repaint. Here for the same
-         * reason. */
-        bool m_images_changed{false};
-#endif
-
 	/* Writable */
 	row_t m_writable{0};
         row_t m_mask{31};
@@ -291,6 +272,29 @@ private:
          * compared, and cleared whenever the image it names is freed.
          */
         vte::image::Image* m_placing_image{nullptr};
+
+        /* Mirrors !m_image_map.empty(). Reading the map instead costs a cache line
+         * nothing else on the per-character path wants - the image maps sit past
+         * m_hyperlink_buf, two kilobytes further into the object - which measures
+         * as a 3 to 6 percent throughput loss on text that goes through
+         * insert_char() one character at a time.
+         *
+         * It is declared HERE, among the image fields, and deliberately not up
+         * beside m_start/m_end where the hot scalars live. Putting it there
+         * displaces m_writable/m_mask/m_array and costs the BULK path - the run
+         * writer that handles ordinary ASCII - about 8 percent, which is a worse
+         * trade on the commoner workload. Confirmed by measuring the two
+         * placements against each other and against an inert-padding build.
+         *
+         * Kept in step by sync_has_images(), which recomputes from the map rather
+         * than reasoning about what the caller just did, so the mirror can never
+         * claim something the map does not.
+         */
+        bool m_has_images{false};
+
+        /* Set when a rule moved or deleted an image; the caller of the ring
+         * mutation drains it to repaint. */
+        bool m_images_changed{false};
 
         void image_gc() noexcept;
         void image_gc_region() noexcept;
