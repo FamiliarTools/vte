@@ -126,6 +126,16 @@ public:
                         double width,
                         double height) const override;
 
+        void draw_image_region(GdkTexture* texture,
+                               double src_x,
+                               double src_y,
+                               double src_width,
+                               double src_height,
+                               double dst_x,
+                               double dst_y,
+                               double dst_width,
+                               double dst_height) const override;
+
         void draw_text(TextRequest* requests,
                        gsize n_requests,
                        uint32_t attr,
