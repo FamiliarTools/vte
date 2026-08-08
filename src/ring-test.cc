@@ -759,8 +759,15 @@ test_attr_stream_stripe_is_one_run(void)
                        "one-stripe image row %" G_GSIZE_FORMAT " bytes",
                        uniform, stripe);
 
-        /* Constant, not proportional to the 500 columns. */
-        g_assert_cmpuint(stripe, <=, 2 * uniform);
+        /* Constant, not proportional to the 500 columns.
+         *
+         * An image run costs a little MORE than a plain one - the record
+         * carries a 4-byte image reference after the hyperlink tail - but the
+         * cost is per RUN, not per cell. The bound is deliberately generous
+         * about the constant and strict about the growth: 500 columns must
+         * not cost anything like 500 records.
+         */
+        g_assert_cmpuint(stripe, <=, uniform + 64);
 }
 
 
@@ -1076,14 +1083,13 @@ test_ring_image_anchor_follows_the_cells(void)
 
 
 static void
-test_ring_image_reference_does_not_survive_freeze(void)
+test_ring_image_reference_survives_freeze(void)
 {
-        /* Whether a cell keeps naming its image after the row is frozen into
-         * the scrollback and thawed back out.
+        /* A cell must still know it is part of an image after its row has
+         * been frozen into the scrollback and thawed back out - and must know
+         * WHICH part, since the tile coordinates are what position it.
          *
-         * This decides an ORDERING question, so it is measured rather than
-         * assumed: the cell-anchored model can only become the sole source of
-         * truth once it survives the stream.
+         * The pool id deliberately does NOT survive; see below.
          */
         auto ring = Ring{1024, true};   /* with streams: freezing is the point */
         ring.set_visible_rows(24);
@@ -1092,7 +1098,7 @@ test_ring_image_reference_does_not_survive_freeze(void)
         auto const id = ring.image_pool().allocate(nullptr);
         auto* row = ring.index_writable(1);
         g_assert_cmpint(row->len, >, 0);
-        row->cells[0].attr.set_image_ref(vte::image::Ref{id, 0, 0});
+        row->cells[0].attr.set_image_ref(vte::image::Ref{id, 3, 0});
         g_assert_true(ring.index(1)->cells[0].attr.image());
 
         /* Push it far out of the writable window, so it is frozen. */
@@ -1103,17 +1109,31 @@ test_ring_image_reference_does_not_survive_freeze(void)
         g_assert_nonnull(thawed);
         g_assert_cmpint(thawed->len, >, 0);
 
-        /* The reference is GONE. VteCellAttr::m_link is not among the
-         * VTE_CELL_ATTR_COMMON_BYTES the attr stream persists, so a frozen
-         * row comes back with its cells no longer naming any image.
-         *
-         * Consequence, and the reason this test exists: the geometric
-         * lifetime rules cannot be removed in favour of the cell references
-         * until frozen rows carry the reference too. Doing it now would drop
-         * every image the moment its rows left the writable window.
+        auto const& attr = thawed->cells[0].attr;
+
+        /* Still an image cell, and still the same piece of the image. */
+        g_assert_true(attr.image());
+
+        auto const ref = attr.image_ref();
+        g_assert_cmpuint(ref.tile_row(), ==, 3);
+        g_assert_cmpuint(ref.tile_col(), ==, 0);
+
+        /* The pool id is dropped ON PURPOSE. It named an entry in an
+         * in-memory pool whose quarantine only tracks cells in the writable
+         * rows, so by now it may have been reclaimed and handed to a
+         * different image. Resolving to NO image is correct; resolving to the
+         * wrong one would be the aliasing the pool exists to prevent.
          */
-        g_assert_false(thawed->cells[0].attr.image());
+        g_assert_cmpuint(ref.pool_id(), ==, vte::image::k_ref_pool_id_none);
+        g_assert_false(ref.valid());
+        g_assert_null(ring.image_pool().lookup(ref));
+
+        /* And it must not be mistaken for a hyperlink: the union tag decides,
+         * and an image cell answers "no hyperlink" in range.
+         */
+        g_assert_cmpuint(attr.hyperlink_idx_or_none(), ==, 0);
 }
+
 
 int
 main(int argc,
@@ -1155,7 +1175,7 @@ main(int argc,
 
         g_test_add_func("/vte/ring/image-pool/anchor-follows-the-cells", test_ring_image_anchor_follows_the_cells);
 
-        g_test_add_func("/vte/ring/image-pool/reference-does-not-survive-freeze", test_ring_image_reference_does_not_survive_freeze);
+        g_test_add_func("/vte/ring/image-pool/reference-survives-freeze", test_ring_image_reference_survives_freeze);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

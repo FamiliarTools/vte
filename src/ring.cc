@@ -1013,9 +1013,25 @@ Ring::freeze_row(row_t position,
                                 }
                                 hyperlink_length = attr_change.attr.hyperlink_length;
                                 _vte_stream_append (m_attr_stream, (char const* ) &hyperlink_length, 2);
+
+                                /* An image cell's reference, after the
+                                 * hyperlink tail. Only the run's FIRST cell's
+                                 * reference is written: the run is one stripe
+                                 * of one image by construction, because
+                                 * same_for_stream() excludes the tile column
+                                 * from the run-length key precisely so that a
+                                 * stripe is one run. The tile column is
+                                 * recovered on thaw by counting.
+                                 */
+                                auto const has_image = m_last_attr.image();
+                                if (G_UNLIKELY (has_image)) {
+                                        auto const bits = m_last_attr.link_raw();
+                                        _vte_stream_append (m_attr_stream, (char const*) &bits, sizeof(bits));
+                                }
+
 				if (!buffer->len)
 					/* This row doesn't use last_attr, adjust */
-                                        record.attr_start_offset += attr_record_stride(hyperlink_length);
+                                        record.attr_start_offset += attr_record_stride(hyperlink_length, has_image);
 				m_last_attr = attr;
 			}
 
@@ -1073,6 +1089,8 @@ Ring::thaw_row(row_t position,
 	RowRecord records[2], record;
 	VteCellAttr attr;
 	CellAttrChange attr_change;
+        auto stream_image_ref = vte::image::Ref{};
+        auto stream_image_tile_col = uint32_t{0};
 	VteCell cell;
 	char const* p, *q, *end;
 	GString *buffer = m_utf8_buffer;
@@ -1129,11 +1147,60 @@ Ring::thaw_row(row_t position,
                                 if (attr_change.attr.hyperlink_length && !_vte_stream_read (m_attr_stream, record_start + sizeof (attr_change), hyperlink_readbuf, attr_change.attr.hyperlink_length))
                                         return;
                                 hyperlink_readbuf[attr_change.attr.hyperlink_length] = '\0';
-                                record.attr_start_offset = record_start + attr_record_stride(attr_change.attr.hyperlink_length);
+
+                                /* An image run stores its FIRST cell's
+                                 * reference after the hyperlink tail; the tag
+                                 * is in the attr word, which is persisted, so
+                                 * the reader needs no out-of-band state.
+                                 */
+                                auto const has_image = record_has_image(attr_change);
+                                stream_image_ref = vte::image::Ref{};
+                                stream_image_tile_col = 0;
+                                if (G_UNLIKELY (has_image)) {
+                                        auto bits = uint32_t{0};
+                                        if (!_vte_stream_read (m_attr_stream,
+                                                               record_start + sizeof (attr_change) +
+                                                               attr_change.attr.hyperlink_length + 2,
+                                                               (char*) &bits, sizeof(bits)))
+                                                return;
+                                        stream_image_ref = vte::image::Ref{bits};
+                                }
+
+                                record.attr_start_offset = record_start +
+                                        attr_record_stride(attr_change.attr.hyperlink_length, has_image);
 
                                 _attrcpy(&attr, &attr_change.attr);
-                                attr.set_hyperlink_idx(0);
-                                if (G_UNLIKELY (attr_change.attr.hyperlink_length)) {
+
+                                if (G_UNLIKELY (has_image)) {
+                                        /* The pool id is deliberately DROPPED.
+                                         *
+                                         * It named an entry in an in-memory
+                                         * pool whose quarantine only tracks
+                                         * cells in the writable rows, so by
+                                         * the time this row is thawed that id
+                                         * may already have been reclaimed and
+                                         * handed to a different image -
+                                         * exactly the aliasing the pool exists
+                                         * to prevent. Keeping the tile
+                                         * coordinates and dropping the id
+                                         * gives a cell that still knows it is
+                                         * part of an image, and which resolves
+                                         * to no image rather than to the wrong
+                                         * one.
+                                         *
+                                         * Restoring the picture itself needs
+                                         * the pixels in the stream too, and a
+                                         * fresh id allocated here; that does
+                                         * not exist yet.
+                                         */
+                                        attr.set_image_ref(vte::image::Ref{
+                                                vte::image::k_ref_pool_id_none,
+                                                stream_image_ref.tile_row(),
+                                                stream_image_ref.tile_col()});
+                                } else {
+                                        attr.set_hyperlink_idx(0);
+                                }
+                                if (G_UNLIKELY (!has_image && attr_change.attr.hyperlink_length)) {
                                         if (do_truncate) {
                                                 /* Find the existing idx or allocate a new one, just as when receiving an OSC 8 escape sequence.
                                                  * Do not update the current idx though. */
@@ -1151,6 +1218,21 @@ Ring::thaw_row(row_t position,
 		}
 
 		cell.attr = attr;
+
+                /* Recover this cell's tile column by counting from the run's
+                 * first cell. The column is not stored per cell on purpose:
+                 * doing so would make the run-length key vary per cell and
+                 * cost one 26-byte record each, measured.
+                 */
+                if (G_UNLIKELY (cell.attr.image())) {
+                        auto const base = cell.attr.image_ref();
+                        cell.attr.set_image_ref(vte::image::Ref{base.pool_id(),
+                                                                base.tile_row(),
+                                                                stream_image_tile_col});
+                        if (stream_image_tile_col < vte::image::k_ref_tile_col_max)
+                                stream_image_tile_col++;
+                }
+
                 _VTE_DEBUG_IF(vte::debug::category::RING | vte::debug::category::HYPERLINK) {
                         /* Debug: Reverse the colors for the stream's contents. */
                         if (!do_truncate) {
