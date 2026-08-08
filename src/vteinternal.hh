@@ -1300,7 +1300,8 @@ public:
                       bool block,
                       bool preserve_empty,
                       GString* string,
-                      VteCharAttrList* attributes = nullptr);
+                      VteCharAttrList* attributes = nullptr,
+                      bool image_placeholder = false);
 
         void get_text_displayed(GString* string,
                                 VteCharAttrList* attributes = nullptr);
