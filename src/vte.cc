@@ -6478,7 +6478,7 @@ Terminal::hyperlink_invalidate_and_get_bbox(vte::base::Ring::hyperlink_idx_t idx
                 if (rowdata != NULL) {
                         bool do_invalidate_row = false;
                         for (col = 0; col < rowdata->len; col++) {
-                                if (G_UNLIKELY (rowdata->cells[col].attr.hyperlink_idx == idx)) {
+                                if (G_UNLIKELY (rowdata->cells[col].attr.hyperlink_idx_or_none() == idx)) {
                                         do_invalidate_row = true;
                                         top = MIN(top, row);
                                         bottom = MAX(bottom, row);
@@ -6545,7 +6545,7 @@ Terminal::hyperlink_hilite_update()
                 rowcol = grid_coords_from_view_coords(pos);
                 rowdata = find_row_data(rowcol.row());
                 if (rowdata && rowcol.column() < rowdata->len) {
-                        new_hyperlink_hover_idx = rowdata->cells[rowcol.column()].attr.hyperlink_idx;
+                        new_hyperlink_hover_idx = rowdata->cells[rowcol.column()].attr.hyperlink_idx_or_none();
                 }
         }
 
@@ -7059,7 +7059,7 @@ vte_terminal_cellattr_equal(VteCellAttr const* attr1,
         //FIXMEchpe why exclude DIM here?
 	return (((attr1->attr ^ attr2->attr) & VTE_ATTR_ALL_MASK) == 0 &&
                 attr1->colors()       == attr2->colors()   &&
-                attr1->hyperlink_idx  == attr2->hyperlink_idx);
+                attr1->link_raw()    == attr2->link_raw());
 }
 
 /*
@@ -9498,7 +9498,7 @@ Terminal::draw_cells_with_attributes(vte::view::DrawingContext::TextRequest* ite
                                         deco,
 					TRUE, draw_default_bg,
 					cells[j].attr.attr & attr_mask,
-                                        m_allow_hyperlink && cells[j].attr.hyperlink_idx != 0,
+                                        m_allow_hyperlink && cells[j].attr.hyperlink_idx_or_none() != 0,
 					FALSE, column_width, height);
 		j += g_unichar_to_utf8(items[i].c, scratch_buf);
 	}
@@ -9737,8 +9737,8 @@ Terminal::draw_rows(VteScreen *screen_,
                         cell = _vte_row_data_get (row_data, lcol);
                         g_assert(cell != nullptr);
 
-                        nhyperlink = (m_allow_hyperlink && cell->attr.hyperlink_idx != 0);
-                        nhilite = (nhyperlink && cell->attr.hyperlink_idx == m_hyperlink_hover_idx) ||
+                        nhyperlink = (m_allow_hyperlink && cell->attr.hyperlink_idx_or_none() != 0);
+                        nhilite = (nhyperlink && cell->attr.hyperlink_idx_or_none() == m_hyperlink_hover_idx) ||
                                   (!nhyperlink && regex_match_has_current() && m_match_span.contains(row, lcol));
                         if (cell->c == 0 ||
                             ((cell->c == ' ' || cell->c == '\t') &&  // FIXME '\t' is newly added now, double check
@@ -10047,7 +10047,7 @@ Terminal::paint_cursor()
                                                         &item, 1,
                                                         fore, back, deco, TRUE, FALSE,
                                                         cell->attr.attr & attr_mask,
-                                                        m_allow_hyperlink && cell->attr.hyperlink_idx != 0,
+                                                        m_allow_hyperlink && cell->attr.hyperlink_idx_or_none() != 0,
                                                         FALSE,
                                                         width,
                                                         height);
@@ -10610,8 +10610,8 @@ Terminal::set_allow_hyperlink(bool setting)
                 g_assert (m_hyperlink_hover_idx == 0);
                 m_hyperlink_hover_uri = NULL;
                 emit_hyperlink_hover_uri_changed(NULL);  /* FIXME only emit if really changed */
-                m_defaults.attr.hyperlink_idx = m_screen->row_data->get_hyperlink_idx(NULL);
-                g_assert (m_defaults.attr.hyperlink_idx == 0);
+                m_defaults.attr.set_hyperlink_idx(m_screen->row_data->get_hyperlink_idx(NULL));
+                g_assert (m_defaults.attr.hyperlink_idx() == 0);
         }
 
         m_allow_hyperlink = setting;
