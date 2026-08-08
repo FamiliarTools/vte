@@ -71,10 +71,16 @@ import -window root "$WORK/shot.png" 2>/dev/null || {
         exit 1
 }
 
-# Crop the image's own rectangle. The fixture is 96x72 px at the terminal
-# origin; the widget insets its content, so allow a generous box and compare
-# the same box on both sides.
-convert "$WORK/shot.png" -crop 120x96+0+0 +repage "$WORK/crop.png" 2>/dev/null
+# Crop a box that is DELIBERATELY WIDER AND TALLER than the image.
+#
+# The fixture is 96x72 px at the terminal origin. Cropping tightly to that
+# would make the test blind to anything drawn OUTSIDE the image's cell
+# extent, which is exactly the class of bug worth catching: an image that
+# bleeds colour into neighbouring cells is still "drawn correctly" by any
+# measure taken inside its own rectangle. So compare a region about three
+# times the image's width and include the rows below it.
+CROP=${VTE_TEST_CROP:-320x130+0+0}
+convert "$WORK/shot.png" -crop "$CROP" +repage "$WORK/crop.png" 2>/dev/null
 
 if [ "$UPDATE" = "--update-golden" ]; then
         cp "$WORK/crop.png" "$GOLDEN"
