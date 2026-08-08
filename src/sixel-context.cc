@@ -299,9 +299,6 @@ Context::reset_colors() noexcept
 void
 Context::prepare(int id,
                  uint32_t introducer,
-                 unsigned fg_red,
-                 unsigned fg_green,
-                 unsigned fg_blue,
                  unsigned bg_red,
                  unsigned bg_green,
                  unsigned bg_blue,
@@ -323,13 +320,23 @@ Context::prepare(int id,
         else
                 m_colors[0] = make_color(bg_red, bg_green, bg_blue);
 
-        m_colors[1] = make_color(fg_red, fg_green, fg_blue);
-
-        /*
-         * DEC PPLV2 says that on entering DECSIXEL mode, the active colour
-         * is set to colour register 0. Xterm defaults to register 3.
-         * We use the current foreground color in our special register 1.
+        /* The initial pen, so that an image which selects no colour still
+         * draws something.
+         *
+         * NOT the SGR foreground. DEC STD 070 11.1 is explicit that the ANSI
+         * SGR selections do not affect sixels, and taking the pen from SGR
+         * makes the same image render differently depending on what colour
+         * the shell happened to leave set - which is both non-conformant and
+         * not reproducible.
+         *
+         * DEC PPLV2 says the active colour on entering DECSIXEL is register
+         * 0; xterm defaults to register 3. Seed VTE's special register from
+         * palette register 0, which keeps the existing mechanism and makes
+         * the result a property of the palette rather than of the terminal
+         * state.
          */
+        m_colors[1] = m_colors[k_color_register_offset + 0];
+
         set_current_color(1);
 
         /* Clear buffer and scanline offsets */

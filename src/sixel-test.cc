@@ -1029,9 +1029,6 @@ template<class C>
 static void
 parse_image(C& context,
             std::string_view const& str,
-            unsigned fg_red,
-            unsigned fg_green,
-            unsigned fg_blue,
             unsigned bg_red,
             unsigned bg_green,
             unsigned bg_blue,
@@ -1041,7 +1038,6 @@ parse_image(C& context,
         context.reset();
         context.prepare(-1, /* no ID */
                         0x50 /* C0 DCS */,
-                        fg_red, fg_green, fg_blue,
                         bg_red, bg_green, bg_blue,
                         false /* bg transparent */,
                         private_color_registers);
@@ -1056,9 +1052,6 @@ template<class C>
 static void
 parse_image(C& context,
             ItemList const& items,
-            unsigned fg_red,
-            unsigned fg_green,
-            unsigned fg_blue,
             unsigned bg_red,
             unsigned bg_green,
             unsigned bg_blue,
@@ -1066,7 +1059,6 @@ parse_image(C& context,
             int line = __builtin_LINE())
 {
         parse_image(context, ItemStringifier(items).string(),
-                    fg_red, fg_green, fg_blue,
                     bg_red, bg_green, bg_blue,
                     private_color_registers,
                     line);
@@ -1078,7 +1070,7 @@ parse_image(C& context,
             std::string_view const& str,
             int line = __builtin_LINE())
 {
-        parse_image(context, str, 0xffu, 0xffu, 0xffu, 0xff8, 0xffu, 0xffu, true, line);
+        parse_image(context, str, 0xffu, 0xffu, 0xffu, true, line);
 }
 
 template<class C>
