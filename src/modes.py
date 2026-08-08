@@ -772,11 +772,24 @@ modes = [
     #
     # Default: reset
     #
+    # NOT writable, deliberately. Nothing in VTE reads this mode: images
+    # always scroll. Declaring it writable made DECRQM answer 2 ("reset",
+    # meaning settable), which tells a sender it may turn sixel scrolling
+    # off - and then CSI ?80h is accepted and does nothing, so the sender
+    # lays out its image against a rule the terminal is not following.
+    # Answering 4 ("permanently reset") is the truth: scrolling is always
+    # on. Make this writable again when, and only when, the display-mode
+    # behaviour actually exists.
+    #
+    # The polarity is also worth settling before implementing: DEC and
+    # xterm disagreed about it for years, and we have no hardware
+    # recording to arbitrate.
+    #
     # References: ?
     #
     # Note: Conflicts with WY161
     #
-    mode_WHAT('DECSDM', 80, default=False, flags=Flags.WRITABLE),
+    mode_WHAT('DECSDM', 80, default=False),
 
     # DECKPM - key position mode
     # If set, the keyboard sends extended reports (DECEKBD) that include
