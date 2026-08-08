@@ -30,6 +30,7 @@
 #if WITH_SIXEL
 #include "cairo-glue.hh"
 #include "image.hh"
+#include "image-pool.hh"
 #include <map>
 #include <memory>
 #endif
@@ -311,11 +312,19 @@ private:
          */
         bool m_has_images{false};
 
+        /* The id space cells use to name images. An id outlives the image it
+         * named until a sweep confirms no cell still refers to it, which is
+         * what stops a freed image's id from being handed to a new image
+         * while a scrollback cell still points at it. See image-pool.hh.
+         */
+        vte::image::PoolT<vte::image::Image> m_image_pool{};
+
         /* Set when a rule moved or deleted an image; the caller of the ring
          * mutation drains it to repaint. */
         bool m_images_changed{false};
 
         void image_gc() noexcept;
+        void sweep_image_pool() noexcept;
         void image_gc_region() noexcept;
         void unlink_image_from_top_map(vte::image::Image const* image) noexcept;
         void rebuild_image_top_map() /* throws */;
@@ -333,6 +342,12 @@ private:
         inline void note_image_freed(vte::image::Image const* image) noexcept {
                 if (m_placing_image == image)
                         m_placing_image = nullptr;
+
+                /* Retire, not release: cells may still name this id, and
+                 * handing it straight to the next image would make those
+                 * cells display the new one.
+                 */
+                m_image_pool.retire(image->get_pool_id());
         }
 
         /* Recompute m_has_images from the map rather than reasoning about what
@@ -342,6 +357,11 @@ private:
 
 public:
         auto const& image_map() const noexcept { return m_image_map; }
+
+        /* For tests. */
+        auto const& image_pool() const noexcept { return m_image_pool; }
+        auto& image_pool() noexcept { return m_image_pool; }
+        void sweep_image_pool_for_test() noexcept { sweep_image_pool(); }
 
         /* The bytes the resident images are charged for, i.e. what the image GC
          * spends its budget against. It has to be the sum over exactly the images
