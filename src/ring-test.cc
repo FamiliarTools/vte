@@ -669,8 +669,14 @@ test_image_pool_retire_is_idempotent(void)
  * other. Measure it rather than trusting it.
  */
 
+enum class LinkPattern {
+        Uniform,        /* no image: every cell identical */
+        TileColumn,     /* one image, one stripe, tile column advances per cell */
+        DistinctImage,  /* a different image per cell: genuinely different runs */
+};
+
 static size_t
-freeze_cost_of_row(bool vary_link)
+freeze_cost_of_row(LinkPattern pattern)
 {
         /* A ring WITH streams: freezing is the whole point here. */
         auto ring = Ring{1024, true};
@@ -684,11 +690,21 @@ freeze_cost_of_row(bool vary_link)
         for (size_t i = 0; i < columns; i++) {
                 auto cell = basic_cell;
                 cell.c = 'x';
-                if (vary_link) {
-                        /* What an image row looks like: same image, same tile
-                         * row, one tile column per cell.
+                switch (pattern) {
+                case LinkPattern::Uniform:
+                        break;
+                case LinkPattern::TileColumn:
+                        /* What a real image row looks like: one image, one
+                         * stripe, the tile column advancing per cell.
                          */
                         cell.attr.set_image_ref(vte::image::Ref{1, 0, uint32_t(i)});
+                        break;
+                case LinkPattern::DistinctImage:
+                        /* Genuinely different runs: a separate image per cell.
+                         * These MUST each cost a record.
+                         */
+                        cell.attr.set_image_ref(vte::image::Ref{uint32_t(i) + 1, 0, 0});
+                        break;
                 }
                 _vte_row_data_append(row, &cell);
         }
@@ -702,24 +718,49 @@ freeze_cost_of_row(bool vary_link)
 static void
 test_attr_stream_rle_trap(void)
 {
-        auto const uniform = freeze_cost_of_row(false);
-        auto const varying = freeze_cost_of_row(true);
+        auto const uniform = freeze_cost_of_row(LinkPattern::Uniform);
+        auto const distinct = freeze_cost_of_row(LinkPattern::DistinctImage);
 
         g_test_message("attr_stream: uniform row %" G_GSIZE_FORMAT " bytes, "
-                       "per-cell-varying row %" G_GSIZE_FORMAT " bytes",
-                       uniform, varying);
+                       "genuinely-distinct-per-cell row %" G_GSIZE_FORMAT " bytes",
+                       uniform, distinct);
 
         /* A row of identical attributes costs a small constant: the coding
-         * works. If this ever grows to be proportional to the row, the
-         * measurement below is meaningless and this test is the canary.
+         * works. If this ever grows proportional to the row, every other
+         * measurement here is meaningless and this is the canary.
          */
         g_assert_cmpuint(uniform, <, 200);
 
-        /* A row whose cells differ only in m_link - a field that is NOT
-         * serialised - costs one record per cell anyway. This is the trap.
+        /* Cells that genuinely belong to different images are different runs
+         * and must each cost a record. This is the trap's real cost, and it
+         * is what an encoding that varies per cell would pay.
          */
-        g_assert_cmpuint(varying, >, 10 * uniform);
+        g_assert_cmpuint(distinct, >, 100 * uniform);
 }
+
+static void
+test_attr_stream_stripe_is_one_run(void)
+{
+        /* The payoff. A row of one image's stripe differs in tile column at
+         * every cell, but a stripe is contiguous, so the tile column is
+         * recoverable by counting from the run's first cell. Excluding it
+         * from the run-length key must collapse the whole row to a constant
+         * number of records - the same as a row with no image at all.
+         *
+         * Without this, a single max-size image would cost one 26-byte record
+         * per cell in the encrypted append-only scrollback stream.
+         */
+        auto const uniform = freeze_cost_of_row(LinkPattern::Uniform);
+        auto const stripe = freeze_cost_of_row(LinkPattern::TileColumn);
+
+        g_test_message("attr_stream: uniform row %" G_GSIZE_FORMAT " bytes, "
+                       "one-stripe image row %" G_GSIZE_FORMAT " bytes",
+                       uniform, stripe);
+
+        /* Constant, not proportional to the 500 columns. */
+        g_assert_cmpuint(stripe, <=, 2 * uniform);
+}
+
 
 int
 main(int argc,
@@ -747,6 +788,7 @@ main(int argc,
         g_test_add_func("/vte/image/pool/retire-is-idempotent", test_image_pool_retire_is_idempotent);
 
         g_test_add_func("/vte/ring/attr-stream/rle-trap", test_attr_stream_rle_trap);
+        g_test_add_func("/vte/ring/attr-stream/stripe-is-one-run", test_attr_stream_stripe_is_one_run);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);
