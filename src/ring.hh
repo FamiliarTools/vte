@@ -391,6 +391,25 @@ public:
         inline bool has_images() const noexcept { return m_has_images; }
 
         inline void set_placing_image(vte::image::Image* image) noexcept { m_placing_image = image; }
+        inline auto placing_image() const noexcept { return m_placing_image; }
+
+        /* Stamp the cells of one row of the image being placed with the
+         * reference that names it.
+         *
+         * @image_row is the row's index within the IMAGE, not the screen, so
+         * the cell keeps knowing which piece of the picture it carries after
+         * the row has been scrolled, rewrapped or moved.
+         *
+         * Only cells that already exist are stamped. erase_image_rect()
+         * deliberately does not create cells past the end of a row - a cell
+         * that exists counts toward the row length, and the length is what a
+         * reflow wraps on - so an image over a short row is anchored by the
+         * cells there are.
+         */
+        void stamp_image_row(row_t position,
+                             column_t left,
+                             column_t columns,
+                             uint32_t image_row) noexcept;
 
         inline bool take_images_changed() noexcept {
                 auto const changed = m_images_changed;
