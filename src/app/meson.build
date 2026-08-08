@@ -175,6 +175,10 @@ endif
 if get_option('sixel') and get_option('gtk4')
   sixel_render_cases = [
     'bands',
+    # Same image with a DECGCH spliced in. A command a VT340 does not
+    # implement must not displace the rest of the image, so this shares
+    # bands' golden BY DESIGN: the two must be pixel-identical.
+    'bands-gch',
   ]
 
   foreach case: sixel_render_cases
