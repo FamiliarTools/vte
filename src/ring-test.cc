@@ -774,8 +774,9 @@ test_image_ref_out_of_range_cannot_alias(void)
          * This is reachable: the widget clamps cell metrics only to 1x2
          * (vte.cc, set_font_desc sanity check) and inits them to 1x1, while
          * a max-legal image is VTE_SIXEL_MAX_WIDTH x VTE_SIXEL_MAX_HEIGHT.
-         * The k_min_cell_* floor the static asserts are written against is
-         * not enforced anywhere, so the packing must be total on its own.
+         * The emulated cell (VTE_SIXEL_CELL_*) is what keeps a legal image
+         * inside these fields; the packing is total anyway, so that a bug
+         * elsewhere degrades to the wrong tile rather than the wrong image.
          */
         auto const overflow_col = vte::image::Ref{7, 0, vte::image::k_ref_tile_col_max + 1};
         g_assert_cmpuint(overflow_col.pool_id(), ==, 7);
@@ -793,6 +794,32 @@ test_image_ref_out_of_range_cannot_alias(void)
         g_assert_false(vte::image::Ref::fits(vte::image::k_ref_pool_id_max + 1, 0, 0));
 }
 
+
+static void
+test_image_ref_covers_max_legal_image(void)
+{
+        /* The whole point of expressing sixel geometry in a fixed emulated
+         * cell: the largest image the parser will admit must fit the tile
+         * fields, as a property of the constants rather than a hope about
+         * what font the user picked.
+         */
+        g_assert_cmpint(vte::image::k_max_image_tile_cols, <=,
+                        int(vte::image::k_ref_tile_col_max) + 1);
+        g_assert_cmpint(vte::image::k_max_image_tile_rows, <=,
+                        int(vte::image::k_ref_tile_row_max) + 1);
+
+        /* And the extreme corner really does round-trip. */
+        auto const corner = vte::image::Ref{vte::image::k_ref_pool_id_max,
+                                            uint32_t(vte::image::k_max_image_tile_rows - 1),
+                                            uint32_t(vte::image::k_max_image_tile_cols - 1)};
+        g_assert_true(vte::image::Ref::fits(vte::image::k_ref_pool_id_max,
+                                            vte::image::k_max_image_tile_rows - 1,
+                                            vte::image::k_max_image_tile_cols - 1));
+        g_assert_cmpuint(corner.tile_col(), ==, uint32_t(vte::image::k_max_image_tile_cols - 1));
+        g_assert_cmpuint(corner.tile_row(), ==, uint32_t(vte::image::k_max_image_tile_rows - 1));
+        g_assert_cmpuint(corner.pool_id(), ==, vte::image::k_ref_pool_id_max);
+}
+
 int
 main(int argc,
      char* argv[])
@@ -801,6 +828,7 @@ main(int argc,
 
 #if WITH_SIXEL
         g_test_add_func("/vte/image/ref/roundtrip", test_image_ref_roundtrip);
+        g_test_add_func("/vte/image/ref/covers-max-legal-image", test_image_ref_covers_max_legal_image);
         g_test_add_func("/vte/image/ref/out-of-range-cannot-alias", test_image_ref_out_of_range_cannot_alias);
         g_test_add_func("/vte/image/ref/fields-do-not-alias", test_image_ref_fields_do_not_alias);
         g_test_add_func("/vte/image/ref/zero-is-not-an-image", test_image_ref_zero_is_not_an_image);

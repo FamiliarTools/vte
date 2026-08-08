@@ -135,6 +135,33 @@
 
 #define VTE_SIXEL_ENABLED_DEFAULT false
 
+/* The emulated cell that sixel geometry is expressed in.
+ *
+ * A sixel image's footprint in cells is computed against THIS, not against
+ * the font's cell, so that the same image occupies the same rectangle of the
+ * grid at every font size; the real cell size re-enters only as a draw-time
+ * scale. Two independent reasons, either sufficient:
+ *
+ *   - Senders assume it. A VT340 had a fixed 10x20 pixel cell, and a sixel
+ *     stream carries pixel dimensions with no way to say how many cells it
+ *     wants. Sizing against the font cell makes the same file occupy a
+ *     different number of rows for every user, so nothing downstream can
+ *     lay out around it.
+ *
+ *   - The cell reference has to fit. A cell names its tile position in 9
+ *     bits per axis (see image-ref.hh). The widget clamps its font cell only
+ *     to 1x2 pixels, so at a small font a max-legal image needs far more
+ *     tile columns than that, and the field cannot hold them. Against a
+ *     fixed 10x20 cell the worst case is 205 x 103 tiles, comfortably
+ *     inside the fields, and the bound is a property of the constants rather
+ *     than a hope about fonts.
+ *
+ * 10x20 is the VT340's cell and is also what VTE's maintainer proposed for
+ * this (GNOME/vte#253).
+ */
+#define VTE_SIXEL_CELL_WIDTH (10)
+#define VTE_SIXEL_CELL_HEIGHT (20)
+
 #define VTE_SIXEL_MAX_WIDTH (2048)
 #define VTE_SIXEL_MAX_HEIGHT (2052)
 #define VTE_SIXEL_NUM_COLOR_REGISTERS (1024)
