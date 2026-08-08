@@ -1,5 +1,5 @@
 /*
- * Copyright © 2026 Christian Persch
+ * Copyright © 2026 Guilherme Fontes
  *
  * This library is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published
