@@ -1033,6 +1033,47 @@ test_ring_image_sweep_sees_cell_references(void)
 }
 
 
+
+static void
+test_ring_image_anchor_follows_the_cells(void)
+{
+        /* The whole reason for anchoring images to cells: an operation that
+         * moves TEXT must move the image, without that operation knowing
+         * images exist.
+         */
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        place_image(ring, 5, 3);
+        auto* image = ring.image_map().begin()->second.get();
+        auto const id = image->get_pool_id();
+
+        ring.set_placing_image(image);
+        for (auto r = 0u; r < 3u; r++)
+                ring.stamp_image_row(5 + r, 0, 1, r);
+        ring.set_placing_image(nullptr);
+
+        auto row = Ring::row_t{};
+        auto col = Ring::column_t{};
+        g_assert_true(ring.find_image_anchor(id, &row, &col));
+        g_assert_cmpuint(row, ==, 5);
+        g_assert_cmpuint(col, ==, 0);
+
+        /* Insert a row above it: every row below shifts down by one, and the
+         * anchoring cell goes with them.
+         */
+        ring.insert(5, 0);
+
+        g_assert_true(ring.find_image_anchor(id, &row, &col));
+        g_assert_cmpuint(row, ==, 6);
+
+        /* An id nothing names has no anchor, rather than a wrong one. */
+        auto const unused = ring.image_pool().allocate(nullptr);
+        g_assert_false(ring.find_image_anchor(unused, &row, &col));
+        g_assert_false(ring.find_image_anchor(vte::image::k_ref_pool_id_none, &row, &col));
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1070,6 +1111,8 @@ main(int argc,
 
         g_test_add_func("/vte/ring/image-pool/cells-carry-the-reference", test_ring_image_cells_carry_the_reference);
         g_test_add_func("/vte/ring/image-pool/sweep-sees-cell-references", test_ring_image_sweep_sees_cell_references);
+
+        g_test_add_func("/vte/ring/image-pool/anchor-follows-the-cells", test_ring_image_anchor_follows_the_cells);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

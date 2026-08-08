@@ -10351,8 +10351,35 @@ Terminal::draw(cairo_region_t const* region) noexcept
                          * draw_rows() computes it, or the image drifts against
                          * the text it was drawn between while smooth scrolling.
                          */
-                        auto const x = int(image->get_left() * m_cell_width);
-                        auto const y = int(row_to_pixel(image->get_top()));
+                        /* Position from the CELLS that name this image, not
+                         * from the coordinates the image was placed at.
+                         *
+                         * The cells are moved by everything that moves text -
+                         * scrolling, insertion, deletion, rewrap - so taking
+                         * the position from them is what stops the image and
+                         * the text it was drawn between from drifting apart,
+                         * without any of those operations knowing that images
+                         * exist.
+                         *
+                         * The stored coordinates remain the fallback: an
+                         * image whose anchoring cell has been overwritten,
+                         * or which is no longer in the writable rows, still
+                         * has to be drawn somewhere sensible.
+                         */
+                        auto anchor_row = vte::base::Ring::row_t{};
+                        auto anchor_col = vte::base::Ring::column_t{};
+                        auto const anchored =
+                                ring->find_image_anchor(image->get_pool_id(),
+                                                        &anchor_row,
+                                                        &anchor_col);
+
+                        auto const left_cells = anchored ? long(anchor_col)
+                                                        : long(image->get_left());
+                        auto const image_top = anchored ? long(anchor_row)
+                                                        : long(image->get_top());
+
+                        auto const x = int(left_cells * m_cell_width);
+                        auto const y = int(row_to_pixel(image_top));
                         auto const width = image->get_width_pixels(m_cell_width);
                         auto const height = image->get_height_pixels(m_cell_height);
 
