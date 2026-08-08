@@ -159,6 +159,19 @@
  * 10x20 is the VT340's cell and is also what VTE's maintainer proposed for
  * this (GNOME/vte#253).
  */
+/* What a cell covered by an image contains.
+ *
+ * chpe's own answer to "should a cell be allowed to both have text and an
+ * image": creating an image erases the cells in its area and makes them
+ * contain U+FFFC OBJECT REPLACEMENT CHARACTER, which is not drawn as a
+ * character (vte#253, the "few fundamental questions" note).
+ *
+ * The cell is therefore never empty, which matters: an empty cell is
+ * indistinguishable from one the image never covered, and the ring uses
+ * cell contents to decide what a row still holds.
+ */
+#define VTE_OBJECT_REPLACEMENT_CHARACTER (0xfffcu)
+
 #define VTE_SIXEL_CELL_WIDTH (10)
 #define VTE_SIXEL_CELL_HEIGHT (20)
 

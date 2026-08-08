@@ -6942,7 +6942,15 @@ Terminal::get_text(vte::grid::row_t start_row,
                                         attr.columns = pcell->attr.columns();
 
 					/* Store the cell string */
-					if (pcell->c == 0) {
+					if (pcell->c == 0 || pcell->attr.image()) {
+                                                /* A cell owned by an image contributes no
+                                                 * text. Emitting its U+FFFC would interleave
+                                                 * image junk between the lines of a selection
+                                                 * that merely spans an image - the objection
+                                                 * raised against U+FFFC in vte#253. Treating it
+                                                 * as empty also lets the trailing-blank trimming
+                                                 * below remove it, so an image at the end of a
+                                                 * line leaves no trailing spaces either. */
                                                 /* Empty cells of nondefault background color are
                                                  * stored as NUL characters. Treat them as spaces
                                                  * unless 'preserve_empty' is set,
@@ -9812,6 +9820,12 @@ Terminal::draw_rows(VteScreen *screen_,
                         nhilite = (nhyperlink && cell->attr.hyperlink_idx_or_none() == m_hyperlink_hover_idx) ||
                                   (!nhyperlink && regex_match_has_current() && m_match_span.contains(row, lcol));
                         if (cell->c == 0 ||
+                            /* A cell the image owns draws the image, never a
+                             * glyph. Skipping it here rather than relying on
+                             * the font lacking U+FFFC is what makes that true
+                             * for every font.
+                             */
+                            cell->attr.image() ||
                             ((cell->c == ' ' || cell->c == '\t') &&  // FIXME '\t' is newly added now, double check
                              cell->attr.has_none(VTE_ATTR_UNDERLINE_MASK |
                                                  VTE_ATTR_STRIKETHROUGH_MASK |
