@@ -3503,6 +3503,19 @@ Terminal::insert_char(gunichar c,
 
 		/* And set it */
 		columns = cell->attr.columns();
+
+                /* This branch writes over cells too, so it owes the image choke
+                 * point the same notice the ordinary print below gives it. It
+                 * cannot borrow that one: the cells it writes are neither at the
+                 * cursor's column - it has walked back over the base cell of a
+                 * wide character - nor necessarily on the cursor's row, since a
+                 * mark arriving at column 0 combines onto the row above when that
+                 * row soft wrapped. Both of those can be inside a resident image,
+                 * and going silently past here left the image alive on top of
+                 * cells it no longer owned.
+                 */
+                erase_images_in_rect(row_num, row_num, col, col + columns - 1);
+
 		for (i = 0; i < columns; i++) {
 			cell = _vte_row_data_get_writable (row, col++);
 			cell->c = c;
