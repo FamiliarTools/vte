@@ -219,12 +219,20 @@ Ring::hyperlink_gc()
         /* A few special values not to be garbage collected. */
         SET_BIT(used, m_hyperlink_current_idx);
         SET_BIT(used, m_hyperlink_hover_idx);
-        SET_BIT(used, m_last_attr.hyperlink_idx);
+        SET_BIT(used, m_last_attr.hyperlink_idx());
 
         for (i = m_writable; i < m_end; i++) {
                 row = get_writable_index(i);
                 for (j = 0; j < row->len; j++) {
-                        idx = row->cells[j].attr.hyperlink_idx;
+                        /* An image cell's m_link holds an image reference, not a
+                         * hyperlink index. It indexes nothing in `used`, whose size
+                         * is bounded by m_hyperlink_highest_used_idx, so passing one
+                         * to SET_BIT would be an out-of-bounds heap write.
+                         */
+                        if (row->cells[j].attr.image())
+                                continue;
+
+                        idx = row->cells[j].attr.hyperlink_idx();
                         SET_BIT(used, idx);
                 }
         }
@@ -896,7 +904,7 @@ Ring::freeze_row(row_t position,
 				memset(&attr_change, 0, sizeof (attr_change));
 				attr_change.text_end_offset = m_last_attr_text_start_offset;
                                 _attrcpy(&attr_change.attr, &m_last_attr);
-                                hyperlink = hyperlink_get(m_last_attr.hyperlink_idx);
+                                hyperlink = hyperlink_get(m_last_attr.hyperlink_idx());
                                 attr_change.attr.hyperlink_length = hyperlink->len;
 				_vte_stream_append (m_attr_stream, (char const* ) &attr_change, sizeof (attr_change));
                                 if (G_UNLIKELY (hyperlink->len != 0)) {
@@ -920,7 +928,7 @@ Ring::freeze_row(row_t position,
 				memset(&attr_change, 0, sizeof (attr_change));
 				attr_change.text_end_offset = m_last_attr_text_start_offset;
                                 _attrcpy(&attr_change.attr, &m_last_attr);
-                                hyperlink = hyperlink_get(m_last_attr.hyperlink_idx);
+                                hyperlink = hyperlink_get(m_last_attr.hyperlink_idx());
                                 attr_change.attr.hyperlink_length = hyperlink->len;
 				_vte_stream_append (m_attr_stream, (char const* ) &attr_change, sizeof (attr_change));
                                 if (G_UNLIKELY (hyperlink->len != 0)) {
@@ -1011,7 +1019,7 @@ Ring::thaw_row(row_t position,
 	while (p < end) {
 		if (record.text_start_offset >= m_last_attr_text_start_offset) {
 			attr = m_last_attr;
-                        strcpy(hyperlink_readbuf, hyperlink_get(attr.hyperlink_idx)->str);
+                        strcpy(hyperlink_readbuf, hyperlink_get(attr.hyperlink_idx())->str);
 		} else {
 			if (record.text_start_offset >= attr_change.text_end_offset) {
 				if (!_vte_stream_read (m_attr_stream, record.attr_start_offset, (char *) &attr_change, sizeof (attr_change)))
@@ -1024,18 +1032,18 @@ Ring::thaw_row(row_t position,
                                 record.attr_start_offset += attr_change.attr.hyperlink_length + 2;
 
                                 _attrcpy(&attr, &attr_change.attr);
-                                attr.hyperlink_idx = 0;
+                                attr.set_hyperlink_idx(0);
                                 if (G_UNLIKELY (attr_change.attr.hyperlink_length)) {
                                         if (do_truncate) {
                                                 /* Find the existing idx or allocate a new one, just as when receiving an OSC 8 escape sequence.
                                                  * Do not update the current idx though. */
-                                                attr.hyperlink_idx = get_hyperlink_idx_no_update_current(hyperlink_readbuf);
+                                                attr.set_hyperlink_idx(get_hyperlink_idx_no_update_current(hyperlink_readbuf));
                                         } else {
                                                 /* Use a special hyperlink idx, except if to be underlined because the hyperlink is the same as the hovered cell's. */
-                                                attr.hyperlink_idx = VTE_HYPERLINK_IDX_TARGET_IN_STREAM;
+                                                attr.set_hyperlink_idx(VTE_HYPERLINK_IDX_TARGET_IN_STREAM);
                                                 if (m_hyperlink_hover_idx != 0 && strcmp(hyperlink_readbuf, hyperlink_get(m_hyperlink_hover_idx)->str) == 0) {
                                                         /* FIXME here we're calling the expensive strcmp() above and get_hyperlink_idx_no_update_current() way too many times. */
-                                                        attr.hyperlink_idx = get_hyperlink_idx_no_update_current(hyperlink_readbuf);
+                                                        attr.set_hyperlink_idx(get_hyperlink_idx_no_update_current(hyperlink_readbuf));
                                                 }
                                         }
                                 }
@@ -1109,10 +1117,10 @@ Ring::thaw_row(row_t position,
 			   last_attr_text_start_offset from the last record that we keep. */
 			if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at, (char *) &attr_change, sizeof (attr_change))) {
                                 _attrcpy(&m_last_attr, &attr_change.attr);
-                                m_last_attr.hyperlink_idx = 0;
+                                m_last_attr.set_hyperlink_idx(0);
                                 if (attr_change.attr.hyperlink_length && _vte_stream_read (m_attr_stream, attr_stream_truncate_at + sizeof (attr_change), (char *) &hyperlink_readbuf, attr_change.attr.hyperlink_length)) {
                                         hyperlink_readbuf[attr_change.attr.hyperlink_length] = '\0';
-                                        m_last_attr.hyperlink_idx = get_hyperlink_idx(hyperlink_readbuf);
+                                        m_last_attr.set_hyperlink_idx(get_hyperlink_idx(hyperlink_readbuf));
                                 }
                                 if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - 2, (char *) &hyperlink_length, 2)) {
                                         vte_assert_cmpuint (hyperlink_length, <=, VTE_HYPERLINK_TOTAL_LENGTH_MAX);
@@ -1303,8 +1311,8 @@ Ring::get_hyperlink_at_position(row_t position,
                                 m_hyperlink_hover_idx = 0;
                         return 0;
                 }
-                *hyperlink = hyperlink_get(row->cells[col].attr.hyperlink_idx)->str;
-                idx = row->cells[col].attr.hyperlink_idx;
+                *hyperlink = hyperlink_get(row->cells[col].attr.hyperlink_idx_or_none())->str;
+                idx = row->cells[col].attr.hyperlink_idx_or_none();
         } else {
                 thaw_row(position, &m_cached_row, false, col, hyperlink);
                 /* Note: Intentionally don't set cached_row_num. We're about to update
@@ -1895,7 +1903,7 @@ Ring::rewrap(column_t columns,
 	attr_offset = old_record.attr_start_offset;
 	if (!_vte_stream_read(m_attr_stream, attr_offset, (char *) &attr_change, sizeof (attr_change))) {
                 _attrcpy(&attr_change.attr, &m_last_attr);
-                attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx)->len;
+                attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx())->len;
 		attr_change.text_end_offset = _vte_stream_head(m_text_stream);
 	}
 
@@ -1946,7 +1954,7 @@ Ring::rewrap(column_t columns,
                         attr_offset += sizeof (attr_change) + attr_change.attr.hyperlink_length + 2;
 			if (!_vte_stream_read(m_attr_stream, attr_offset, (char *) &attr_change, sizeof (attr_change))) {
                                 _attrcpy(&attr_change.attr, &m_last_attr);
-                                attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx)->len;
+                                attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx())->len;
 				attr_change.text_end_offset = _vte_stream_head(m_text_stream);
 			}
 		}
@@ -1964,7 +1972,7 @@ Ring::rewrap(column_t columns,
                                 attr_offset += sizeof (attr_change) + attr_change.attr.hyperlink_length + 2;
 				if (!_vte_stream_read(m_attr_stream, attr_offset, (char *) &attr_change, sizeof (attr_change))) {
                                         _attrcpy(&attr_change.attr, &m_last_attr);
-                                        attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx)->len;
+                                        attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx())->len;
 					attr_change.text_end_offset = _vte_stream_head(m_text_stream);
 				}
 			}

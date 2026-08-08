@@ -160,13 +160,28 @@ struct _VTE_GNUC_PACKED VteCellAttr {
         uint64_t m_colors;                     /* fore, back and deco (underline) colour */
 
         /* 12-byte boundary (16-byte boundary in VteCell) */
-        uint32_t hyperlink_idx; /* a unique hyperlink index at a time for the ring's cells,
-                                   0 means not a hyperlink, VTE_HYPERLINK_IDX_TARGET_IN_STREAM
-                                   means the target is irrelevant/unknown at the moment.
-                                   If bitpacking, choose a size big enough to hold a different idx
-                                   for every cell in the ring but not yet in the stream
-                                   (currently the height rounded up to the next power of two, times width)
-                                   for supported VTE sizes, and update VTE_HYPERLINK_IDX_TARGET_IN_STREAM. */
+        uint32_t m_link; /* DISCRIMINATED UNION, tagged by VTE_ATTR_IMAGE in attr:
+                          *
+                          *   image() == false  ->  a hyperlink index:
+                          *        a unique hyperlink index at a time for the ring's cells,
+                          *        0 means not a hyperlink, VTE_HYPERLINK_IDX_TARGET_IN_STREAM
+                          *        means the target is irrelevant/unknown at the moment.
+                          *        If bitpacking, choose a size big enough to hold a different idx
+                          *        for every cell in the ring but not yet in the stream
+                          *        (currently the height rounded up to the next power of two, times width)
+                          *        for supported VTE sizes, and update VTE_HYPERLINK_IDX_TARGET_IN_STREAM.
+                          *
+                          *   image() == true   ->  a packed image reference.
+                          *
+                          * NEVER read this member directly. Go through hyperlink_idx() or
+                          * image_ref_raw(), which assert the tag. The two interpretations share
+                          * no value space: hyperlink_gc() indexes a bitmap sized by the highest
+                          * live hyperlink index using this field, so reading an image reference
+                          * as a hyperlink index is an out-of-bounds write, not a wrong colour.
+                          *
+                          * A raw, untagged read is legitimate only for bit-identity - equality
+                          * comparison and serialisation - and spells itself link_raw().
+                          */
 
         /* Methods */
 
@@ -227,6 +242,62 @@ struct _VTE_GNUC_PACKED VteCellAttr {
         CELL_ATTR_UINT(shellintegration, SHELLINTEGRATION)
         /* ATTR_BOOL(boxed, BOXED) */
 
+        /* The m_link discriminated union.
+         *
+         * The tag is read-only from the outside: it flips only as a side effect of
+         * storing one of the two payloads, so the tag and the payload can never
+         * disagree.
+         */
+
+        inline constexpr bool image() const
+        {
+                return vte_attr_get_bool(attr, VTE_ATTR_IMAGE_SHIFT);
+        }
+
+        inline uint32_t hyperlink_idx() const
+        {
+                g_assert(!image());
+                return m_link;
+        }
+
+        inline void set_hyperlink_idx(uint32_t idx)
+        {
+                vte_attr_set_bool(&attr, VTE_ATTR_IMAGE_MASK, false);
+                m_link = idx;
+        }
+
+        /* For readers that only want "the hyperlink on this cell, if any": an
+         * image cell has none, and answering 0 is both true and in-range. Use
+         * this rather than hyperlink_idx() wherever the cell is arbitrary.
+         */
+        inline uint32_t hyperlink_idx_or_none() const
+        {
+                return image() ? 0 : m_link;
+        }
+
+        inline uint32_t image_ref_raw() const
+        {
+                g_assert(image());
+                return m_link;
+        }
+
+        inline void set_image_ref_raw(uint32_t ref)
+        {
+                vte_attr_set_bool(&attr, VTE_ATTR_IMAGE_MASK, true);
+                m_link = ref;
+        }
+
+        /* Untagged. Only for bit-identity: equality and serialisation. */
+        inline constexpr uint32_t link_raw() const
+        {
+                return m_link;
+        }
+
+        inline constexpr void set_link_raw(uint32_t raw)
+        {
+                m_link = raw;
+        }
+
         inline void reset_sgr_attributes()
         {
                 vte_attr_set_value(&attr, VTE_ATTR_ALL_SGR_MASK, 0 /* shift */, 0 /* value */);
@@ -236,7 +307,7 @@ struct _VTE_GNUC_PACKED VteCellAttr {
 }; // class VteCellAttr
 
 static_assert(sizeof (VteCellAttr) == 16, "VteCellAttr has wrong size");
-static_assert(offsetof (VteCellAttr, hyperlink_idx) == VTE_CELL_ATTR_COMMON_BYTES, "VteCellAttr layout is wrong");
+static_assert(offsetof (VteCellAttr, m_link) == VTE_CELL_ATTR_COMMON_BYTES, "VteCellAttr layout is wrong");
 
 /*
  * VteStreamCellAttr: Variant of VteCellAttr to be stored in attr_stream.
@@ -280,7 +351,7 @@ static const VteCell basic_cell = {
 	{
                 VTE_ATTR_DEFAULT, /* attr */
                 VTE_COLOR_TRIPLE_INIT_DEFAULT, /* colors */
-                0, /* hyperlink_idx */
+                0, /* m_link: hyperlink idx 0, untagged (VTE_ATTR_DEFAULT has no VTE_ATTR_IMAGE) */
 	}
 };
 

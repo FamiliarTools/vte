@@ -106,6 +106,20 @@ enum ShellIntegrationMode {
 #define VTE_ATTR_SHELLINTEGRATION_VALUE_MASK   (VTE_ATTR_VALUE_MASK(VTE_ATTR_SHELLINTEGRATION_BITS))
 #define VTE_ATTR_SHELLINTEGRATION(v)           ((v) << VTE_ATTR_SHELLINTEGRATION_SHIFT)
 
+/* Used internally only.
+ *
+ * Tags VteCellAttr::m_link as holding a packed image reference rather than a
+ * hyperlink index. See the discriminated union in cell.hh.
+ *
+ * Deliberately outside VTE_ATTR_ALL_SGR_MASK: reset_sgr_attributes() must not
+ * be able to strip the tag off a cell whose m_link still holds an image ref,
+ * which would reinterpret those bits as a hyperlink index.
+ */
+#define VTE_ATTR_IMAGE_SHIFT           (VTE_ATTR_SHELLINTEGRATION_SHIFT + VTE_ATTR_SHELLINTEGRATION_BITS)
+#define VTE_ATTR_IMAGE_BITS            (1)
+#define VTE_ATTR_IMAGE_MASK            (VTE_ATTR_MASK(VTE_ATTR_IMAGE_SHIFT, VTE_ATTR_IMAGE_BITS))
+#define VTE_ATTR_IMAGE                 (1U << VTE_ATTR_IMAGE_SHIFT)
+
 /* Used internally only */
 #define VTE_ATTR_BOXED_SHIFT           (31)
 #define VTE_ATTR_BOXED_BITS            (1)
@@ -128,6 +142,19 @@ enum ShellIntegrationMode {
 
 #define VTE_ATTR_NONE                  (0U)
 #define VTE_ATTR_DEFAULT               (VTE_ATTR_COLUMNS(1))
+
+/* The image tag must not overlap anything else, and must survive both an SGR
+ * reset and the BOXED flag. Checked here so that adding a bit to any earlier
+ * field is a build error rather than a silent aliasing of the union tag.
+ */
+static_assert((VTE_ATTR_IMAGE_MASK & VTE_ATTR_ALL_SGR_MASK) == 0,
+              "VTE_ATTR_IMAGE overlaps an SGR attribute");
+static_assert((VTE_ATTR_IMAGE_MASK & VTE_ATTR_BOXED_MASK) == 0,
+              "VTE_ATTR_IMAGE overlaps VTE_ATTR_BOXED");
+static_assert((VTE_ATTR_IMAGE_MASK & (VTE_ATTR_COLUMNS_MASK |
+                                      VTE_ATTR_FRAGMENT_MASK |
+                                      VTE_ATTR_SHELLINTEGRATION_MASK)) == 0,
+              "VTE_ATTR_IMAGE overlaps a non-SGR attribute");
 
 static inline constexpr void vte_attr_set_bool(uint32_t* attr,
                                                uint32_t mask,
