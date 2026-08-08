@@ -334,5 +334,58 @@ DrawingCairo::draw_image(cairo_surface_t* surface,
         cairo_restore(m_cr);
 }
 
+
+void
+DrawingCairo::draw_image_region(cairo_surface_t* surface,
+                                double src_x,
+                                double src_y,
+                                double src_width,
+                                double src_height,
+                                double dst_x,
+                                double dst_y,
+                                double dst_width,
+                                double dst_height) const
+{
+        g_assert(m_cr);
+        g_assert(surface);
+
+        if (src_width <= 0 || src_height <= 0 ||
+            dst_width <= 0 || dst_height <= 0)
+                return;
+
+        auto const surface_width = cairo_image_surface_get_width(surface);
+        auto const surface_height = cairo_image_surface_get_height(surface);
+        if (surface_width <= 0 || surface_height <= 0)
+                return;
+
+        cairo_save(m_cr);
+        cairo_set_operator(m_cr, CAIRO_OPERATOR_OVER);
+
+        /* Clip to the destination first: everything below draws the WHOLE
+         * surface, positioned so that the requested source region lands
+         * inside this rectangle. The clip is what makes it a region draw,
+         * and it also stops the filter sampling neighbouring cells that
+         * belong to other stripes or to the terminal.
+         */
+        cairo_rectangle(m_cr, dst_x, dst_y, dst_width, dst_height);
+        cairo_clip(m_cr);
+
+        auto const scale_x = dst_width / src_width;
+        auto const scale_y = dst_height / src_height;
+
+        cairo_translate(m_cr, dst_x - src_x * scale_x, dst_y - src_y * scale_y);
+        cairo_scale(m_cr, scale_x, scale_y);
+        cairo_set_source_surface(m_cr, surface, 0, 0);
+
+        /* As in draw_image(): clamp rather than let the bilinear filter
+         * sample transparent pixels from beyond the surface.
+         */
+        cairo_pattern_set_extend(cairo_get_source(m_cr), CAIRO_EXTEND_PAD);
+
+        cairo_paint(m_cr);
+
+        cairo_restore(m_cr);
+}
+
 } // namespace view
 } // namespace vte

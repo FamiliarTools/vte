@@ -307,6 +307,57 @@ DrawingGsk::draw_image(GdkTexture* texture,
 }
 
 void
+DrawingGsk::draw_image_region(GdkTexture* texture,
+                              double src_x,
+                              double src_y,
+                              double src_width,
+                              double src_height,
+                              double dst_x,
+                              double dst_y,
+                              double dst_width,
+                              double dst_height) const
+{
+        g_assert(m_snapshot);
+        g_assert(texture);
+
+        if (src_width <= 0 || src_height <= 0 ||
+            dst_width <= 0 || dst_height <= 0)
+                return;
+
+        auto const tex_width = double(gdk_texture_get_width(texture));
+        auto const tex_height = double(gdk_texture_get_height(texture));
+        if (tex_width <= 0 || tex_height <= 0)
+                return;
+
+        _vte_debug_print(vte::debug::category::DRAW,
+                         "draw_image_region (src {},{} {}x{} -> dst {},{} {}x{})",
+                         src_x, src_y, src_width, src_height,
+                         dst_x, dst_y, dst_width, dst_height);
+
+        auto const scale_x = dst_width / src_width;
+        auto const scale_y = dst_height / src_height;
+
+        /* Append the whole texture, positioned so the requested source
+         * region lands in the destination rectangle, and clip to that
+         * rectangle. Keeping it one texture node per stripe-run rather than
+         * slicing the texture means the renderer still samples the original
+         * at its native resolution, and nothing is re-uploaded when the
+         * scale changes.
+         */
+        auto const clip = GRAPHENE_RECT_INIT(float(dst_x), float(dst_y),
+                                             float(dst_width), float(dst_height));
+        gtk_snapshot_push_clip(m_snapshot, &clip);
+
+        auto const bounds = GRAPHENE_RECT_INIT(float(dst_x - src_x * scale_x),
+                                               float(dst_y - src_y * scale_y),
+                                               float(tex_width * scale_x),
+                                               float(tex_height * scale_y));
+        gtk_snapshot_append_texture(m_snapshot, texture, &bounds);
+
+        gtk_snapshot_pop(m_snapshot);
+}
+
+void
 DrawingGsk::begin_background(Rectangle const& rect,
                              size_t columns,
                              size_t rows)

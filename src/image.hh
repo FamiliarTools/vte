@@ -103,6 +103,15 @@ public:
         inline constexpr auto get_height() const noexcept { return (m_height_pixels + m_cell_height - 1) / m_cell_height; }
         inline auto get_bottom() const noexcept { return m_top_cells + get_height() - 1; }
 
+        /* The image's own pixel extent, unscaled.
+         *
+         * Needed by the stripe-run draw, which addresses the image in ITS
+         * pixel grid - the fixed emulated sixel cell - and converts to the
+         * font's cell only when computing the destination.
+         */
+        inline constexpr auto get_width_px() const noexcept { return m_width_pixels; }
+        inline constexpr auto get_height_px() const noexcept { return m_height_pixels; }
+
         /* The image's display size at the given current cell dimensions. The
          * image is stretched so that it keeps covering the same cells as when
          * it was created; m_cell_width/m_cell_height are the cell dimensions
