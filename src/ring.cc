@@ -616,16 +616,78 @@ Ring::erase_images_in_rect(long top,
         if (top > bottom || left > right)
                 return false;
 
-        auto deleted = false;
+        auto damaged = false;
 
+        auto note_damage = [&](vte::image::Image const* image) noexcept {
+                auto const t = long(image->get_top());
+                auto const b = long(image->get_bottom());
+                if (!damaged) {
+                        *damage_top = t;
+                        *damage_bottom = b;
+                        damaged = true;
+                } else {
+                        *damage_top = std::min(*damage_top, t);
+                        *damage_bottom = std::max(*damage_bottom, b);
+                }
+        };
+
+        /* Step 1: the cells inside the rectangle stop belonging to any image.
+         *
+         * This used to delete every image whose bounding box merely touched
+         * the rectangle, because a whole-image blit could not draw an image
+         * that had lost some of its cells - so losing one cell had to mean
+         * losing all of them. The draw walks the cells now, so the honest
+         * thing is possible: the cells written over stop being the image's,
+         * and the rest of the image is untouched.
+         */
+        auto const first = std::max(top, long(m_writable));
+        auto const last = std::min(bottom, long(m_end) - 1);
+
+        for (auto r = first; r <= last; r++) {
+                auto* const row = get_writable_index(r);
+
+                auto const from = std::max(left, long{0});
+                auto const to = std::min(right, long(row->len) - 1);
+
+                for (auto c = from; c <= to; c++) {
+                        auto& cell = row->cells[c];
+                        if (!cell.attr.image())
+                                continue;
+
+                        auto const* image = m_image_pool.lookup(cell.attr.image_ref());
+
+                        /* An image whose own emission burst is still running is
+                         * placing these cells right now; it is not being erased
+                         * by them.
+                         */
+                        if (image != nullptr && image == m_placing_image)
+                                continue;
+
+                        if (image != nullptr)
+                                note_damage(image);
+
+                        /* Clearing the hyperlink index clears the union tag with
+                         * it, so the cell stops naming an image and the draw
+                         * skips it.
+                         */
+                        cell.attr.set_hyperlink_idx(0);
+                        cell.c = 0;
+                        damaged = true;
+                }
+        }
+
+        /* Step 2: free any image that no cell names any more.
+         *
+         * Only images that intersect the rectangle can have lost a cell here,
+         * and each is checked over its OWN rows rather than the whole ring, so
+         * the work is bounded by the image's height and not by the scrollback.
+         */
         for (auto it = m_image_by_top_map.begin();
              it != m_image_by_top_map.end(); ) {
-                auto const image = it->second;
+                auto* const image = it->second;
 
-                /* The keys are the images' top rows, so once past @bottom no
-                 * image left can begin inside the rectangle either. There is no
-                 * such shortcut at the front: an image with a small top row can
-                 * be tall enough to reach into it.
+                /* Keyed by top row: once past @bottom, nothing left begins
+                 * inside the rectangle either.
                  */
                 if (long(image->get_top()) > bottom)
                         break;
@@ -638,19 +700,46 @@ Ring::erase_images_in_rect(long top,
                         continue;
                 }
 
-                if (!deleted) {
-                        *damage_top = long(image->get_top());
-                        *damage_bottom = long(image->get_bottom());
-                        deleted = true;
-                } else {
-                        *damage_top = std::min(*damage_top, long(image->get_top()));
-                        *damage_bottom = std::max(*damage_bottom, long(image->get_bottom()));
+                if (image_has_any_cell(image)) {
+                        ++it;
+                        continue;
                 }
 
+                note_damage(image);
                 it = erase_image(it);
         }
 
-        return deleted;
+        return damaged;
+}
+
+/*
+ * Whether any cell in the writable rows still names @image.
+ *
+ * Scans only the rows the image spans. An image outside the writable window
+ * has no cells to find and is answered by the callers' own residency rules,
+ * not here.
+ */
+bool
+Ring::image_has_any_cell(vte::image::Image const* image) const noexcept
+{
+        auto const id = image->get_pool_id();
+        if (id == vte::image::k_ref_pool_id_none)
+                return false;
+
+        auto const first = std::max(long(image->get_top()), long(m_writable));
+        auto const last = std::min(long(image->get_bottom()), long(m_end) - 1);
+
+        for (auto r = first; r <= last; r++) {
+                auto const* const row = get_writable_index(r);
+                for (auto c = 0; c < row->len; c++) {
+                        auto const& cell = row->cells[c];
+                        if (cell.attr.image() &&
+                            cell.attr.image_ref().pool_id() == id)
+                                return true;
+                }
+        }
+
+        return false;
 }
 
 /*
