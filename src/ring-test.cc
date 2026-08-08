@@ -1450,6 +1450,95 @@ test_ring_image_spill_is_reclaimed(void)
         g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 0);
 }
 
+
+static void
+test_ring_image_limit_is_enforced(void)
+{
+        /* The image memory budget is real API now, not a #define. chpe asked
+         * for it twice: "some API to set the hard resource limit (like we have
+         * the number-of-scrollback-lines API)" (vte#255).
+         *
+         * Each image here is 4 cells wide by 1 tall at 10x20, so 40x20 px,
+         * 3200 bytes. A 20 KiB budget therefore holds a handful and must
+         * evict the rest.
+         */
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        auto const budget = size_t{20 * 1024};
+        ring.set_image_memory_max(budget);
+        g_assert_cmpuint(ring.image_memory_max(), ==, budget);
+
+        /* Different rows: images stacked on the same row replace each other,
+         * so only one would ever be resident and the budget would never bind.
+         */
+        for (auto i = 0; i < 100; i++)
+                place_image(ring, 2 + (i % 20), 1);
+
+        /* Bounded, and actually holding several - a bound that only ever
+         * holds one image is not testing a bound.
+         */
+        g_assert_cmpuint(ring.image_map().size(), >, 1);
+        g_assert_cmpuint(ring.image_memory_used(), <=, budget);
+
+        /* The counter still agrees with what is resident - the budget is only
+         * meaningful if the number it is compared against is true.
+         */
+        auto sum = size_t{0};
+        for (auto const& [priority, image] : ring.image_map())
+                sum += image->resource_size();
+        g_assert_cmpuint(sum, ==, ring.image_memory_used());
+
+        /* The survivors are the NEWEST: eviction takes the oldest first, so
+         * what is on screen now outlives what scrolled past.
+         */
+        auto const newest = ring.image_map().rbegin()->first;
+        for (auto const& [priority, image] : ring.image_map())
+                g_assert_cmpuint(priority, >, newest - ring.image_map().size());
+}
+
+static void
+test_ring_image_limit_zero_disables(void)
+{
+        /* Zero is a meaningful setting, not a degenerate one: it is how a
+         * caller turns images off by resource policy rather than by refusing
+         * to parse them.
+         */
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        ring.set_image_memory_max(0);
+
+        for (auto i = 0; i < 10; i++)
+                place_image(ring, 2 + i, 1);
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+        g_assert_cmpuint(ring.image_memory_used(), ==, 0);
+}
+
+static void
+test_ring_image_limit_shrinks_immediately(void)
+{
+        /* Lowering the budget must take effect at once, not at the next
+         * image: a caller reducing it is reclaiming memory now.
+         */
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        for (auto i = 0; i < 20; i++)
+                place_image(ring, 2 + i, 1);
+
+        /* Several resident, so lowering the budget has something to reclaim. */
+        g_assert_cmpuint(ring.image_map().size(), >, 1);
+        g_assert_cmpuint(ring.image_memory_used(), >, 3200);
+
+        ring.set_image_memory_max(3200);
+        g_assert_cmpuint(ring.image_memory_used(), <=, 3200);
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1499,6 +1588,10 @@ main(int argc,
 
         g_test_add_func("/vte/ring/image/pixels-survive-eviction", test_ring_image_pixels_survive_eviction);
         g_test_add_func("/vte/ring/image/spill-is-reclaimed", test_ring_image_spill_is_reclaimed);
+
+        g_test_add_func("/vte/ring/image/limit-is-enforced", test_ring_image_limit_is_enforced);
+        g_test_add_func("/vte/ring/image/limit-zero-disables", test_ring_image_limit_zero_disables);
+        g_test_add_func("/vte/ring/image/limit-shrinks-immediately", test_ring_image_limit_shrinks_immediately);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

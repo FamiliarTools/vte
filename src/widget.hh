@@ -616,6 +616,8 @@ public:
         bool should_emit_signal(int id) noexcept;
 
         bool set_sixel_enabled(bool enabled) noexcept { return m_terminal->set_sixel_enabled(enabled); }
+        bool set_image_limit(size_t limit) noexcept { return m_terminal->set_image_limit(limit); }
+        size_t image_limit() const noexcept { return m_terminal->image_limit(); }
         bool sixel_enabled() const noexcept { return m_terminal->sixel_enabled(); }
 
         constexpr auto xalign() const noexcept { return m_xalign; }

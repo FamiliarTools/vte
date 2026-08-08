@@ -311,6 +311,7 @@ private:
 private:
         size_t m_next_image_priority{0};
         size_t m_image_fast_memory_used{0};
+        size_t m_image_memory_max{VTE_IMAGE_MEMORY_MAX_DEFAULT};
 
         /* m_image_priority_map stores the Image. key is the priority of the image. */
         using image_map_type = std::map<size_t, std::unique_ptr<vte::image::Image>>;
@@ -459,6 +460,26 @@ public:
          * map from the outside.
          */
         inline auto image_memory_used() const noexcept { return m_image_fast_memory_used; }
+
+        /* The image memory budget, in bytes.
+         *
+         * chpe asked for this to be real API twice (vte#255, vte#2084):
+         * "some API to set the hard resource limit (like we have the
+         * number-of-scrollback-lines API)". Bytes rather than a count is
+         * what the rest of the field uses, and it is the quantity a user
+         * can actually reason about.
+         *
+         * Zero is meaningful and not merely degenerate: it means "no image
+         * memory", which disables images by making every one of them
+         * immediately over budget.
+         */
+        inline auto image_memory_max() const noexcept { return m_image_memory_max; }
+
+        void set_image_memory_max(size_t max) noexcept
+        {
+                m_image_memory_max = max;
+                image_gc();
+        }
 
         /* For tests: how many bytes the attr stream has been appended.
          *
