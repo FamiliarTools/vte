@@ -6862,7 +6862,8 @@ Terminal::get_text(vte::grid::row_t start_row,
                    bool block,
                    bool preserve_empty,
                    GString *string,
-                   VteCharAttrList *attributes)
+                   VteCharAttrList *attributes,
+                   bool image_placeholder)
 {
 	const VteCell *pcell = NULL;
 	struct _VteCharAttributes attr;
@@ -6947,7 +6948,23 @@ Terminal::get_text(vte::grid::row_t start_row,
                                         attr.columns = pcell->attr.columns();
 
 					/* Store the cell string */
-					if (pcell->c == 0 || pcell->attr.image()) {
+                                        if (pcell->attr.image() && image_placeholder) {
+                                                /* Accessibility only. An image is a thing on the
+                                                 * screen, and a reader that is told nothing about
+                                                 * it cannot tell an image from blank space. U+FFFC
+                                                 * OBJECT REPLACEMENT CHARACTER is what marks the
+                                                 * position of an embedded object in text.
+                                                 *
+                                                 * Deliberately NOT done for the clipboard, which
+                                                 * takes the branch below: copying a selection that
+                                                 * merely spans an image must not interleave image
+                                                 * junk between the lines of text.
+                                                 */
+                                                _vte_unistr_append_to_string(VTE_OBJECT_REPLACEMENT_CHARACTER,
+                                                                             string);
+                                                last_nonempty = string->len;
+                                                last_nonemptycol = lcol;
+                                        } else if (pcell->c == 0 || pcell->attr.image()) {
                                                 /* A cell owned by an image contributes no
                                                  * text. Emitting its U+FFFC would interleave
                                                  * image junk between the lines of a selection
@@ -7060,7 +7077,8 @@ Terminal::get_text_displayed_a11y(GString *string,
                         false /* block */,
                         false /* preserve_empty */,
                         string,
-                        attributes);
+                        attributes,
+                        true /* image_placeholder */);
 }
 
 void
