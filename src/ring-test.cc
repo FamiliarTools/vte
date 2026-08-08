@@ -30,6 +30,8 @@
 
 #include "ring.hh"
 #include "vterowdata.hh"
+#include <set>
+
 #include "cell.hh"
 #include "image-ref.hh"
 #include "image-pool.hh"
@@ -860,6 +862,94 @@ test_sixel_right_margin_clip(void)
         }
 }
 
+
+/* The pool wired into the ring: an id's life is the image's life. */
+
+static void
+test_ring_image_pool_allocates(void)
+{
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        g_assert_cmpuint(ring.image_pool().live_count(), ==, 0);
+
+        place_image(ring, 2, 3);
+        place_image(ring, 8, 3);
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 2);
+        g_assert_cmpuint(ring.image_pool().live_count(), ==, 2);
+
+        /* Every resident image has a real id, and the id resolves back to
+         * that same image - which is what a cell holding the id will rely on.
+         */
+        auto seen = std::set<uint32_t>{};
+        for (auto const& [priority, image] : ring.image_map()) {
+                auto const id = image->get_pool_id();
+                g_assert_cmpuint(id, !=, vte::image::k_ref_pool_id_none);
+                g_assert_true(ring.image_pool().lookup(id) == image.get());
+                g_assert_false(seen.contains(id));
+                seen.insert(id);
+        }
+}
+
+static void
+test_ring_image_pool_retires_with_the_image(void)
+{
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        place_image(ring, 2, 3);
+        auto const id = ring.image_map().begin()->second->get_pool_id();
+        g_assert_cmpuint(id, !=, vte::image::k_ref_pool_id_none);
+
+        /* Shrinking drops the rows the image covers, which frees it. */
+        ring.resize(2);
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+
+        /* The id must NOT resolve to the dead image any more... */
+        g_assert_null(ring.image_pool().lookup(id));
+
+        /* ...and must not be free either: it is retired, because a cell may
+         * still name it. Reuse here is what would make a stale cell display
+         * some future image.
+         */
+        g_assert_cmpuint(ring.image_pool().live_count(), ==, 0);
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
+}
+
+static void
+test_ring_image_pool_sweep_reclaims(void)
+{
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        place_image(ring, 2, 3);
+        auto const id = ring.image_map().begin()->second->get_pool_id();
+
+        ring.resize(2);
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
+
+        /* No cell names it - none are stamped yet - so a sweep reclaims it.
+         * The sweep must not touch anything else.
+         */
+        ring.sweep_image_pool_for_test();
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 0);
+
+        /* And a live image keeps its id across a sweep. */
+        auto ring2 = Ring{24, false};
+        ring2.set_visible_rows(24);
+        append_rows(ring2, 24);
+        place_image(ring2, 2, 3);
+        auto const live_id = ring2.image_map().begin()->second->get_pool_id();
+        ring2.sweep_image_pool_for_test();
+        g_assert_true(ring2.image_pool().lookup(live_id) ==
+                      ring2.image_map().begin()->second.get());
+}
+
 int
 main(int argc,
      char* argv[])
@@ -890,6 +980,10 @@ main(int argc,
 
         g_test_add_func("/vte/ring/attr-stream/rle-trap", test_attr_stream_rle_trap);
         g_test_add_func("/vte/ring/attr-stream/stripe-is-one-run", test_attr_stream_stripe_is_one_run);
+
+        g_test_add_func("/vte/ring/image-pool/allocates", test_ring_image_pool_allocates);
+        g_test_add_func("/vte/ring/image-pool/retires-with-the-image", test_ring_image_pool_retires_with_the_image);
+        g_test_add_func("/vte/ring/image-pool/sweep-reclaims", test_ring_image_pool_sweep_reclaims);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);
