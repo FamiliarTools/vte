@@ -45,28 +45,24 @@ namespace vte::image {
  * follows the cells that survived.
  *
  * The coordinate widths are sized against the LARGEST image the parser will
- * admit, divided by the SMALLEST cell it could be laid out in, so that a
- * legal image can never overflow its own coordinates:
+ * admit, divided by the emulated cell that sixel geometry is expressed in:
  *
- *      cols = ceil(VTE_SIXEL_MAX_WIDTH  / min_cell_width)
- *      rows = ceil(VTE_SIXEL_MAX_HEIGHT / min_cell_height)
+ *      cols = ceil(VTE_SIXEL_MAX_WIDTH  / VTE_SIXEL_CELL_WIDTH)
+ *      rows = ceil(VTE_SIXEL_MAX_HEIGHT / VTE_SIXEL_CELL_HEIGHT)
  *
- * At the upstream caps of 2048x2052 and a 4x8 cell that is 512 columns and
- * 257 rows, hence 9 bits each. Those are checked below, so RAISING the caps
- * is a build error.
+ * At 2048x2052 over a 10x20 cell that is 205 columns and 103 rows, both
+ * comfortably inside 9 bits. This is a bound on constants, checked below, so
+ * changing either cap or the emulated cell is a build error rather than a
+ * silent wrap into the pool id - which would alias one image onto another.
  *
- * BUT THAT CHECK IS NOT SUFFICIENT ON ITS OWN, and it is important not to
- * read it as more than it is. k_min_cell_width/height are an ASSUMPTION, not
- * an enforced floor: the widget clamps cell metrics only to 1x2 and inits
- * them to 1x1, so a real layout can be finer than the assumed minimum and a
- * legal image can genuinely need more tile columns than the field holds.
- *
- * The packing is therefore TOTAL: out-of-range values are masked into their
- * own field and cannot carry into a neighbour. Silently truncating a tile
- * coordinate draws the wrong part of the right image; letting it carry into
- * pool_id draws part of a DIFFERENT image, so masking is strictly the less
- * bad of the two failures. Callers that can refuse a placement must ask
- * fits() first, and refuse, rather than relying on either.
+ * This is the reason the emulated cell has to be FIXED and not the font's.
+ * The widget clamps its font cell only to 1x2 pixels; sizing tile
+ * coordinates against that would let a legal image need 2048 columns and
+ * 1026 rows, which needs 11 bits per axis and does not fit. The packing is
+ * total regardless (out-of-range values mask into their own field rather
+ * than carrying), but totality only chooses the less bad corruption -
+ * drawing the wrong part of the right image instead of part of a different
+ * one. The fixed cell is what makes the situation not arise.
  *
  * 14 bits of pool id is 16383 concurrently live images (0 is reserved as the
  * "no image" id so that a zeroed Ref is invalid rather than a reference to
@@ -91,20 +87,24 @@ inline constexpr uint32_t k_ref_tile_col_max = (1u << k_ref_tile_col_bits) - 1u;
 /* The pool id reserved to mean "not an image". */
 inline constexpr uint32_t k_ref_pool_id_none = 0u;
 
-/* The smallest cell the widget will lay out in. A cell smaller than this
- * would let a max-size image need more tile coordinates than a Ref can hold.
+/* The worst-case tile footprint of a legal image, in cells. Derived from the
+ * caps and the emulated cell, so it is a fact about the constants rather than
+ * an assumption about fonts - which is what the previous version of this got
+ * wrong, by asserting against a minimum cell size nothing enforced.
  */
-inline constexpr int k_min_cell_width = 4;
-inline constexpr int k_min_cell_height = 8;
+inline constexpr int k_max_image_tile_cols =
+        (VTE_SIXEL_MAX_WIDTH + VTE_SIXEL_CELL_WIDTH - 1) / VTE_SIXEL_CELL_WIDTH;
+inline constexpr int k_max_image_tile_rows =
+        (VTE_SIXEL_MAX_HEIGHT + VTE_SIXEL_CELL_HEIGHT - 1) / VTE_SIXEL_CELL_HEIGHT;
 
-static_assert((VTE_SIXEL_MAX_WIDTH + k_min_cell_width - 1) / k_min_cell_width
-              <= int(k_ref_tile_col_max) + 1,
-              "VTE_SIXEL_MAX_WIDTH admits more cell columns than a Ref can address; "
-              "widen k_ref_tile_col_bits or lower the cap");
-static_assert((VTE_SIXEL_MAX_HEIGHT + k_min_cell_height - 1) / k_min_cell_height
-              <= int(k_ref_tile_row_max) + 1,
-              "VTE_SIXEL_MAX_HEIGHT admits more cell rows than a Ref can address; "
-              "widen k_ref_tile_row_bits or lower the cap");
+static_assert(k_max_image_tile_cols <= int(k_ref_tile_col_max) + 1,
+              "a legal image admits more tile columns than a Ref can address; "
+              "widen k_ref_tile_col_bits, lower VTE_SIXEL_MAX_WIDTH, or raise "
+              "VTE_SIXEL_CELL_WIDTH");
+static_assert(k_max_image_tile_rows <= int(k_ref_tile_row_max) + 1,
+              "a legal image admits more tile rows than a Ref can address; "
+              "widen k_ref_tile_row_bits, lower VTE_SIXEL_MAX_HEIGHT, or raise "
+              "VTE_SIXEL_CELL_HEIGHT");
 
 class Ref {
 private:

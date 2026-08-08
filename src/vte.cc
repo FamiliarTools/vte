@@ -3748,16 +3748,20 @@ Terminal::insert_image(ProcessingContext& context,
 
         auto const left = m_screen->cursor.col;
         auto const top = m_screen->cursor.row;
-        auto const width = (image_width_px + m_cell_width_unscaled - 1) / m_cell_width_unscaled;
-        auto const height = (image_height_px + m_cell_height_unscaled - 1) / m_cell_height_unscaled;
+        /* Against the fixed emulated cell, NOT the font's: the same image must
+         * occupy the same rectangle of the grid whatever the font size. The
+         * real cell size re-enters at draw time, as a scale.
+         */
+        auto const width = (image_width_px + VTE_SIXEL_CELL_WIDTH - 1) / VTE_SIXEL_CELL_WIDTH;
+        auto const height = (image_height_px + VTE_SIXEL_CELL_HEIGHT - 1) / VTE_SIXEL_CELL_HEIGHT;
 
         m_screen->row_data->append_image(std::move(image_surface),
                                          image_width_px,
                                          image_height_px,
                                          left,
                                          top,
-                                         m_cell_width_unscaled,
-                                         m_cell_height_unscaled);
+                                         VTE_SIXEL_CELL_WIDTH,
+                                         VTE_SIXEL_CELL_HEIGHT);
 
         /* Erase characters under the image. Since this inserts content, we need
          * to update the processing context's bbox.
