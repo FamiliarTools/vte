@@ -86,10 +86,22 @@ def undefined_registers():
     return ''.join(out)
 
 
+def truncated(s):
+    """bands.six cut off partway through, with NO terminator.
+
+    What a dropped connection or `head -c` produces. xterm has rendered the
+    part that arrived since patch #323; discarding it means a user who
+    cats a partially-downloaded image sees nothing rather than the top of
+    it. Cut at 60% so several complete bands have arrived.
+    """
+    return s[:int(len(s) * 0.6)]
+
+
 if __name__ == '__main__':
     b = bands_six()
     open('bands.six', 'w').write(b)
     open('bands-gch.six', 'w').write(splice_gch(b))
     open('bands-margin.six', 'w').write(at_right_margin(b))
     open('undefined-registers.six', 'w').write(undefined_registers())
+    open('bands-truncated.six', 'w').write(truncated(b))
     print('wrote bands.six (%d bytes), bands-gch.six, bands-margin.six' % len(b))

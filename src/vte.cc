@@ -4603,9 +4603,10 @@ void
 Terminal::process_incoming_decsixel(ProcessingContext& context,
                                     vte::base::Chunk& chunk)
 {
+        auto const at_eos = chunk.eos();
         auto const [status, ip] = m_sixel_context->parse(chunk.begin_reading(),
                                                          chunk.end_reading(),
-                                                         chunk.eos());
+                                                         at_eos);
 
         // Update start for data consumed
         chunk.set_begin_reading(ip);
@@ -4644,6 +4645,28 @@ Terminal::process_incoming_decsixel(ProcessingContext& context,
                 break;
 
         case vte::sixel::Parser::ParseStatus::ABORT: try {
+                /* An abort at END OF STREAM is a TRUNCATED image, not a
+                 * cancelled one: the sender was cut off mid-transfer. Show
+                 * what arrived, the way xterm does since patch #323 -
+                 * otherwise `head -c 5000 image.six`, or a connection that
+                 * drops, displays nothing at all rather than the top of the
+                 * picture.
+                 *
+                 * This is deliberately NOT done for the other aborts. CAN,
+                 * SUB and a mid-stream C1 control mean the sender is
+                 * cancelling the sequence, and they arrive as
+                 * ABORT_REWIND_ONE/TWO rather than here; honouring a cancel
+                 * by drawing the thing that was cancelled would be wrong.
+                 * Plain ABORT is only ever produced by the parser's flush(),
+                 * which runs only at end of stream.
+                 */
+                if (at_eos &&
+                    m_sixel_context->id() != vte::sixel::Context::k_termprop_icon_image_id &&
+                    m_sixel_context->image_width() > 0 &&
+                    m_sixel_context->image_height() > 0) {
+                        insert_image(context, m_sixel_context->image_cairo());
+                }
+
                 if (m_sixel_context->id() == vte::sixel::Context::k_termprop_icon_image_id) {
                         auto const info = m_termprops.registry().lookup(VTE_PROPERTY_ID_ICON_IMAGE);
                         assert(info);
