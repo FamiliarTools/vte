@@ -950,6 +950,89 @@ test_ring_image_pool_sweep_reclaims(void)
                       ring2.image_map().begin()->second.get());
 }
 
+
+static void
+test_ring_image_cells_carry_the_reference(void)
+{
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        place_image(ring, 2, 3);
+        auto* image = ring.image_map().begin()->second.get();
+        auto const id = image->get_pool_id();
+
+        /* place_image() only appends the image; stamping is what
+         * erase_image_rect() does, so drive it directly here.
+         */
+        ring.set_placing_image(image);
+        for (auto r = 0u; r < 3u; r++)
+                ring.stamp_image_row(2 + r, 0, 1, r);
+        ring.set_placing_image(nullptr);
+
+        /* Each stamped cell names the image AND its own place in it. */
+        for (auto r = 0u; r < 3u; r++) {
+                auto const* row = ring.index(2 + r);
+                g_assert_nonnull(row);
+                g_assert_cmpint(row->len, >, 0);
+
+                auto const& attr = row->cells[0].attr;
+                g_assert_true(attr.image());
+
+                auto const ref = attr.image_ref();
+                g_assert_cmpuint(ref.pool_id(), ==, id);
+                g_assert_cmpuint(ref.tile_row(), ==, r);
+                g_assert_cmpuint(ref.tile_col(), ==, 0);
+
+                /* And the reference resolves back to the image itself. */
+                g_assert_true(ring.image_pool().lookup(ref) == image);
+        }
+
+        /* Cells of different tile rows are different stripes, cells of the
+         * same row are one stripe - the unit of lifetime.
+         */
+        auto const a = ring.index(2)->cells[0].attr.image_ref();
+        auto const b = ring.index(3)->cells[0].attr.image_ref();
+        g_assert_true(a.same_image(b));
+        g_assert_false(a.same_stripe(b));
+}
+
+static void
+test_ring_image_sweep_sees_cell_references(void)
+{
+        /* The sweep's marking loop is only worth anything if a stamped cell
+         * keeps an id alive by itself.
+         *
+         * Use an id with NO resident image, because sweep_image_pool() also
+         * marks every resident image's id - so with an image still in the map
+         * the cell's contribution would be invisible, and the test would pass
+         * whether or not cells were walked at all.
+         */
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        auto const id = ring.image_pool().allocate(nullptr);
+        g_assert_cmpuint(id, !=, vte::image::k_ref_pool_id_none);
+
+        auto* row = ring.index_writable(2);
+        g_assert_cmpint(row->len, >, 0);
+        row->cells[0].attr.set_image_ref(vte::image::Ref{id, 0, 0});
+
+        ring.image_pool().retire(id);
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
+
+        /* A cell still names it: the sweep must not reclaim it. */
+        ring.sweep_image_pool_for_test();
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
+
+        /* Clear that cell, and nothing names it any more. */
+        row->cells[0].attr.set_hyperlink_idx(0);
+        ring.sweep_image_pool_for_test();
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 0);
+}
+
+
 int
 main(int argc,
      char* argv[])
@@ -984,6 +1067,9 @@ main(int argc,
         g_test_add_func("/vte/ring/image-pool/allocates", test_ring_image_pool_allocates);
         g_test_add_func("/vte/ring/image-pool/retires-with-the-image", test_ring_image_pool_retires_with_the_image);
         g_test_add_func("/vte/ring/image-pool/sweep-reclaims", test_ring_image_pool_sweep_reclaims);
+
+        g_test_add_func("/vte/ring/image-pool/cells-carry-the-reference", test_ring_image_cells_carry_the_reference);
+        g_test_add_func("/vte/ring/image-pool/sweep-sees-cell-references", test_ring_image_sweep_sees_cell_references);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

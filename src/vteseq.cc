@@ -984,6 +984,15 @@ Terminal::erase_image_rect(vte::grid::row_t rows,
                  */
                 erase_characters(columns, true, false);
 
+                /* Anchor the image to the cells it covers. The cells carry
+                 * their position WITHIN THE IMAGE, so they keep naming the
+                 * right piece of it after the row has moved.
+                 */
+                m_screen->row_data->stamp_image_row(row,
+                                                    m_screen->cursor.col,
+                                                    columns,
+                                                    uint32_t(i));
+
                 if (row > m_screen->insert_delta - 1 &&
                     row < m_screen->insert_delta + m_row_count)
                         set_hard_wrapped(row);

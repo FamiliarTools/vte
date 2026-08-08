@@ -326,6 +326,40 @@ Ring::image_gc_region() noexcept
  * reclaim an id, never reclaim one too early.
  */
 void
+Ring::stamp_image_row(row_t position,
+                      column_t left,
+                      column_t columns,
+                      uint32_t image_row) noexcept
+{
+        if (m_placing_image == nullptr)
+                return;
+
+        auto const id = m_placing_image->get_pool_id();
+        if (id == vte::image::k_ref_pool_id_none)
+                return;
+
+        if (position < m_writable || position >= m_end)
+                return;
+
+        auto const row = get_writable_index(position);
+
+        for (auto col = std::max(left, column_t{0}); col < left + columns; col++) {
+                if (col >= row->len)
+                        break;
+
+                auto const tile_col = uint32_t(col - left);
+
+                /* Refuse rather than store a masked reference: a truncated
+                 * tile coordinate draws the wrong part of the image.
+                 */
+                if (!vte::image::Ref::fits(id, image_row, tile_col))
+                        continue;
+
+                row->cells[col].attr.set_image_ref(vte::image::Ref{id, image_row, tile_col});
+        }
+}
+
+void
 Ring::sweep_image_pool() noexcept
 {
         m_image_pool.sweep_begin();
