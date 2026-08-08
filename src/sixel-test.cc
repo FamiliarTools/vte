@@ -1671,6 +1671,43 @@ test_context_repeat_cancelled_by_command(void)
         }
 }
 
+
+static void
+test_context_param_overflow_drops_command(void)
+{
+        /* vte drops a whole command whose parameter count exceeds its
+         * maximum, where DEC would execute it with the parameters it did
+         * collect. Documented as a deviation in sixel-parser.hh; measured
+         * here so the documented maximum is a fact rather than a reading of
+         * the code.
+         */
+
+        /* Within the maximum: DECGRA is honoured, so the raster sets the
+         * image width to 5 even though only one column is drawn.
+         */
+        {
+                auto context = TestContext{};
+                parse_pixels(context, "#1\"1;1;5;1@"sv);
+                assert_image_dimensions(context, 5, 1);
+        }
+
+        /* Eight parameters is the maximum and is still honoured. */
+        {
+                auto context = TestContext{};
+                parse_pixels(context, "#1\"1;1;5;1;0;0;0;0@"sv);
+                assert_image_dimensions(context, 5, 1);
+        }
+
+        /* Nine is over it, so the whole DECGRA is dropped: the raster is
+         * never applied and only the drawn column remains.
+         */
+        {
+                auto context = TestContext{};
+                parse_pixels(context, "#1\"1;1;5;1;0;0;0;0;0@"sv);
+                assert_image_dimensions(context, 1, 1);
+        }
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1693,6 +1730,7 @@ main(int argc,
         g_test_add_func("/vte/sixel/context/raster-attributes", test_context_raster_attributes);
         g_test_add_func("/vte/sixel/context/repeat", test_context_repeat);
         g_test_add_func("/vte/sixel/context/repeat-cancelled-by-command", test_context_repeat_cancelled_by_command);
+        g_test_add_func("/vte/sixel/context/param-overflow-drops-command", test_context_param_overflow_drops_command);
         g_test_add_func("/vte/sixel/context/scanlines/grow", test_context_scanlines_grow);
         g_test_add_func("/vte/sixel/context/scanlines/underfull", test_context_scanlines_underfull);
         g_test_add_func("/vte/sixel/context/scanlines/max-width", test_context_scanlines_max_width);
