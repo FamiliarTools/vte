@@ -325,6 +325,36 @@ Ring::image_gc_region() noexcept
  * exists, this is conservative in the safe direction - it can only fail to
  * reclaim an id, never reclaim one too early.
  */
+bool
+Ring::find_image_anchor(uint32_t pool_id,
+                        row_t* out_row,
+                        column_t* out_col) const noexcept
+{
+        if (pool_id == vte::image::k_ref_pool_id_none)
+                return false;
+
+        for (auto i = m_writable; i < m_end; i++) {
+                auto const row = get_writable_index(i);
+                for (auto j = 0; j < row->len; j++) {
+                        auto const& attr = row->cells[j].attr;
+                        if (!attr.image())
+                                continue;
+
+                        auto const ref = attr.image_ref();
+                        if (ref.pool_id() != pool_id)
+                                continue;
+                        if (ref.tile_row() != 0 || ref.tile_col() != 0)
+                                continue;
+
+                        *out_row = i;
+                        *out_col = j;
+                        return true;
+                }
+        }
+
+        return false;
+}
+
 void
 Ring::stamp_image_row(row_t position,
                       column_t left,

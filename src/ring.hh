@@ -406,6 +406,23 @@ public:
          * reflow wraps on - so an image over a short row is anchored by the
          * cells there are.
          */
+        /* Where an image actually sits, according to the cells that name it.
+         *
+         * Returns the screen position of the image's top-left tile, found by
+         * looking for the cell holding Ref{id, 0, 0}. Answers false when no
+         * such cell is present in the writable rows - the image may be
+         * entirely in the scrollback, or its anchoring cell may have been
+         * overwritten.
+         *
+         * This is the point of anchoring images to cells: the cells are moved
+         * by every operation that moves text - scrolling, insertion,
+         * deletion, rewrap - without any of those operations having to know
+         * that images exist.
+         */
+        bool find_image_anchor(uint32_t pool_id,
+                               row_t* out_row,
+                               column_t* out_col) const noexcept;
+
         void stamp_image_row(row_t position,
                              column_t left,
                              column_t columns,
