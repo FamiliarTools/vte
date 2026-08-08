@@ -178,9 +178,16 @@ public:
  * * 3/10 ':' is reserved for future use as subparameter separator analogous to
  *   the main parser; any parameter sequences including ':' will be ignored.
  *
- * * When the number of parameter exceeds the maximum (16), DEC executes the function
- *   with these parameters, ignoring the excessive parameters; vte ignores the
- *   whole function instead.
+ * * When the number of parameters exceeds the maximum, DEC executes the function
+ *   with the parameters it did collect, ignoring the excessive ones; vte ignores
+ *   the whole function instead.
+ *
+ *   Note the maxima differ as well as the behaviour: DEC's is 16, vte's is
+ *   VTE_SIXEL_PARSER_ARG_MAX, which is 8. A sequence with nine parameters is
+ *   therefore dropped entirely here and executed with the first sixteen - that
+ *   is, all nine - on a real terminal. No sixel command defined by the standard
+ *   takes more than five, so this is reachable only from streams that are
+ *   already malformed.
  */
 
 class Parser {
