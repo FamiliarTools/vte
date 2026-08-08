@@ -314,6 +314,8 @@ Context::prepare(int id,
         if (private_color_registers)
                 reset_colors();
 
+        m_bg_transparent = bg_transparent;
+
         if (bg_transparent)
                 m_colors[0] = 0u; /* fully transparent */
         else

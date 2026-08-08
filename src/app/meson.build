@@ -189,6 +189,10 @@ if get_option('sixel') and get_option('gtk4')
     # than below it. The two cases must NOT render alike.
     'cursor-right-on',
     'cursor-right-off',
+    # An oversized DECGRA raster. Transparent (P2=1) must occupy only the
+    # rows its data needs; opaque must honour the declared raster.
+    'raster-transparent',
+    'raster-opaque',
   ]
 
   test(

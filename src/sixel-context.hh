@@ -89,20 +89,39 @@ private:
         unsigned m_width{0};
         unsigned m_height{0};
 
+        /* Whether colour 0 is fully transparent, i.e. P2=1. */
+        bool m_bg_transparent{false};
+
 public:
 
         constexpr auto max_width()  const noexcept { return k_max_width;  }
         constexpr auto max_height() const noexcept { return k_max_height; }
         constexpr auto num_colors() const noexcept { return k_num_colors;  }
 
+        /* The image's extent.
+         *
+         * DECGRA's raster dimensions declare an area to be FILLED with colour
+         * 0. When colour 0 is opaque that area is real - it is painted, and
+         * the image genuinely occupies it, so a raster larger than the data
+         * wins.
+         *
+         * When P2=1 makes colour 0 fully transparent, nothing is painted
+         * there. Honouring the raster then makes an image that declares
+         * "1;1;1000;1000" and sends twenty rows of data occupy a thousand
+         * pixels of rows - erasing the cells under them and pushing the
+         * cursor far down the screen - to display nothing at all. So the
+         * extent is the extent of the DATA.
+         *
+         * DEC STD 070 7.2 / 8.1.2; foot trims the same case.
+         */
         constexpr auto image_width() const noexcept
         {
-                return std::max(m_width, m_raster_width);
+                return m_bg_transparent ? m_width : std::max(m_width, m_raster_width);
         }
 
         constexpr auto image_height() const noexcept
         {
-                return std::max(m_height, m_raster_height);
+                return m_bg_transparent ? m_height : std::max(m_height, m_raster_height);
         }
 
 private:
