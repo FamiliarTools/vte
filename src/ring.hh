@@ -336,6 +336,17 @@ public:
          */
         inline auto image_memory_used() const noexcept { return m_image_fast_memory_used; }
 
+        /* For tests: how many bytes the attr stream has been appended.
+         *
+         * freeze_row() run-length-codes attributes by memcmp over the WHOLE
+         * VteCellAttr, so this is the only way to observe from the outside
+         * that a per-cell-varying field has destroyed the coding.
+         */
+        inline auto attr_stream_head() const noexcept
+        {
+                return m_attr_stream ? _vte_stream_head(m_attr_stream) : 0;
+        }
+
         /* Whether any image is resident. This is the guard the callers put in
          * front of every image rule, so that a ring holding no image - which is
          * very nearly always - pays one predicted branch on a cache line it is

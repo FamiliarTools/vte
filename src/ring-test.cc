@@ -652,6 +652,75 @@ test_image_pool_retire_is_idempotent(void)
         g_assert_true(pool.lookup(id2) == &c);
 }
 
+
+/* The attr_stream run-length trap.
+ *
+ * freeze_row() decides whether to emit a new CellAttrChange record with
+ *
+ *      memcmp(&m_last_attr, &attr, sizeof (VteCellAttr))
+ *
+ * which is all 16 bytes of VteCellAttr - including m_link - while _attrcpy()
+ * persists only VTE_CELL_ATTR_COMMON_BYTES, which is 12 and excludes it.
+ *
+ * So a field that VARIES PER CELL destroys the run-length coding of the attr
+ * stream even though it is never written to that stream. This is the single
+ * constraint that governs how image references may be encoded on the wire,
+ * and it is invisible in the code: nothing near either line mentions the
+ * other. Measure it rather than trusting it.
+ */
+
+static size_t
+freeze_cost_of_row(bool vary_link)
+{
+        /* A ring WITH streams: freezing is the whole point here. */
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+
+        auto const columns = size_t{500};
+
+        auto const before = ring.attr_stream_head();
+
+        auto const row = ring.append(0);
+        for (size_t i = 0; i < columns; i++) {
+                auto cell = basic_cell;
+                cell.c = 'x';
+                if (vary_link) {
+                        /* What an image row looks like: same image, same tile
+                         * row, one tile column per cell.
+                         */
+                        cell.attr.set_image_ref(vte::image::Ref{1, 0, uint32_t(i)});
+                }
+                _vte_row_data_append(row, &cell);
+        }
+
+        /* Push it out of the writable window so it is frozen. */
+        append_rows(ring, 64);
+
+        return ring.attr_stream_head() - before;
+}
+
+static void
+test_attr_stream_rle_trap(void)
+{
+        auto const uniform = freeze_cost_of_row(false);
+        auto const varying = freeze_cost_of_row(true);
+
+        g_test_message("attr_stream: uniform row %" G_GSIZE_FORMAT " bytes, "
+                       "per-cell-varying row %" G_GSIZE_FORMAT " bytes",
+                       uniform, varying);
+
+        /* A row of identical attributes costs a small constant: the coding
+         * works. If this ever grows to be proportional to the row, the
+         * measurement below is meaningless and this test is the canary.
+         */
+        g_assert_cmpuint(uniform, <, 200);
+
+        /* A row whose cells differ only in m_link - a field that is NOT
+         * serialised - costs one record per cell anyway. This is the trap.
+         */
+        g_assert_cmpuint(varying, >, 10 * uniform);
+}
+
 int
 main(int argc,
      char* argv[])
@@ -676,6 +745,8 @@ main(int argc,
         g_test_add_func("/vte/image/pool/sweep-end-without-begin", test_image_pool_sweep_end_without_begin);
         g_test_add_func("/vte/image/pool/exhaustion", test_image_pool_exhaustion);
         g_test_add_func("/vte/image/pool/retire-is-idempotent", test_image_pool_retire_is_idempotent);
+
+        g_test_add_func("/vte/ring/attr-stream/rle-trap", test_attr_stream_rle_trap);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);
