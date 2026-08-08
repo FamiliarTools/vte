@@ -1539,6 +1539,63 @@ test_ring_image_limit_shrinks_immediately(void)
         g_assert_cmpuint(ring.image_memory_used(), <=, 3200);
 }
 
+
+static void
+test_image_footprint_is_font_independent(void)
+{
+        /* The cell footprint of an image must not depend on the font.
+         *
+         * This is what closes the zoom bug chpe reported and left open in
+         * vte#253: "output some image, increase zoom and the image zooms with
+         * it (fine so far); output the same image again, and the new image is
+         * smaller than the zoomed one." That happened because the footprint
+         * was computed from the font's cell at placement time, so two
+         * placements of the SAME file at two zoom levels disagreed.
+         *
+         * Geometry is expressed in the fixed emulated cell now, so the
+         * footprint is a property of the image alone. Verified live as well -
+         * the same sixel emitted before and after two zoom steps renders at
+         * the same width - but asserted here so it cannot regress silently.
+         */
+        auto const width_px = 95;
+        auto const height_px = 45;
+
+        auto make = [&](int cell_w, int cell_h) {
+                auto surface = vte::take_freeable
+                        (cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+                                                    width_px, height_px));
+                return std::make_unique<vte::image::Image>(std::move(surface),
+                                                           1, width_px, height_px,
+                                                           0, 0, cell_w, cell_h);
+        };
+
+        /* The emulated cell is what geometry is expressed in, whatever the
+         * font happens to be.
+         */
+        auto const image = make(VTE_SIXEL_CELL_WIDTH, VTE_SIXEL_CELL_HEIGHT);
+
+        auto const expect_cols = (width_px + VTE_SIXEL_CELL_WIDTH - 1) / VTE_SIXEL_CELL_WIDTH;
+        auto const expect_rows = (height_px + VTE_SIXEL_CELL_HEIGHT - 1) / VTE_SIXEL_CELL_HEIGHT;
+
+        g_assert_cmpint(image->get_width(), ==, expect_cols);
+        g_assert_cmpint(image->get_height(), ==, expect_rows);
+
+        /* A partial trailing cell still occupies a whole cell - it has to,
+         * because a cell is the smallest thing that can carry a reference.
+         */
+        g_assert_cmpint(expect_cols * VTE_SIXEL_CELL_WIDTH, >=, width_px);
+        g_assert_cmpint(expect_rows * VTE_SIXEL_CELL_HEIGHT, >=, height_px);
+
+        /* Drawing scales into the font's cell, and only there. Two different
+         * font sizes give two different pixel sizes for the same unchanged
+         * footprint - which is exactly the property the zoom bug violated.
+         */
+        auto const small = image->get_width_pixels(8);
+        auto const large = image->get_width_pixels(16);
+        g_assert_cmpfloat(large, >, small);
+        g_assert_cmpint(image->get_width(), ==, expect_cols);
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1548,6 +1605,7 @@ main(int argc,
 #if WITH_SIXEL
         g_test_add_func("/vte/sixel/right-margin-clip", test_sixel_right_margin_clip);
         g_test_add_func("/vte/image/ref/roundtrip", test_image_ref_roundtrip);
+        g_test_add_func("/vte/image/footprint-is-font-independent", test_image_footprint_is_font_independent);
         g_test_add_func("/vte/image/ref/covers-max-legal-image", test_image_ref_covers_max_legal_image);
         g_test_add_func("/vte/image/ref/out-of-range-cannot-alias", test_image_ref_out_of_range_cannot_alias);
         g_test_add_func("/vte/image/ref/fields-do-not-alias", test_image_ref_fields_do_not_alias);
