@@ -194,4 +194,28 @@ public:
 
 static_assert(sizeof(Ref) == sizeof(uint32_t), "vte::image::Ref must be 32 bits wide");
 
+/* How much of an image, in pixels, may be printed when it starts at column
+ * `left` of a screen `columns` wide.
+ *
+ * DEC STD 070 11.2.2: "Sixels defined to be printed past the right margin are
+ * not printed." Zero means the image cannot be placed at all.
+ *
+ * Pulled out as a pure function because three separate things have to agree
+ * about it - the stored surface, the cell footprint, and the run of cells
+ * erased underneath - and they are computed in different places. When they
+ * disagree, the draw and the lifetime rules act on different rectangles.
+ */
+inline constexpr long clipped_width_px(long image_width_px,
+                                       long left,
+                                       long columns,
+                                       long cell_width) noexcept
+{
+        auto const available = columns - left;
+        if (available <= 0 || image_width_px <= 0 || cell_width <= 0)
+                return 0;
+
+        auto const max_px = available * cell_width;
+        return image_width_px < max_px ? image_width_px : max_px;
+}
+
 } // namespace vte::image

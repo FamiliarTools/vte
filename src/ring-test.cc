@@ -820,6 +820,46 @@ test_image_ref_covers_max_legal_image(void)
         g_assert_cmpuint(corner.pool_id(), ==, vte::image::k_ref_pool_id_max);
 }
 
+
+static void
+test_sixel_right_margin_clip(void)
+{
+        auto const cell = long(VTE_SIXEL_CELL_WIDTH);
+        auto const columns = 80L;
+
+        /* Wholly inside the screen: untouched. */
+        g_assert_cmpint(vte::image::clipped_width_px(96, 0, columns, cell), ==, 96);
+        g_assert_cmpint(vte::image::clipped_width_px(96, 60, columns, cell), ==, 96);
+
+        /* Overhanging: truncated to the columns that exist, and to a whole
+         * number of them - a partial trailing column has no cell to live in.
+         */
+        g_assert_cmpint(vte::image::clipped_width_px(96, 75, columns, cell), ==, 50);
+        g_assert_cmpint(vte::image::clipped_width_px(96, 79, columns, cell), ==, 10);
+
+        /* Exactly flush with the margin. */
+        g_assert_cmpint(vte::image::clipped_width_px(100, 70, columns, cell), ==, 100);
+
+        /* No room at all, and past the end: refused rather than clamped to
+         * something that would erase cells it does not cover.
+         */
+        g_assert_cmpint(vte::image::clipped_width_px(96, 80, columns, cell), ==, 0);
+        g_assert_cmpint(vte::image::clipped_width_px(96, 81, columns, cell), ==, 0);
+
+        /* Degenerate inputs answer zero rather than something negative that
+         * would later be used as a length.
+         */
+        g_assert_cmpint(vte::image::clipped_width_px(0, 0, columns, cell), ==, 0);
+        g_assert_cmpint(vte::image::clipped_width_px(96, 0, columns, 0), ==, 0);
+
+        /* The clipped width always fits the columns that remain. */
+        for (long left = 0; left < columns; left++) {
+                auto const w = vte::image::clipped_width_px(4096, left, columns, cell);
+                g_assert_cmpint(w, <=, (columns - left) * cell);
+                g_assert_cmpint(w % cell, ==, 0);
+        }
+}
+
 int
 main(int argc,
      char* argv[])
@@ -827,6 +867,7 @@ main(int argc,
         g_test_init(&argc, &argv, nullptr);
 
 #if WITH_SIXEL
+        g_test_add_func("/vte/sixel/right-margin-clip", test_sixel_right_margin_clip);
         g_test_add_func("/vte/image/ref/roundtrip", test_image_ref_roundtrip);
         g_test_add_func("/vte/image/ref/covers-max-legal-image", test_image_ref_covers_max_legal_image);
         g_test_add_func("/vte/image/ref/out-of-range-cannot-alias", test_image_ref_out_of_range_cannot_alias);

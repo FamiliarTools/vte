@@ -179,6 +179,9 @@ if get_option('sixel') and get_option('gtk4')
     # implement must not displace the rest of the image, so this shares
     # bands' golden BY DESIGN: the two must be pixel-identical.
     'bands-gch',
+    # Emitted so it overhangs the right margin. DEC STD 070 11.2.2: sixels
+    # past the right margin are not printed.
+    'bands-margin',
   ]
 
   foreach case: sixel_render_cases
