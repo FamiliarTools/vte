@@ -306,6 +306,7 @@ private:
         image_by_top_map_type::iterator erase_image(image_by_top_map_type::iterator it) noexcept;
         void drop_images_before(row_t row) noexcept;
         void drop_images_after(row_t row) noexcept;
+        void drop_images_torn_by_rewrap(column_t columns) noexcept;
         void rewrap_images_in_range(image_by_top_map_type::iterator& it,
                                     size_t text_start_ofs,
                                     size_t text_end_ofs,

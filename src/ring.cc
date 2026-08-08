@@ -396,6 +396,79 @@ Ring::drop_images_after(row_t row) noexcept
         }
 }
 
+void
+Ring::drop_images_torn_by_rewrap(column_t columns) noexcept
+{
+        /* Free every image whose rows a reflow to @columns is about to take apart.
+         *
+         * An image is a rectangle of PHYSICAL rows, and a reflow is precisely an
+         * operation that changes how many physical rows a paragraph takes up.
+         * rewrap_images_in_range() re-anchors an image's TOP row and leaves its
+         * height alone, which is right only if the rows below the top come out of
+         * the reflow the same way the top does. When they do not, the image goes on
+         * claiming rows that now hold something else, and since text is painted over
+         * images, whatever reflowed into them is drawn across the picture.
+         *
+         * A covered row comes through untouched when it is a paragraph of its own
+         * that already fits: hard wrapped, so nothing below is joined onto it, and no
+         * wider than @columns, so it is not split in two. Then the reflow copies it
+         * across as exactly one row and the whole rectangle merely shifts, which is
+         * what re-anchoring the top expresses.
+         *
+         * The row ABOVE the top is held to the same rule, because a paragraph that
+         * continues into the image's first row rewrites that row just as thoroughly.
+         * Placing an image tears that boundary apart, but nothing stops later text
+         * from soft wrapping across it again.
+         *
+         * Anything else, the image is deleted - the same delete-on-tear rule the ring
+         * already applies to an insert or a remove whose seam runs through an image.
+         * The alternative is not "keep the image": it is keeping an image that no
+         * longer lines up with the text it was emitted next to, which is what the
+         * code did before and which looked like corruption. Honestly gone beats
+         * silently wrong. It does mean an image sharing a row with text too wide for
+         * the new width is lost, and lost for good, since widening again cannot bring
+         * back pixels nobody kept.
+         *
+         * Must run after the freeze, so that every row has a record to read, and
+         * before the by-top map is walked to re-anchor the survivors.
+         */
+        for (auto it = m_image_by_top_map.begin();
+             it != m_image_by_top_map.end(); ) {
+                auto const image = it->second;
+                auto const top = long(image->get_top());
+                auto const bottom = long(image->get_bottom());
+                auto record = RowRecord{};
+                auto survives = true;
+
+                if (top > long(m_start) &&
+                    (!read_row_record(&record, row_t(top - 1)) ||
+                     record.soft_wrapped))
+                        survives = false;
+
+                for (auto row = top; survives && row <= bottom; ++row) {
+                        /* A row outside the ring has no record to judge it by, and
+                         * the image has already lost it in any case.
+                         */
+                        if (row < long(m_start) || row >= long(m_end) ||
+                            !read_row_record(&record, row_t(row)) ||
+                            record.soft_wrapped ||
+                            column_t(record.width) > columns)
+                                survives = false;
+                }
+
+                if (survives) {
+                        ++it;
+                        continue;
+                }
+
+                _vte_debug_print(vte::debug::category::RING,
+                                 "Dropping image at rows {}..{}: its rows do not survive a rewrap to {} columns",
+                                 top, bottom, columns);
+
+                it = erase_image(it);
+        }
+}
+
 /*
  * Ring::erase_images_in_rect:
  * @top, @bottom, @left, @right: an inclusive rectangle in ring coordinates
@@ -1769,9 +1842,6 @@ Ring::rewrap(column_t columns,
 	gsize paragraph_len;  /* excluding trailing '\n' */
 	gsize attr_offset;
 	gsize old_ring_end;
-#if WITH_SIXEL
-	auto image_it = m_image_by_top_map.begin();
-#endif
 
 	if (G_UNLIKELY(length() == 0))
 		return;
@@ -1784,6 +1854,15 @@ Ring::rewrap(column_t columns,
 	   duplicate the code for frozen and thawed rows. */
 	while (m_writable < m_end)
 		freeze_one_row();
+
+#if WITH_SIXEL
+	/* Take back the images the reflow is about to tear apart before anything is
+	   re-anchored, so that the walk below only ever sees survivors. Reads the row
+	   records, so it cannot run any earlier than this. */
+	drop_images_torn_by_rewrap(columns);
+
+	auto image_it = m_image_by_top_map.begin();
+#endif
 
 	/* For markers given as (row,col) pairs find their offsets in the text stream.
 	   This code requires that the rows are already frozen. */
