@@ -144,9 +144,20 @@ private:
          * than failing. Anything added to the record's variable tail goes
          * here and nowhere else.
          */
-        static inline constexpr gsize attr_record_stride(gsize hyperlink_length) noexcept
+        static inline constexpr gsize attr_record_stride(gsize hyperlink_length,
+                                                        bool has_image = false) noexcept
         {
-                return sizeof(CellAttrChange) + hyperlink_length + 2;
+                return sizeof(CellAttrChange) + hyperlink_length + 2 +
+                        (has_image ? sizeof(uint32_t) : 0);
+        }
+
+        /* Whether a record read back from the stream carries an image
+         * reference. The tag lives in the attr word, which IS persisted, so
+         * the reader can tell without any out-of-band state.
+         */
+        static inline constexpr bool record_has_image(CellAttrChange const& c) noexcept
+        {
+                return !!(c.attr.attr & VTE_ATTR_IMAGE_MASK);
         }
 
         typedef struct _RowRecord {
