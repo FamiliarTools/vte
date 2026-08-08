@@ -95,7 +95,12 @@ public:
 
 private:
 
-        color_t m_colors[2 + k_num_colors];
+        /* m_colors[0] is the background fill, m_colors[1] the current pen;
+         * the addressable colour registers start after them.
+         */
+        static inline constexpr unsigned k_color_register_offset = 2;
+
+        color_t m_colors[k_color_register_offset + k_num_colors];
 
         color_index_t m_current_color{0};
 
@@ -648,9 +653,6 @@ public:
 
         void prepare(int id,
                      uint32_t introducer,
-                     unsigned fg_red,
-                     unsigned fg_green,
-                     unsigned fg_blue,
                      unsigned bg_red,
                      unsigned bg_green,
                      unsigned bg_blue,
