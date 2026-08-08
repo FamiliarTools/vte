@@ -1623,6 +1623,47 @@ public:
         std::optional<std::vector<char32_t>> process_word_char_exceptions(std::string_view str) const noexcept;
 
         long get_cell_height() { ensure_font(); return m_cell_height; }
+
+#if WITH_SIXEL
+        /* The cell that image geometry is expressed in.
+         *
+         * THE ONLY PRODUCER of an image layout cell. Every footprint, every
+         * tile coordinate and every draw-time source rectangle is derived from
+         * this pair, so the floor below is a real runtime guarantee rather
+         * than a comment - which is what an earlier version of this design got
+         * wrong, asserting against a minimum that was applied nowhere.
+         *
+         * Two properties, and they are in tension, so both are deliberate:
+         *
+         *  - It follows the FONT, so an image renders at the scale the
+         *    application was told to expect. CSI 14t and TIOCGWINSZ report the
+         *    unscaled font cell, so that is the one used here: "1:1 with what
+         *    the application was told" is the property that matters, not 1:1
+         *    with some other notion of a pixel.
+         *
+         *  - It is computed ONCE and never recomputed. A footprint is written
+         *    into cells and into the frozen attr stream, where it is
+         *    immutable, so a layout cell that changed under a font change
+         *    would silently rescale every image already placed. Locking it
+         *    also keeps GNOME/vte#253 closed: after a zoom, old and new images
+         *    scale together rather than the new one arriving smaller.
+         */
+        std::pair<int, int> image_cell_size()
+        {
+                if (m_image_cell_width == 0) {
+                        ensure_font();
+                        m_image_cell_width = std::max(long(VTE_SIXEL_CELL_MIN_WIDTH),
+                                                      m_cell_width_unscaled);
+                        m_image_cell_height = std::max(long(VTE_SIXEL_CELL_MIN_HEIGHT),
+                                                       m_cell_height_unscaled);
+                }
+
+                return {int(m_image_cell_width), int(m_image_cell_height)};
+        }
+
+        long m_image_cell_width{0};
+        long m_image_cell_height{0};
+#endif /* WITH_SIXEL */
         long get_cell_width()  { ensure_font(); return m_cell_width;  }
 
         vte::color::rgb const* get_color(int entry) const;

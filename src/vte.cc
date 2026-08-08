@@ -3763,11 +3763,16 @@ Terminal::insert_image(ProcessingContext& context,
          * It is also a precondition for cell-anchored storage: a tile column
          * past the right margin has no cell to live in.
          */
+        /* The cell image geometry is expressed in: the font's, floored, and
+         * locked for the session. See Terminal::image_cell_size().
+         */
+        auto const [image_cell_w, image_cell_h] = image_cell_size();
+
         auto const clipped_width_px =
                 vte::image::clipped_width_px(image_width_px,
                                              long(left),
                                              long(m_column_count),
-                                             VTE_SIXEL_CELL_WIDTH);
+                                             image_cell_w);
         if (clipped_width_px <= 0)
                 return;
 
@@ -3797,16 +3802,16 @@ Terminal::insert_image(ProcessingContext& context,
          * occupy the same rectangle of the grid whatever the font size. The
          * real cell size re-enters at draw time, as a scale.
          */
-        auto const width = (clipped_width_px + VTE_SIXEL_CELL_WIDTH - 1) / VTE_SIXEL_CELL_WIDTH;
-        auto const height = (image_height_px + VTE_SIXEL_CELL_HEIGHT - 1) / VTE_SIXEL_CELL_HEIGHT;
+        auto const width = (clipped_width_px + image_cell_w - 1) / image_cell_w;
+        auto const height = (image_height_px + image_cell_h - 1) / image_cell_h;
 
         m_screen->row_data->append_image(std::move(image_surface),
                                          clipped_width_px,
                                          image_height_px,
                                          left,
                                          top,
-                                         VTE_SIXEL_CELL_WIDTH,
-                                         VTE_SIXEL_CELL_HEIGHT);
+                                         image_cell_w,
+                                         image_cell_h);
 
         /* Erase characters under the image. Since this inserts content, we need
          * to update the processing context's bbox.
@@ -10404,8 +10409,15 @@ Terminal::draw(cairo_region_t const* region) noexcept
                                  * image's grid is the FIXED emulated sixel cell,
                                  * which is why this does not use m_cell_*.
                                  */
-                                auto const src_x = double(ref.tile_col()) * VTE_SIXEL_CELL_WIDTH;
-                                auto const src_y = double(ref.tile_row()) * VTE_SIXEL_CELL_HEIGHT;
+                                /* The image's OWN layout cell: an image
+                                 * restored from the scrollback keeps the scale
+                                 * it was placed at.
+                                 */
+                                auto const icw = double(image->get_cell_width());
+                                auto const ich = double(image->get_cell_height());
+
+                                auto const src_x = double(ref.tile_col()) * icw;
+                                auto const src_y = double(ref.tile_row()) * ich;
 
                                 auto const avail_w = double(image->get_width_px()) - src_x;
                                 auto const avail_h = double(image->get_height_px()) - src_y;
@@ -10420,12 +10432,12 @@ Terminal::draw(cairo_region_t const* region) noexcept
                                  * factor, so the image keeps its scale instead of
                                  * being stretched to fill the cell.
                                  */
-                                auto const src_w = std::min(double(run) * VTE_SIXEL_CELL_WIDTH, avail_w);
-                                auto const src_h = std::min(double(VTE_SIXEL_CELL_HEIGHT), avail_h);
+                                auto const src_w = std::min(double(run) * icw, avail_w);
+                                auto const src_h = std::min(ich, avail_h);
 
                                 auto const dst_x = double(col) * m_cell_width;
-                                auto const dst_w = src_w * double(m_cell_width) / VTE_SIXEL_CELL_WIDTH;
-                                auto const dst_h = src_h * double(m_cell_height) / VTE_SIXEL_CELL_HEIGHT;
+                                auto const dst_w = src_w * double(m_cell_width) / icw;
+                                auto const dst_h = src_h * double(m_cell_height) / ich;
 
 #if VTE_GTK == 3
                                 m_draw.draw_image_region(image->get_surface(),

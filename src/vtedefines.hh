@@ -179,6 +179,24 @@
  */
 #define VTE_IMAGE_MEMORY_MAX_DEFAULT (35 * 1024 * 1024)
 
+/* The SMALLEST cell an image may be laid out against.
+ *
+ * This is the real invariant behind vte::image::Ref's 9-bit tile fields:
+ * ceil(VTE_SIXEL_MAX_WIDTH / 4) == 512 and ceil(VTE_SIXEL_MAX_HEIGHT / 8) ==
+ * 257, both inside 9 bits. A floor of 4x8 is therefore exactly what makes a
+ * legal image addressable, whatever font is in use.
+ *
+ * It must be ENFORCED, not merely asserted: an earlier version of this design
+ * asserted against a minimum that was applied nowhere, which is no invariant
+ * at all. Terminal::image_cell_size() is the single place it is applied.
+ */
+#define VTE_SIXEL_CELL_MIN_WIDTH (4)
+#define VTE_SIXEL_CELL_MIN_HEIGHT (8)
+
+/* The VT340's character cell, used only as a fallback when no font metrics
+ * are available. Image geometry normally follows the font - see
+ * Terminal::image_cell_size().
+ */
 #define VTE_SIXEL_CELL_WIDTH (10)
 #define VTE_SIXEL_CELL_HEIGHT (20)
 
