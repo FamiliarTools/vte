@@ -132,6 +132,22 @@ private:
                 VteStreamCellAttr attr;
         } CellAttrChange;
 
+        /* The stride of one CellAttrChange record in the attr stream: the
+         * fixed part, then the hyperlink target and its two terminating
+         * bytes.
+         *
+         * Centralised because the freeze, thaw, truncate and rewrap paths
+         * each walk these records independently - eight sites - and a stride
+         * that disagrees between any two of them desynchronises the reader
+         * from the writer, which corrupts the scrollback SILENTLY rather
+         * than failing. Anything added to the record's variable tail goes
+         * here and nowhere else.
+         */
+        static inline constexpr gsize attr_record_stride(gsize hyperlink_length) noexcept
+        {
+                return sizeof(CellAttrChange) + hyperlink_length + 2;
+        }
+
         typedef struct _RowRecord {
                 size_t text_start_offset;  /* offset where text of this row begins */
                 size_t attr_start_offset;  /* offset of the first character's attributes */
