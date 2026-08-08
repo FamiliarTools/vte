@@ -10456,13 +10456,22 @@ Terminal::XTERM_SMGRAPHICS(vte::parser::Sequence const& seq)
                  * 2048x2052 image fits an 80x24 window. It does not.
                  */
                 switch (seq.collect1(1)) {
-                case 1: /* read current */
+                case 1: { /* read current */
                         status = 0;
-                        rv0 = std::min(int(m_column_count) * VTE_SIXEL_CELL_WIDTH,
+                        /* The cell images are actually laid out against, so
+                         * that this reply, CSI 14t and TIOCGWINSZ agree. They
+                         * did not before: this reported the emulated cell
+                         * while the other two reported the font's, so an
+                         * application sizing an image from either of them was
+                         * guaranteed to be wrong by their ratio.
+                         */
+                        auto const [icw, ich] = image_cell_size();
+                        rv0 = std::min(int(m_column_count) * icw,
                                        VTE_SIXEL_MAX_WIDTH);
-                        rv1 = std::min(int(m_row_count) * VTE_SIXEL_CELL_HEIGHT,
+                        rv1 = std::min(int(m_row_count) * ich,
                                        VTE_SIXEL_MAX_HEIGHT);
                         break;
+                }
 
                 case 2: /* reset */
                 case 4: /* read maximum */

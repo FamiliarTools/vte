@@ -468,8 +468,12 @@ Ring::spill_image(vte::image::Image const* image) noexcept
         record.height_px = int32_t(height);
         record.left_cells = int32_t(image->get_left());
         record.top_cells = int32_t(image->get_top());
-        record.cell_width = int32_t(VTE_SIXEL_CELL_WIDTH);
-        record.cell_height = int32_t(VTE_SIXEL_CELL_HEIGHT);
+        /* The image's OWN layout cell. Writing the constants here would make
+         * an evicted-then-restored image silently change scale whenever the
+         * two differ.
+         */
+        record.cell_width = int32_t(image->get_cell_width());
+        record.cell_height = int32_t(image->get_cell_height());
 
         /* Store tightly packed rather than at the surface's stride: the
          * stride is an allocation detail of the cairo surface we happen to

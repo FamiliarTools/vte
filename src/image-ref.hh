@@ -47,22 +47,19 @@ namespace vte::image {
  * The coordinate widths are sized against the LARGEST image the parser will
  * admit, divided by the emulated cell that sixel geometry is expressed in:
  *
- *      cols = ceil(VTE_SIXEL_MAX_WIDTH  / VTE_SIXEL_CELL_WIDTH)
- *      rows = ceil(VTE_SIXEL_MAX_HEIGHT / VTE_SIXEL_CELL_HEIGHT)
+ *      cols = ceil(VTE_SIXEL_MAX_WIDTH  / VTE_SIXEL_CELL_MIN_WIDTH)
+ *      rows = ceil(VTE_SIXEL_MAX_HEIGHT / VTE_SIXEL_CELL_MIN_HEIGHT)
  *
- * At 2048x2052 over a 10x20 cell that is 205 columns and 103 rows, both
- * comfortably inside 9 bits. This is a bound on constants, checked below, so
- * changing either cap or the emulated cell is a build error rather than a
- * silent wrap into the pool id - which would alias one image onto another.
+ * At 2048x2052 over the 4x8 FLOOR that is exactly 512 columns and 257 rows,
+ * both inside 9 bits - the floor is chosen to make this true rather than
+ * discovered to be true. Images are laid out against the font's cell, which
+ * is normally much larger, so this is the worst case and not the usual one.
  *
- * This is the reason the emulated cell has to be FIXED and not the font's.
- * The widget clamps its font cell only to 1x2 pixels; sizing tile
- * coordinates against that would let a legal image need 2048 columns and
- * 1026 rows, which needs 11 bits per axis and does not fit. The packing is
- * total regardless (out-of-range values mask into their own field rather
- * than carrying), but totality only chooses the less bad corruption -
- * drawing the wrong part of the right image instead of part of a different
- * one. The fixed cell is what makes the situation not arise.
+ * The floor is what makes the packing safe, and it has to be ENFORCED
+ * somewhere real. The widget clamps its font cell only to 1x2 pixels, so
+ * without a floor of our own a legal image would need 2048 columns - 11 bits
+ * - and its tail would simply never be stamped. Terminal::image_cell_size()
+ * applies the floor and is the only producer of an image layout cell.
  *
  * 14 bits of pool id is 16383 concurrently live images (0 is reserved as the
  * "no image" id so that a zeroed Ref is invalid rather than a reference to
@@ -93,9 +90,9 @@ inline constexpr uint32_t k_ref_pool_id_none = 0u;
  * wrong, by asserting against a minimum cell size nothing enforced.
  */
 inline constexpr int k_max_image_tile_cols =
-        (VTE_SIXEL_MAX_WIDTH + VTE_SIXEL_CELL_WIDTH - 1) / VTE_SIXEL_CELL_WIDTH;
+        (VTE_SIXEL_MAX_WIDTH + VTE_SIXEL_CELL_MIN_WIDTH - 1) / VTE_SIXEL_CELL_MIN_WIDTH;
 inline constexpr int k_max_image_tile_rows =
-        (VTE_SIXEL_MAX_HEIGHT + VTE_SIXEL_CELL_HEIGHT - 1) / VTE_SIXEL_CELL_HEIGHT;
+        (VTE_SIXEL_MAX_HEIGHT + VTE_SIXEL_CELL_MIN_HEIGHT - 1) / VTE_SIXEL_CELL_MIN_HEIGHT;
 
 static_assert(k_max_image_tile_cols <= int(k_ref_tile_col_max) + 1,
               "a legal image admits more tile columns than a Ref can address; "
