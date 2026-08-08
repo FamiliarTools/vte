@@ -1025,8 +1025,22 @@ Ring::freeze_row(row_t position,
                                  */
                                 auto const has_image = m_last_attr.image();
                                 if (G_UNLIKELY (has_image)) {
-                                        auto const bits = m_last_attr.link_raw();
-                                        _vte_stream_append (m_attr_stream, (char const*) &bits, sizeof(bits));
+                                        StreamImageRef sref;
+                                        memset(&sref, 0, sizeof(sref));
+
+                                        /* Resolve the pool id to the image's
+                                         * stable priority while the pool can
+                                         * still answer. An image already gone
+                                         * writes priority 0, which resolves to
+                                         * nothing on the way back in.
+                                         */
+                                        auto const* img =
+                                                m_image_pool.lookup(m_last_attr.image_ref());
+                                        sref.priority = img ? uint64_t(img->get_priority()) + 1 : 0;
+                                        sref.ref_bits = m_last_attr.link_raw();
+
+                                        _vte_stream_append (m_attr_stream,
+                                                            (char const*) &sref, sizeof(sref));
                                 }
 
 				if (!buffer->len)
@@ -1156,14 +1170,35 @@ Ring::thaw_row(row_t position,
                                 auto const has_image = record_has_image(attr_change);
                                 stream_image_ref = vte::image::Ref{};
                                 stream_image_tile_col = 0;
+                                auto stream_image_pool_id = vte::image::k_ref_pool_id_none;
                                 if (G_UNLIKELY (has_image)) {
-                                        auto bits = uint32_t{0};
+                                        StreamImageRef sref;
                                         if (!_vte_stream_read (m_attr_stream,
                                                                record_start + sizeof (attr_change) +
                                                                attr_change.attr.hyperlink_length + 2,
-                                                               (char*) &bits, sizeof(bits)))
+                                                               (char*) &sref, sizeof(sref)))
                                                 return;
-                                        stream_image_ref = vte::image::Ref{bits};
+
+                                        stream_image_ref = vte::image::Ref{sref.ref_bits};
+
+                                        /* Resolve the stable priority back to
+                                         * a resident image. If it is still
+                                         * here, the cell names it again by
+                                         * whatever pool id it holds NOW - so
+                                         * scrolling an image out of the
+                                         * writable window and back does not
+                                         * lose it.
+                                         *
+                                         * If it is gone, the cell stays an
+                                         * image cell that resolves to nothing,
+                                         * rather than to whatever now occupies
+                                         * some recycled id.
+                                         */
+                                        if (sref.priority != 0) {
+                                                auto const it = m_image_map.find(size_t(sref.priority - 1));
+                                                if (it != m_image_map.end())
+                                                        stream_image_pool_id = it->second->get_pool_id();
+                                        }
                                 }
 
                                 record.attr_start_offset = record_start +
@@ -1194,7 +1229,7 @@ Ring::thaw_row(row_t position,
                                          * not exist yet.
                                          */
                                         attr.set_image_ref(vte::image::Ref{
-                                                vte::image::k_ref_pool_id_none,
+                                                stream_image_pool_id,
                                                 stream_image_ref.tile_row(),
                                                 stream_image_ref.tile_col()});
                                 } else {
