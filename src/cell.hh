@@ -39,6 +39,7 @@
 
 #include "attr.hh"
 #include "color-triple.hh"
+#include "image-ref.hh"
 
 #define VTE_TAB_WIDTH_MAX		((1 << VTE_ATTR_COLUMNS_BITS) - 1)
 
@@ -285,6 +286,16 @@ struct _VTE_GNUC_PACKED VteCellAttr {
         {
                 vte_attr_set_bool(&attr, VTE_ATTR_IMAGE_MASK, true);
                 m_link = ref;
+        }
+
+        inline vte::image::Ref image_ref() const
+        {
+                return vte::image::Ref{image_ref_raw()};
+        }
+
+        inline void set_image_ref(vte::image::Ref const& ref)
+        {
+                set_image_ref_raw(ref.bits());
         }
 
         /* Untagged. Only for bit-identity: equality and serialisation. */

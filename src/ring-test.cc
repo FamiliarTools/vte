@@ -30,6 +30,8 @@
 
 #include "ring.hh"
 #include "vterowdata.hh"
+#include "cell.hh"
+#include "image-ref.hh"
 
 #if WITH_SIXEL
 
@@ -282,6 +284,155 @@ test_ring_image_drop_scrollback(void)
 
 #endif /* WITH_SIXEL */
 
+
+/* vte::image::Ref packing, and the VteCellAttr union it lives in. */
+
+static void
+test_image_ref_roundtrip(void)
+{
+        /* Every field survives packing, including at its maximum. */
+        struct { uint32_t id, row, col; } const cases[] = {
+                { 1, 0, 0 },
+                { 1, 0, 1 },
+                { 1, 1, 0 },
+                { 12345, 7, 400 },
+                { vte::image::k_ref_pool_id_max, 0, 0 },
+                { 1, vte::image::k_ref_tile_row_max, 0 },
+                { 1, 0, vte::image::k_ref_tile_col_max },
+                { vte::image::k_ref_pool_id_max,
+                  vte::image::k_ref_tile_row_max,
+                  vte::image::k_ref_tile_col_max },
+        };
+
+        for (auto const& c : cases) {
+                auto const ref = vte::image::Ref{c.id, c.row, c.col};
+                g_assert_cmpuint(ref.pool_id(), ==, c.id);
+                g_assert_cmpuint(ref.tile_row(), ==, c.row);
+                g_assert_cmpuint(ref.tile_col(), ==, c.col);
+                g_assert_true(ref.valid());
+
+                /* Bits survive a trip through the raw 32-bit form. */
+                g_assert_true(vte::image::Ref{ref.bits()} == ref);
+        }
+}
+
+static void
+test_image_ref_fields_do_not_alias(void)
+{
+        /* The three fields must not overlap: a maxed-out coordinate must not
+         * bleed into the pool id and alias one image onto another.
+         */
+        auto const id_only = vte::image::Ref{vte::image::k_ref_pool_id_max, 0, 0};
+        auto const row_only = vte::image::Ref{0, vte::image::k_ref_tile_row_max, 0};
+        auto const col_only = vte::image::Ref{0, 0, vte::image::k_ref_tile_col_max};
+
+        g_assert_cmpuint(id_only.bits() & row_only.bits(), ==, 0);
+        g_assert_cmpuint(id_only.bits() & col_only.bits(), ==, 0);
+        g_assert_cmpuint(row_only.bits() & col_only.bits(), ==, 0);
+
+        /* Together they account for all 32 bits. */
+        g_assert_cmpuint(id_only.bits() | row_only.bits() | col_only.bits(),
+                         ==, 0xffffffffu);
+
+        /* A maximal coordinate leaves the pool id alone. */
+        auto const maxed = vte::image::Ref{7,
+                                           vte::image::k_ref_tile_row_max,
+                                           vte::image::k_ref_tile_col_max};
+        g_assert_cmpuint(maxed.pool_id(), ==, 7);
+}
+
+static void
+test_image_ref_zero_is_not_an_image(void)
+{
+        /* A zeroed Ref must not name a live image: cells are memset to zero
+         * in places, and that must not conjure a reference to image 0.
+         */
+        g_assert_false(vte::image::Ref{}.valid());
+        g_assert_false(vte::image::Ref{0u}.valid());
+        auto const no_image = vte::image::Ref{vte::image::k_ref_pool_id_none, 5, 5};
+        g_assert_false(no_image.valid());
+
+        /* basic_cell is not an image cell. */
+        g_assert_false(basic_cell.attr.image());
+}
+
+static void
+test_image_ref_stripe_identity(void)
+{
+        auto const a = vte::image::Ref{42, 3, 0};
+        auto const b = vte::image::Ref{42, 3, 100};
+        auto const c = vte::image::Ref{42, 4, 0};
+        auto const d = vte::image::Ref{43, 3, 0};
+
+        /* Same image, same tile row: one stripe, the unit of lifetime. */
+        g_assert_true(a.same_stripe(b));
+        g_assert_true(a.same_image(c));
+        g_assert_false(a.same_stripe(c));   /* different tile row */
+        g_assert_false(a.same_image(d));
+        g_assert_false(a.same_stripe(d));
+}
+
+static void
+test_cell_attr_union_tagging(void)
+{
+        VteCell cell = basic_cell;
+
+        /* Starts life as a hyperlink cell holding no hyperlink. */
+        g_assert_false(cell.attr.image());
+        g_assert_cmpuint(cell.attr.hyperlink_idx(), ==, 0);
+        g_assert_cmpuint(cell.attr.hyperlink_idx_or_none(), ==, 0);
+
+        cell.attr.set_hyperlink_idx(1234);
+        g_assert_false(cell.attr.image());
+        g_assert_cmpuint(cell.attr.hyperlink_idx(), ==, 1234);
+
+        /* Storing an image reference flips the tag with it, so the tag and
+         * the payload cannot disagree.
+         */
+        auto const ref = vte::image::Ref{99, 2, 3};
+        cell.attr.set_image_ref(ref);
+        g_assert_true(cell.attr.image());
+        g_assert_true(cell.attr.image_ref() == ref);
+
+        /* An image cell reports no hyperlink, in range, rather than
+         * reinterpreting the image bits as an index into the GC bitmap.
+         */
+        g_assert_cmpuint(cell.attr.hyperlink_idx_or_none(), ==, 0);
+
+        /* And back again. */
+        cell.attr.set_hyperlink_idx(7);
+        g_assert_false(cell.attr.image());
+        g_assert_cmpuint(cell.attr.hyperlink_idx(), ==, 7);
+}
+
+static void
+test_cell_attr_image_tag_survives_sgr_reset(void)
+{
+        /* reset_sgr_attributes() must not strip the tag off a cell whose
+         * m_link still holds an image reference: that would reinterpret
+         * those bits as a hyperlink index.
+         */
+        VteCell cell = basic_cell;
+        auto const ref = vte::image::Ref{1234, 5, 6};
+        cell.attr.set_image_ref(ref);
+
+        cell.attr.set_bold(true);
+        cell.attr.set_underline(2);
+        cell.attr.reset_sgr_attributes();
+
+        g_assert_false(cell.attr.bold());
+        g_assert_true(cell.attr.image());
+        g_assert_true(cell.attr.image_ref() == ref);
+}
+
+static void
+test_cell_sizes_unchanged(void)
+{
+        /* The whole design exists to avoid growing these. */
+        g_assert_cmpuint(sizeof(VteCell), ==, 20);
+        g_assert_cmpuint(sizeof(VteCellAttr), ==, 16);
+}
+
 int
 main(int argc,
      char* argv[])
@@ -289,6 +440,14 @@ main(int argc,
         g_test_init(&argc, &argv, nullptr);
 
 #if WITH_SIXEL
+        g_test_add_func("/vte/image/ref/roundtrip", test_image_ref_roundtrip);
+        g_test_add_func("/vte/image/ref/fields-do-not-alias", test_image_ref_fields_do_not_alias);
+        g_test_add_func("/vte/image/ref/zero-is-not-an-image", test_image_ref_zero_is_not_an_image);
+        g_test_add_func("/vte/image/ref/stripe-identity", test_image_ref_stripe_identity);
+        g_test_add_func("/vte/cell/attr/union-tagging", test_cell_attr_union_tagging);
+        g_test_add_func("/vte/cell/attr/image-tag-survives-sgr-reset", test_cell_attr_image_tag_survives_sgr_reset);
+        g_test_add_func("/vte/cell/sizes-unchanged", test_cell_sizes_unchanged);
+
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);
         g_test_add_func("/vte/ring/image/resize-grow", test_ring_image_resize_grow);
