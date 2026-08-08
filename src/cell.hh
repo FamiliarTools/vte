@@ -309,6 +309,45 @@ struct _VTE_GNUC_PACKED VteCellAttr {
                 m_link = raw;
         }
 
+        /* Whether two attributes are indistinguishable for the purposes of
+         * the attr_stream's run-length coding.
+         *
+         * freeze_row() used to decide this with a memcmp over the whole
+         * struct, which is wrong in both directions once m_link is a union:
+         *
+         *   - It compares 16 bytes while only VTE_CELL_ATTR_COMMON_BYTES (12)
+         *     are persisted, so a field that never reaches the wire can still
+         *     end the run. For an image row, where the tile column advances
+         *     by one per cell, that is one record PER CELL - measured at 26
+         *     bytes each, a 500x blowup on a 500 column row.
+         *
+         *   - It cannot be relaxed to 12 bytes instead, because then two
+         *     different hyperlinks of equal length would be conflated: the
+         *     stream stores the length, and the URI is recovered by position.
+         *
+         * So compare the persisted bytes plus a CANONICAL form of m_link: the
+         * parts that actually distinguish one run from the next. For an image
+         * that is the image and the tile row, deliberately NOT the tile
+         * column - a stripe is contiguous, so the tile column is recoverable
+         * on thaw by counting from the run's first cell, and including it
+         * would encode information the reader can derive.
+         */
+        inline bool same_for_stream(VteCellAttr const& other) const
+        {
+                if (memcmp(this, &other, VTE_CELL_ATTR_COMMON_BYTES) != 0)
+                        return false;
+
+                if (image() != other.image())
+                        return false;
+
+                if (image()) {
+                        auto const a = image_ref(), b = other.image_ref();
+                        return a.same_stripe(b);
+                }
+
+                return hyperlink_idx() == other.hyperlink_idx();
+        }
+
         inline void reset_sgr_attributes()
         {
                 vte_attr_set_value(&attr, VTE_ATTR_ALL_SGR_MASK, 0 /* shift */, 0 /* value */);

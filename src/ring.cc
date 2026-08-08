@@ -899,7 +899,7 @@ Ring::freeze_row(row_t position,
 			CellAttrChange attr_change;
                         guint16 hyperlink_length;
 
-			if (memcmp(&m_last_attr, &attr, sizeof (VteCellAttr)) != 0) {
+			if (!m_last_attr.same_for_stream(attr)) {
 				m_last_attr_text_start_offset = record.text_start_offset + buffer->len;
 				memset(&attr_change, 0, sizeof (attr_change));
 				attr_change.text_end_offset = m_last_attr_text_start_offset;
