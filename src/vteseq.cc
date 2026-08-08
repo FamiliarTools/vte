@@ -10393,7 +10393,7 @@ Terminal::XTERM_SMGRAPHICS(vte::parser::Sequence const& seq)
 
         switch (attr) {
 #if WITH_SIXEL
-        case 0: /* Colour registers.
+        case 1: /* Colour registers.
                  *
                  * VTE doesn't support changing the number of colour registers, so always
                  * return the fixed number, and set() returns success iff the passed number
@@ -10417,14 +10417,28 @@ Terminal::XTERM_SMGRAPHICS(vte::parser::Sequence const& seq)
                 }
                 break;
 
-        case 1: /* SIXEL graphics geometry.
+        case 2: /* SIXEL graphics geometry.
                  *
-                 * VTE doesn't support variable geometries; always report
-                 * the maximum size of a SIXEL graphic, and set() returns success iff the
-                 * passed numbers are less or equal to that number.
+                 * Pa distinguishes the CURRENT geometry from the MAXIMUM one, and they
+                 * are not the same number. The current geometry is how large an image
+                 * can be and still fit the screen, which is the screen in cells times
+                 * the emulated sixel cell - the same cell insert_image lays images out
+                 * against, so that a sender sizing an image from this reply gets an
+                 * image that occupies the cells it expected. The maximum is the parser's
+                 * cap, which does not shrink when the window does.
+                 *
+                 * Reporting the maximum for both, as this used to, tells a sender that a
+                 * 2048x2052 image fits an 80x24 window. It does not.
                  */
                 switch (seq.collect1(1)) {
-                case 1: /* read */
+                case 1: /* read current */
+                        status = 0;
+                        rv0 = std::min(int(m_column_count) * VTE_SIXEL_CELL_WIDTH,
+                                       VTE_SIXEL_MAX_WIDTH);
+                        rv1 = std::min(int(m_row_count) * VTE_SIXEL_CELL_HEIGHT,
+                                       VTE_SIXEL_MAX_HEIGHT);
+                        break;
+
                 case 2: /* reset */
                 case 4: /* read maximum */
                         status = 0;
@@ -10457,7 +10471,7 @@ Terminal::XTERM_SMGRAPHICS(vte::parser::Sequence const& seq)
 #endif /* WITH_SIXEL */
 
 #if 0 /* ifdef WITH_REGIS */
-        case 2:
+        case 3:
                 status = 1;
                 break;
 #endif
