@@ -1630,6 +1630,47 @@ test_image_display_size(void)
 
 // Main
 
+
+static void
+test_context_repeat_cancelled_by_command(void)
+{
+        /* DEC STD 070 8.1.1: a repeat introducer applies to the SIXEL that
+         * immediately follows it. Any other command in between cancels it.
+         *
+         * DECGCI, DECGCR and DECGNL already reset the count; DECGRA did not,
+         * so a raster attribute between the repeat and the data silently
+         * multiplied the next sixel.
+         *
+         * The raster sizes here are 1x1 deliberately: image_width() is the
+         * max of the drawn width and the raster width, so a larger raster
+         * would mask the very thing being measured.
+         */
+
+        /* Baseline: the repeat does apply to the sixel right after it. */
+        {
+                auto context = TestContext{};
+                parse_pixels(context, "#1!5@"sv);
+                assert_image_dimensions(context, 5, 1);
+        }
+
+        /* DECGRA between them cancels it: one column, not five. */
+        {
+                auto context = TestContext{};
+                parse_pixels(context, "#1!5\"1;1;1;1@"sv);
+                assert_image_dimensions(context, 1, 1);
+        }
+
+        /* And so does an IGNORED DECGRA. A raster attribute arriving after
+         * data is ignored for its own purpose, but it is still a command
+         * that was received, so it still ends the repeat.
+         */
+        {
+                auto context = TestContext{};
+                parse_pixels(context, "#1@!5\"1;1;1;1@"sv);
+                assert_image_dimensions(context, 2, 1);
+        }
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1651,6 +1692,7 @@ main(int argc,
         g_test_add_func("/vte/sixel/context/color/hls", test_context_color_hls);
         g_test_add_func("/vte/sixel/context/raster-attributes", test_context_raster_attributes);
         g_test_add_func("/vte/sixel/context/repeat", test_context_repeat);
+        g_test_add_func("/vte/sixel/context/repeat-cancelled-by-command", test_context_repeat_cancelled_by_command);
         g_test_add_func("/vte/sixel/context/scanlines/grow", test_context_scanlines_grow);
         g_test_add_func("/vte/sixel/context/scanlines/underfull", test_context_scanlines_underfull);
         g_test_add_func("/vte/sixel/context/scanlines/max-width", test_context_scanlines_max_width);
