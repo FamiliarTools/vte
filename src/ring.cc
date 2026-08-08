@@ -386,6 +386,13 @@ Ring::stamp_image_row(row_t position,
                         continue;
 
                 row->cells[col].attr.set_image_ref(vte::image::Ref{id, image_row, tile_col});
+
+                /* The cell is the image's now, so it holds the object
+                 * replacement character rather than whatever text the erase
+                 * left behind. It is never drawn as a glyph - the image is
+                 * drawn instead - and text extraction reports it as blank.
+                 */
+                row->cells[col].c = VTE_OBJECT_REPLACEMENT_CHARACTER;
         }
 }
 
