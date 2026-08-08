@@ -958,6 +958,65 @@ if get_option('sixel')
   )
 
   test_units += [test_sixel,]
+
+  # The ring's image lifetime rules, exercised directly on the Ring rather than
+  # through the widget. Pulls in the Image, which differs between the backends,
+  # and the generated public headers that ring.hh reaches through <vte/vte.h>,
+  # so it is built once per enabled backend.
+  test_ring_common_sources = config_sources + cairo_glue_sources + debug_sources + glib_glue_sources + refptr_sources + std_glue_sources + files(
+    'cxx-utils.hh',
+    'image.cc',
+    'image.hh',
+    'ring-test.cc',
+    'ring.cc',
+    'ring.hh',
+    'vtedefines.hh',
+    'vterowdata.cc',
+    'vterowdata.hh',
+    'vtestream-base.h',
+    'vtestream-file.h',
+    'vtestream.cc',
+    'vtestream.h',
+    'vteunistr.cc',
+    'vteunistr.h',
+    'vteutils.cc',
+    'vteutils.h',
+  )
+
+  test_ring_common_deps = [
+    cairo_dep,
+    fmt_dep,
+    gio_dep,
+    glib_dep,
+    gnutls_dep,
+    liblz4_dep,
+  ]
+
+  if get_option('gtk3')
+    test_ring_gtk3 = executable(
+      'test-ring-gtk3',
+      cpp_args: ['-DVTE_GTK=3', '-DVTE_COMPILATION',],
+      sources: test_ring_common_sources + libvte_gtk3_public_headers,
+      dependencies: test_ring_common_deps + [gtk3_dep,],
+      include_directories: incs,
+      install: false,
+    )
+
+    test_units += [test_ring_gtk3,]
+  endif # gtk3
+
+  if get_option('gtk4')
+    test_ring_gtk4 = executable(
+      'test-ring-gtk4',
+      cpp_args: ['-DVTE_GTK=4', '-DVTE_COMPILATION',],
+      sources: test_ring_common_sources + libvte_gtk4_public_headers,
+      dependencies: test_ring_common_deps + [gtk4_dep,],
+      include_directories: incs,
+      install: false,
+    )
+
+    test_units += [test_ring_gtk4,]
+  endif # gtk4
 endif
 
 test_stream_sources = config_sources + files(

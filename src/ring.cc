@@ -70,7 +70,68 @@ Ring::validate() const
 
 	vte_assert_cmpuint(m_end - m_start, <=, m_max);
 	vte_assert_cmpuint(m_end - m_writable, <=, m_mask);
+
+#if WITH_SIXEL
+        validate_images();
+#endif
 }
+
+#if WITH_SIXEL
+
+void
+Ring::validate_images() const
+{
+        /* The image maps are keyed by row number, and a row number only means
+         * anything for as long as the ring still holds that row. Nothing about
+         * freeing a row tells the maps, so every path that destroys rows has to
+         * say so itself, and a path that forgets is invisible: the ring stays
+         * self-consistent, the images just quietly stop being reachable. Checking
+         * it here turns "audit the ring by reading it" into "run any workload".
+         *
+         * Free when no image is resident, which is very nearly always: the walk
+         * is over the maps, and the mirror already says whether they are empty.
+         */
+        if (!m_has_images)
+                return;
+
+        /* The two maps hold the same images, one keyed by priority and one by
+         * top row, so their sizes cannot drift apart. */
+        vte_assert_cmpuint(m_image_by_top_map.size(), ==, m_image_map.size());
+
+        auto memory_used = size_t{0};
+
+        for (auto const& [priority, image] : m_image_map) {
+                /* Every resident image still covers a row the ring holds. Its top
+                 * may well be above m_start - an image straddling the start is half
+                 * in the scrollback and stays - but its bottom cannot be, or none of
+                 * its rows exists any more and nothing can ever draw it, erase it or
+                 * move it again.
+                 */
+                vte_assert_cmpint(long(image->get_bottom()), >=, long(m_start));
+
+                /* The by-top map is an index into the priority map: same images,
+                 * each filed under the row it actually starts at. A stale key makes
+                 * drop_images_before()'s early exit skip a live entry, and makes
+                 * unlink_image_from_top_map() miss the entry it is unlinking.
+                 */
+                auto const [begin, end] = m_image_by_top_map.equal_range(image->get_top());
+                auto found = false;
+                for (auto it = begin; it != end; ++it)
+                        found = found || it->second == image.get();
+                vte_assert_true(found);
+
+                memory_used += image->resource_size();
+        }
+
+        /* What the GC spends its budget against is what the resident images
+         * actually hold, so that a live image is never evicted to make room for
+         * pixels that are already freed or that nobody can reach.
+         */
+        vte_assert_cmpuint(memory_used, ==, m_image_fast_memory_used);
+}
+
+#endif /* WITH_SIXEL */
+
 #else
 #define validate(...) do { } while(0)
 #endif
@@ -1318,9 +1379,30 @@ Ring::resize(row_t max_rows)
 			reset_streams(m_writable);
 			m_writable = m_start;
 		}
+
+#if WITH_SIXEL
+                /* Lowering the maximum drops rows off the front in one step - the
+                 * same rows discard_one_row() drops one at a time - so the images
+                 * anchored to them go the same way. This was the last of the
+                 * row-destroying paths not routed through the image maps, and the
+                 * images it stranded kept holding image memory too, so they went on
+                 * distorting the budget that evicts the live ones.
+                 *
+                 * Two ordinary things reach it with rows to drop: lowering the
+                 * scrollback-lines setting, and - when the scrollback is off, so
+                 * that the maximum IS the row count - making the window shorter.
+                 * A window resize with a scrollback is not one of them, since
+                 * screen_set_size() has already brought the length down through
+                 * rewrap() and shrink(), which do their own image bookkeeping.
+                 */
+                if (has_images())
+                        drop_images_before(m_start);
+#endif
 	}
 
 	m_max = max_rows;
+
+	validate();
 }
 
 void
