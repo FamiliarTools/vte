@@ -1074,6 +1074,47 @@ test_ring_image_anchor_follows_the_cells(void)
         g_assert_false(ring.find_image_anchor(vte::image::k_ref_pool_id_none, &row, &col));
 }
 
+
+static void
+test_ring_image_reference_does_not_survive_freeze(void)
+{
+        /* Whether a cell keeps naming its image after the row is frozen into
+         * the scrollback and thawed back out.
+         *
+         * This decides an ORDERING question, so it is measured rather than
+         * assumed: the cell-anchored model can only become the sole source of
+         * truth once it survives the stream.
+         */
+        auto ring = Ring{1024, true};   /* with streams: freezing is the point */
+        ring.set_visible_rows(24);
+        append_rows(ring, 4);
+
+        auto const id = ring.image_pool().allocate(nullptr);
+        auto* row = ring.index_writable(1);
+        g_assert_cmpint(row->len, >, 0);
+        row->cells[0].attr.set_image_ref(vte::image::Ref{id, 0, 0});
+        g_assert_true(ring.index(1)->cells[0].attr.image());
+
+        /* Push it far out of the writable window, so it is frozen. */
+        append_rows(ring, 200);
+
+        /* Reading it back thaws it. */
+        auto const* thawed = ring.index(1);
+        g_assert_nonnull(thawed);
+        g_assert_cmpint(thawed->len, >, 0);
+
+        /* The reference is GONE. VteCellAttr::m_link is not among the
+         * VTE_CELL_ATTR_COMMON_BYTES the attr stream persists, so a frozen
+         * row comes back with its cells no longer naming any image.
+         *
+         * Consequence, and the reason this test exists: the geometric
+         * lifetime rules cannot be removed in favour of the cell references
+         * until frozen rows carry the reference too. Doing it now would drop
+         * every image the moment its rows left the writable window.
+         */
+        g_assert_false(thawed->cells[0].attr.image());
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1113,6 +1154,8 @@ main(int argc,
         g_test_add_func("/vte/ring/image-pool/sweep-sees-cell-references", test_ring_image_sweep_sees_cell_references);
 
         g_test_add_func("/vte/ring/image-pool/anchor-follows-the-cells", test_ring_image_anchor_follows_the_cells);
+
+        g_test_add_func("/vte/ring/image-pool/reference-does-not-survive-freeze", test_ring_image_reference_does_not_survive_freeze);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);
