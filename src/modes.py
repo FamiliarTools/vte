@@ -1107,6 +1107,7 @@ modes = [
     #
     # References: MinTTY
     mode_WHAT('MINTTY_SIXEL_SCROLL_CURSOR_RIGHT', 8452, default=False,
+              flags=Flags.WRITABLE,
               alias=['RLOGIN_SIXEL_SCROLL_CURSOR_RIGHT']),
 
     # MinTTY also knows mode 77096 "BIDI disable", and 77000..77031

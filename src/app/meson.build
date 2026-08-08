@@ -185,6 +185,10 @@ if get_option('sixel') and get_option('gtk4')
     # Selects VT340 palette registers without defining them, with shared
     # colour registers, which is the path nothing initialised.
     'undefined-registers',
+    # DECSET 8452: cursor to the right of the image on its last row, rather
+    # than below it. The two cases must NOT render alike.
+    'cursor-right-on',
+    'cursor-right-off',
   ]
 
   test(
