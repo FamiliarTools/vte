@@ -65,9 +65,31 @@ def at_right_margin(s):
     return '\x1b[1;76H' + s
 
 
+def undefined_registers():
+    """An image that SELECTS colour registers without ever DEFINING them.
+
+    DECRST 1070 first, so the terminal uses shared colour registers - the
+    path on which nothing initialises the palette unless it is done at
+    construction. The registers selected are VT340 palette entries, so a
+    conformant terminal draws blue/red/green/magenta and an unconfigured
+    one draws whatever happened to be in memory.
+    """
+    W, H = 96, 24
+    out = ['\x1b[?1070l', '\x1bPq']
+    rows = H // 6
+    for row in range(rows):
+        # Registers 1..4 of the VT340 palette: blue, red, green, magenta.
+        out.append('#%d%s' % (row + 1, chr(63 + 0b111111) * W))
+        if row != rows - 1:
+            out.append('-')
+    out.append('\x1b\\')
+    return ''.join(out)
+
+
 if __name__ == '__main__':
     b = bands_six()
     open('bands.six', 'w').write(b)
     open('bands-gch.six', 'w').write(splice_gch(b))
     open('bands-margin.six', 'w').write(at_right_margin(b))
+    open('undefined-registers.six', 'w').write(undefined_registers())
     print('wrote bands.six (%d bytes), bands-gch.six, bands-margin.six' % len(b))

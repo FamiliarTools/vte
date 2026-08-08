@@ -182,6 +182,9 @@ if get_option('sixel') and get_option('gtk4')
     # Emitted so it overhangs the right margin. DEC STD 070 11.2.2: sixels
     # past the right margin are not printed.
     'bands-margin',
+    # Selects VT340 palette registers without defining them, with shared
+    # colour registers, which is the path nothing initialised.
+    'undefined-registers',
   ]
 
   test(
