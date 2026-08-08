@@ -1749,7 +1749,8 @@ public:
         inline void set_cursor_coords1(vte::grid::row_t row /* relative to scrolling region */,
                                        vte::grid::column_t column); /* 1-based */
         inline void erase_characters(long count,
-                                     bool use_basic = false);
+                                     bool use_basic = false,
+                                     bool add_new_cells = true);
         void erase_image_rect(vte::grid::row_t rows,
                               vte::grid::column_t columns);
 

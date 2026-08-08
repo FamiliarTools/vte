@@ -911,7 +911,8 @@ Terminal::set_cursor_coords1(vte::grid::row_t row,
 
 void
 Terminal::erase_characters(long count,
-                           bool use_basic)
+                           bool use_basic,
+                           bool add_new_cells)
 {
 	VteCell *cell;
 	long col, i;
@@ -942,7 +943,7 @@ Terminal::erase_characters(long count,
 					 * defaults. */
 					cell = _vte_row_data_get_writable (rowdata, col);
                                         *cell = use_basic ? basic_cell : m_color_defaults;
-				} else {
+				} else if (add_new_cells) {
 					/* Add new cells until we have one here. */
                                         _vte_row_data_fill (rowdata, use_basic ? &basic_cell : &m_color_defaults, col + 1);
 				}
@@ -976,7 +977,12 @@ Terminal::erase_image_rect(vte::grid::row_t rows,
         for (auto i = 0; i < rows; ++i) {
                 auto const row = top + i;
 
-                erase_characters(columns, true);
+                /* Blank the cells the image covers, but do not CREATE the ones it
+                 * covers past the end of the row. A cell that exists counts toward
+                 * the row's length, the length is what a reflow wraps on, and these
+                 * cells never held anything but the image's own background.
+                 */
+                erase_characters(columns, true, false);
 
                 if (row > m_screen->insert_delta - 1 &&
                     row < m_screen->insert_delta + m_row_count)
@@ -6925,7 +6931,7 @@ Terminal::ECH(vte::parser::Sequence const& seq)
         /* Erase characters starting at the cursor position (overwriting N with
          * spaces, but not moving the cursor). */
         auto const count = seq.collect1(0, 1);
-        erase_characters(count, false);
+        erase_characters(count, false, true);
 }
 
 void
