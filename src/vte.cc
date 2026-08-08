@@ -3763,6 +3763,9 @@ Terminal::insert_image(ProcessingContext& context,
          * It is also a precondition for cell-anchored storage: a tile column
          * past the right margin has no cell to live in.
          */
+        /* This round decoded an image, so it aims at the shorter slice. */
+        m_decoded_image = true;
+
         /* The cell image geometry is expressed in: the font's, floored, and
          * locked for the session. See Terminal::image_cell_size().
          */
@@ -11500,9 +11503,25 @@ void
 Terminal::time_process_incoming()
 {
 	g_timer_reset(process_timer);
+#if WITH_SIXEL
+        m_decoded_image = false;
+#endif
 	process_incoming();
 	auto elapsed = g_timer_elapsed(process_timer, NULL) * 1000;
-	gssize target = VTE_MAX_PROCESS_TIME / elapsed * m_input_bytes;
+
+        /* A round that decoded an image aims at a shorter slice, so this
+         * terminal reads less next round and returns the main loop to its
+         * siblings sooner. Note this works by REDUCING the target, which is
+         * the opposite of charging image cost to m_input_bytes - that
+         * inflates the target and makes the starvation worse.
+         */
+        auto const max_time = double{
+#if WITH_SIXEL
+                m_decoded_image ? VTE_MAX_PROCESS_TIME_IMAGE :
+#endif
+                VTE_MAX_PROCESS_TIME};
+
+	gssize target = max_time / elapsed * m_input_bytes;
 	m_max_input_bytes = (m_max_input_bytes + target) / 2;
 }
 

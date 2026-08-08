@@ -1662,6 +1662,9 @@ public:
                 return {int(m_image_cell_width), int(m_image_cell_height)};
         }
 
+        /* Whether the round being timed decoded an image. */
+        bool m_decoded_image{false};
+
         long m_image_cell_width{0};
         long m_image_cell_height{0};
 #endif /* WITH_SIXEL */

@@ -30,6 +30,22 @@ The incoming budget is denominated in BYTES READ FROM THE PTY
 costs orders of magnitude more work than a text byte, so a byte-based budget
 under-charges images.
 
+## What DOES fix it
+
+Give a round that decoded an image a shorter slice
+(`VTE_MAX_PROCESS_TIME_IMAGE`, 20ms, against `VTE_MAX_PROCESS_TIME`'s 100ms).
+The adaptive step then shrinks this terminal's read budget, so it returns the
+main loop to its siblings sooner.
+
+    idle       0.22s  0.23s
+    textflood  0.24s  0.23s
+    flood      0.31s  0.35s
+
+Starvation drops from about 2.7x to about 1.45x. The cost is borne by the
+terminal doing the flooding, measured separately: 3000 images take 0.19s
+instead of 0.13s, about 46% slower. That trade is the point - a terminal
+decoding images gives up throughput so its siblings keep theirs.
+
 ## What does NOT fix it
 
 Adding the decoded pixel count to `m_input_bytes` - the obvious first idea -

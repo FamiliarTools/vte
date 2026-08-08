@@ -82,6 +82,21 @@
 #define VTE_CHILD_OUTPUT_PRIORITY	G_PRIORITY_HIGH
 #define VTE_MAX_INPUT_READ		0x1000
 #define VTE_MAX_PROCESS_TIME		100
+
+/* The same budget, for a round that decoded an image.
+ *
+ * VTE_MAX_PROCESS_TIME is how long one terminal may hold the shared main
+ * loop per round. Each terminal ticks independently and there is no global
+ * deadline, so a terminal that always has work spends its whole slice every
+ * round while a terminal that drains quickly yields immediately - which is
+ * why a sixel flood in one tab measurably starves a plain one in another,
+ * and a TEXT flood at the same byte rate does not.
+ *
+ * Images get a shorter slice. The trade is deliberate and one-directional:
+ * a terminal decoding images gives up throughput so its siblings keep
+ * theirs.
+ */
+#define VTE_MAX_PROCESS_TIME_IMAGE	20
 #define VTE_CELL_BBOX_SLACK		1
 #define VTE_DEFAULT_UTF8_AMBIGUOUS_WIDTH 1
 
