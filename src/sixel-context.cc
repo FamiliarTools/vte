@@ -303,8 +303,7 @@ Context::prepare(int id,
                  unsigned bg_green,
                  unsigned bg_blue,
                  bool bg_transparent,
-                 bool private_color_registers,
-                 double pixel_aspect) noexcept
+                 bool private_color_registers) noexcept
 {
         m_id = id;
         m_introducer = introducer;

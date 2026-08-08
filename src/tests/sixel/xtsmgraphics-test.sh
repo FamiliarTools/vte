@@ -48,16 +48,23 @@ CASES=(
         '\033[?80$p|^[[?80;4$y'
 )
 
-DISP=$((150 + (RANDOM % 40)))
 fail=0
 
 for c in "${CASES[@]}"; do
         q=${c%%|*}
         want=${c##*|}
 
-        Xvfb ":$DISP" -screen 0 900x700x24 -nolisten tcp >/dev/null 2>&1 &
+        # Let X pick a free display and report it; guessing a number collides
+        # with the other tests meson runs in parallel.
+        : > "$WORK/display"
+        Xvfb -displayfd 3 -screen 0 900x700x24 -nolisten tcp 3>"$WORK/display" >/dev/null 2>&1 &
         XPID=$!
-        sleep 2
+        for _ in $(seq 1 100); do
+                [ -s "$WORK/display" ] && break
+                sleep 0.1
+        done
+        DISP=$(cat "$WORK/display" 2>/dev/null)
+        [ -n "$DISP" ] || { echo "SKIP: Xvfb did not report a display"; exit 77; }
 
         export DISPLAY=":$DISP"
         export GDK_BACKEND=x11 GSK_RENDERER=cairo LIBGL_ALWAYS_SOFTWARE=1
@@ -80,7 +87,6 @@ for c in "${CASES[@]}"; do
                 echo "FAIL ${q} -> '$got' (want '$want')"
                 fail=1
         fi
-        DISP=$((DISP + 1))
 done
 
 exit $fail

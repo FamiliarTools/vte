@@ -557,12 +557,22 @@ private:
                     m_scanlines_offsets[1] != m_scanlines_offsets[0])
                         return;
 
-                #if 0
-                /* VTE doesn't currently use the pixel aspect ratio */
-                auto const aspect_num = seq.param(0, 1, 1, 1 << 15 /* 32Ki */);
-                auto const aspect_den = seq.param(1, 1, 1, 1 << 15 /* 32Ki */);
-                auto const pixel_aspect = std::clamp(double(aspect_num) / double(aspect_den), 0.1, 10.0);
-                #endif
+                /* args[0] and args[1] are the pixel aspect ratio numerator
+                 * and denominator (Pan and Pad). VTE does not implement a
+                 * non-square pixel aspect: an image is drawn at the aspect
+                 * its pixels imply.
+                 *
+                 * Implementing it means scaling the decoded image vertically
+                 * by Pan/Pad, clamped to something sane, AND honouring the P1
+                 * parameter of the DECSIXEL introducer, which selects an
+                 * aspect from the table in DEC STD 070 7.1 and which DECGRA
+                 * overrides. Doing only one of the two is worse than doing
+                 * neither, because senders pick whichever they think is
+                 * supported.
+                 *
+                 * Until then the parameters are read and ignored, which is
+                 * what an unimplemented raster attribute should do.
+                 */
 
                 m_raster_width = seq.param(2, 0, 0, k_max_width);
                 m_raster_height = seq.param(3, 0, 0, k_max_height);
@@ -694,8 +704,7 @@ public:
                      unsigned bg_green,
                      unsigned bg_blue,
                      bool bg_transparent,
-                     bool private_color_registers,
-                     double pixel_aspect = 1.0) noexcept;
+                     bool private_color_registers) noexcept;
 
         void reset_colors() noexcept;
 
