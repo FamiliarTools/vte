@@ -1596,11 +1596,111 @@ test_image_footprint_is_font_independent(void)
         g_assert_cmpint(image->get_width(), ==, expect_cols);
 }
 
+/* REPRO SCRATCH: does the cached thawed row keep a reclaimable id? */
+static void
+test_repro_cached_row_stale_id(void)
+{
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 4);
+
+        place_image(ring, 1, 1);
+        auto* image = ring.image_map().begin()->second.get();
+        ring.set_placing_image(image);
+        ring.stamp_image_row(1, 0, 1, 0);
+        ring.set_placing_image(nullptr);
+
+        /* Freeze it into the scrollback. */
+        append_rows(ring, 200);
+
+        /* Thaw it into m_cached_row: this is what the draw loop does. */
+        auto const* thawed = ring.index(1);
+        g_assert_nonnull(thawed);
+        auto const ref = thawed->cells[0].attr.image_ref();
+        auto const stale_id = ref.pool_id();
+        g_print("REPRO: cached row id=%u resolves=%p image=%p\n",
+                stale_id, (void*)ring.image_pool().lookup(ref), (void*)image);
+        g_assert_true(ring.image_pool().lookup(ref) == image);
+
+        /* Memory pressure evicts the image: the id retires. */
+        ring.evict_all_images_for_test();
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
+
+        /* A sweep, as append_image() runs on id exhaustion. */
+        ring.sweep_image_pool_for_test();
+        g_print("REPRO: after sweep retired=%zu\n", ring.image_pool().retired_count());
+
+        /* The next image takes the id back. */
+        place_image(ring, 300, 1);
+        auto* newimg = ring.image_map().rbegin()->second.get();
+        g_print("REPRO: new image id=%u (stale was %u)\n",
+                newimg->get_pool_id(), stale_id);
+
+        /* And index() serves the CACHED row, without re-thawing. */
+        auto const* again = ring.index(1);
+        auto const ref2 = again->cells[0].attr.image_ref();
+        auto* resolved = ring.image_pool().lookup(ref2);
+        g_print("REPRO: cached row now id=%u resolves=%p newimg=%p ALIASED=%d\n",
+                ref2.pool_id(), (void*)resolved, (void*)newimg,
+                (int)(resolved != nullptr && resolved == newimg));
+}
+
+
+static void
+test_ring_rewrap_with_images(void)
+{
+        /* Ring::rewrap had NO test at all, which is why a stride bug that
+         * corrupts every frozen row after the first image shipped.
+         *
+         * rewrap walks the attr stream record by record. An image record has a
+         * 12 byte tail, so a walker that does not account for it lands 12 bytes
+         * short on every subsequent record and reads garbage - in practice a
+         * mangled scrollback, and at the stream layer an abort.
+         */
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 4);
+        widen_row(ring, 1, 4);
+
+        place_image(ring, 1, 1);
+        auto* const image = ring.image_map().begin()->second.get();
+        ring.set_placing_image(image);
+        ring.stamp_image_row(1, 0, 4, 0);
+        ring.set_placing_image(nullptr);
+
+        /* Rows after the image, so the walk has to cross the image record. */
+        append_rows(ring, 300);
+
+        /* Freeze everything, then rewrap to a different width. This is what a
+         * horizontal window resize does.
+         */
+        ring.rewrap_for_test(40);
+
+        /* The ring must still be readable and self-consistent afterwards. */
+        for (auto r = ring.delta(); r < ring.next(); r++) {
+                auto const* row = ring.index(r);
+                g_assert_nonnull(row);
+                g_assert_cmpint(row->len, >=, 0);
+        }
+
+        /* And again at another width, since the second pass reads records the
+         * first pass wrote.
+         */
+        ring.rewrap_for_test(100);
+        for (auto r = ring.delta(); r < ring.next(); r++) {
+                g_assert_nonnull(ring.index(r));
+        }
+}
+
 int
 main(int argc,
      char* argv[])
 {
         g_test_init(&argc, &argv, nullptr);
+
+#if WITH_SIXEL
+        g_test_add_func("/vte/repro/cached-row-stale-id", test_repro_cached_row_stale_id);
+#endif
 
 #if WITH_SIXEL
         g_test_add_func("/vte/sixel/right-margin-clip", test_sixel_right_margin_clip);
@@ -1650,6 +1750,8 @@ main(int argc,
         g_test_add_func("/vte/ring/image/limit-is-enforced", test_ring_image_limit_is_enforced);
         g_test_add_func("/vte/ring/image/limit-zero-disables", test_ring_image_limit_zero_disables);
         g_test_add_func("/vte/ring/image/limit-shrinks-immediately", test_ring_image_limit_shrinks_immediately);
+
+        g_test_add_func("/vte/ring/rewrap-with-images", test_ring_rewrap_with_images);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

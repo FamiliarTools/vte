@@ -170,7 +170,18 @@ Context::reset() noexcept
  Context::ensure_scanlines_capacity() noexcept
  {
          auto const width = std::max(m_raster_width, m_width);
-         auto const height = std::max(m_raster_height, m_height);
+
+         /* Size by the scanlines actually STARTED, not by m_height.
+          *
+          * m_height only rises when a scanline stores a set bit, while DECGNL
+          * advances the scanline unconditionally. A stream of empty scanlines -
+          * "!2048?" then "-", repeated - therefore walks the write pointer past
+          * a buffer sized for height zero. Confirmed with ASan as a heap write
+          * overflow, reachable from any program or remote host that can print to
+          * the terminal, so this is untrusted input by definition.
+          */
+         auto const started = std::min((scanlines_count() + 1) * 6, unsigned(k_max_height));
+         auto const height = std::max({m_raster_height, m_height, started});
 
          /* This is guaranteed not to overflow since width and height
           * are limited by k_max_{width,height}.
