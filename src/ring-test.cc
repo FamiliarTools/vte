@@ -1692,6 +1692,54 @@ test_ring_rewrap_with_images(void)
         }
 }
 
+
+static void
+test_ring_scrollback_restore_respects_the_budget(void)
+{
+        /* Scrolling back through history that held images must not blow the
+         * memory budget.
+         *
+         * Faulting an image in from the scrollback ADDS to the accounting, so
+         * it has to be collected against like any other addition. It was not:
+         * indexing rows read-only, which is all Page Up does, pulled every
+         * image back into RAM and nothing evicted them. Measured at 8.3 times
+         * the configured budget before the fix.
+         */
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 4);
+
+        /* One image per row, on distinct rows so they coexist. */
+        for (auto i = 0; i < 12; i++) {
+                widen_row(ring, 2 + i, 4);
+                place_image(ring, 2 + i, 1);
+                auto* const img = ring.image_map().rbegin()->second.get();
+                ring.set_placing_image(img);
+                ring.stamp_image_row(2 + i, 0, 4, 0);
+                ring.set_placing_image(nullptr);
+        }
+
+        /* Freeze them all, then set a budget that only a couple can fit. */
+        append_rows(ring, 300);
+        auto const budget = size_t{9600};
+        ring.set_image_memory_max(budget);
+        g_assert_cmpuint(ring.image_memory_used(), <=, budget);
+
+        /* Now scroll back over them, read only. */
+        for (auto i = 0; i < 12; i++)
+                (void)ring.index(2 + i);
+
+        g_assert_cmpuint(ring.image_memory_used(), <=, budget);
+
+        /* And the accounting still matches what is actually resident, so the
+         * bound is a real one rather than a stale counter.
+         */
+        auto sum = size_t{0};
+        for (auto const& [priority, image] : ring.image_map())
+                sum += image->resource_size();
+        g_assert_cmpuint(sum, ==, ring.image_memory_used());
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1751,6 +1799,7 @@ main(int argc,
         g_test_add_func("/vte/ring/image/limit-zero-disables", test_ring_image_limit_zero_disables);
         g_test_add_func("/vte/ring/image/limit-shrinks-immediately", test_ring_image_limit_shrinks_immediately);
 
+        g_test_add_func("/vte/ring/scrollback-restore-respects-the-budget", test_ring_scrollback_restore_respects_the_budget);
         g_test_add_func("/vte/ring/rewrap-with-images", test_ring_rewrap_with_images);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);

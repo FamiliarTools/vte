@@ -395,7 +395,7 @@ private:
          * mutation drains it to repaint. */
         bool m_images_changed{false};
 
-        void image_gc() noexcept;
+        void image_gc(vte::image::Image const* exempt = nullptr) noexcept;
         void sweep_image_pool() noexcept;
         void image_gc_region() noexcept;
         void unlink_image_from_top_map(vte::image::Image const* image) noexcept;
