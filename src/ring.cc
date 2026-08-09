@@ -604,6 +604,14 @@ Ring::restore_image(size_t priority) /* throws */
         m_image_by_top_map.emplace(raw->get_top(), raw);
         sync_has_images();
 
+        /* Faulting an image back in from the scrollback ADDS to the budget, so
+         * it has to be collected against like any other addition. Without this
+         * scrolling back through history that held images pulls every one of
+         * them into RAM and nothing ever evicts them: measured at 8.3 times the
+         * configured budget from Page Up alone.
+         */
+        image_gc(raw);
+
         return raw;
 }
 
@@ -640,7 +648,7 @@ Ring::reclaim_image_spill(row_t before_row) noexcept
 }
 
 void
-Ring::image_gc() noexcept
+Ring::image_gc(vte::image::Image const* exempt) noexcept
 {
         while (m_image_fast_memory_used > m_image_memory_max ||
                m_image_map.size() > IMAGE_FAST_COUNT_MAX) {
@@ -649,7 +657,22 @@ Ring::image_gc() noexcept
                         break;
                 }
 
-                auto& image = m_image_map.begin()->second;
+                /* Oldest first, except that an image restored from the
+                 * scrollback a moment ago must not be the victim.
+                 *
+                 * It is by construction the OLDEST thing in the map - that is
+                 * what being in the scrollback means - so without this it would
+                 * be evicted immediately every time and the row that faulted it
+                 * in would fault it again on the next frame.
+                 */
+                auto victim = m_image_map.begin();
+                if (exempt != nullptr && victim->second.get() == exempt) {
+                        ++victim;
+                        if (victim == m_image_map.end())
+                                break;
+                }
+
+                auto& image = victim->second;
 
                 /* Evicted for memory, not erased by the user: rows naming it
                  * can still be thawed, so keep the pixels where they cost
@@ -660,7 +683,7 @@ Ring::image_gc() noexcept
                 m_image_fast_memory_used -= image->resource_size();
                 note_image_freed(image.get());
                 unlink_image_from_top_map(image.get());
-                m_image_map.erase(m_image_map.begin());
+                m_image_map.erase(victim);
         }
 
         sync_has_images();
