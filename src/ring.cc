@@ -428,6 +428,29 @@ Ring::sweep_image_pool() noexcept
  * never reused, so unlike a pool id it still means the same image whenever it
  * is read back.
  */
+/*
+ * Append the current attribute's image reference to the attr stream.
+ *
+ * Written BEFORE the record's 2-byte trailer, because the trailer has to stay
+ * last for thaw_row's backwards walk to find it.
+ */
+void
+Ring::append_stream_image_ref() noexcept
+{
+        StreamImageRef sref;
+        memset(&sref, 0, sizeof(sref));
+
+        /* Resolve the pool id to the image's stable priority while the pool can
+         * still answer. An image already gone writes priority 0, which resolves
+         * to nothing on the way back in.
+         */
+        auto const* img = m_image_pool.lookup(m_last_attr.image_ref());
+        sref.priority = img ? uint64_t(img->get_priority()) + 1 : 0;
+        sref.ref_bits = m_last_attr.link_raw();
+
+        _vte_stream_append(m_attr_stream, (char const*)&sref, sizeof(sref));
+}
+
 void
 Ring::spill_image(vte::image::Image const* image) noexcept
 {
@@ -1316,7 +1339,17 @@ Ring::freeze_row(row_t position,
                                         froze_hyperlink = TRUE;
                                 }
                                 hyperlink_length = attr_change.attr.hyperlink_length;
-                                _vte_stream_append (m_attr_stream, (char const* ) &hyperlink_length, 2);
+                                /* Image reference BEFORE the trailer: the
+                                 * trailer must stay last for the backwards
+                                 * walk. See attr_trailer() in ring.hh.
+                                 */
+                                if (G_UNLIKELY (m_last_attr.image()))
+                                        append_stream_image_ref();
+                                {
+                                        auto const trailer = attr_trailer(hyperlink_length,
+                                                                          m_last_attr.image());
+                                        _vte_stream_append (m_attr_stream, (char const* ) &trailer, 2);
+                                }
 
                                 /* An image cell's reference, after the
                                  * hyperlink tail. Only the run's FIRST cell's
@@ -1328,24 +1361,6 @@ Ring::freeze_row(row_t position,
                                  * recovered on thaw by counting.
                                  */
                                 auto const has_image = m_last_attr.image();
-                                if (G_UNLIKELY (has_image)) {
-                                        StreamImageRef sref;
-                                        memset(&sref, 0, sizeof(sref));
-
-                                        /* Resolve the pool id to the image's
-                                         * stable priority while the pool can
-                                         * still answer. An image already gone
-                                         * writes priority 0, which resolves to
-                                         * nothing on the way back in.
-                                         */
-                                        auto const* img =
-                                                m_image_pool.lookup(m_last_attr.image_ref());
-                                        sref.priority = img ? uint64_t(img->get_priority()) + 1 : 0;
-                                        sref.ref_bits = m_last_attr.link_raw();
-
-                                        _vte_stream_append (m_attr_stream,
-                                                            (char const*) &sref, sizeof(sref));
-                                }
 
 				if (!buffer->len)
 					/* This row doesn't use last_attr, adjust */
@@ -1370,7 +1385,17 @@ Ring::freeze_row(row_t position,
                                         froze_hyperlink = TRUE;
                                 }
                                 hyperlink_length = attr_change.attr.hyperlink_length;
-                                _vte_stream_append (m_attr_stream, (char const* ) &hyperlink_length, 2);
+                                /* Image reference BEFORE the trailer: the
+                                 * trailer must stay last for the backwards
+                                 * walk. See attr_trailer() in ring.hh.
+                                 */
+                                if (G_UNLIKELY (m_last_attr.image()))
+                                        append_stream_image_ref();
+                                {
+                                        auto const trailer = attr_trailer(hyperlink_length,
+                                                                          m_last_attr.image());
+                                        _vte_stream_append (m_attr_stream, (char const* ) &trailer, 2);
+                                }
 				m_last_attr = attr;
 			}
 
@@ -1479,7 +1504,7 @@ Ring::thaw_row(row_t position,
                                         StreamImageRef sref;
                                         if (!_vte_stream_read (m_attr_stream,
                                                                record_start + sizeof (attr_change) +
-                                                               attr_change.attr.hyperlink_length + 2,
+                                                               attr_change.attr.hyperlink_length,
                                                                (char*) &sref, sizeof(sref)))
                                                 return;
 
@@ -1629,13 +1654,15 @@ Ring::thaw_row(row_t position,
 		_vte_debug_print(vte::debug::category::RING, "Truncating");
 		if (records[0].text_start_offset <= m_last_attr_text_start_offset) {
 			/* Check the previous attr record. If its text ends where truncating, this attr record also needs to be removed. */
-                        guint16 hyperlink_length;
-                        if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - 2, (char *) &hyperlink_length, 2)) {
+                        guint16 trailer;
+                        if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - 2, (char *) &trailer, 2)) {
+                                auto const hyperlink_length = trailer_length(trailer);
+                                auto const tr_image = trailer_has_image(trailer);
                                 vte_assert_cmpuint (hyperlink_length, <=, VTE_HYPERLINK_TOTAL_LENGTH_MAX);
-                                if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - attr_record_stride(hyperlink_length), (char *) &attr_change, sizeof (attr_change))) {
+                                if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - attr_record_stride(hyperlink_length, tr_image), (char *) &attr_change, sizeof (attr_change))) {
                                         if (records[0].text_start_offset == attr_change.text_end_offset) {
                                                 _vte_debug_print(vte::debug::category::RING, "... at attribute change");
-                                                attr_stream_truncate_at -= attr_record_stride(hyperlink_length);
+                                                attr_stream_truncate_at -= attr_record_stride(hyperlink_length, tr_image);
                                         }
 				}
 			}
@@ -1648,9 +1675,11 @@ Ring::thaw_row(row_t position,
                                         hyperlink_readbuf[attr_change.attr.hyperlink_length] = '\0';
                                         m_last_attr.set_hyperlink_idx(get_hyperlink_idx(hyperlink_readbuf));
                                 }
-                                if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - 2, (char *) &hyperlink_length, 2)) {
-                                        vte_assert_cmpuint (hyperlink_length, <=, VTE_HYPERLINK_TOTAL_LENGTH_MAX);
-                                        if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - attr_record_stride(hyperlink_length), (char *) &attr_change, sizeof (attr_change))) {
+                                if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - 2, (char *) &trailer, 2)) {
+                                        auto const prev_length = trailer_length(trailer);
+                                        auto const prev_image = trailer_has_image(trailer);
+                                        vte_assert_cmpuint (prev_length, <=, VTE_HYPERLINK_TOTAL_LENGTH_MAX);
+                                        if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - attr_record_stride(prev_length, prev_image), (char *) &attr_change, sizeof (attr_change))) {
                                                 m_last_attr_text_start_offset = attr_change.text_end_offset;
                                         } else {
                                                 m_last_attr_text_start_offset = 0;
@@ -2478,7 +2507,8 @@ Ring::rewrap(column_t columns,
 		/* Wrap the paragraph */
 		if (attr_change.text_end_offset <= text_offset) {
 			/* Attr change at paragraph boundary, advance to next attr. */
-                        attr_offset += attr_record_stride(attr_change.attr.hyperlink_length);
+                        attr_offset += attr_record_stride(attr_change.attr.hyperlink_length,
+                                                          record_has_image(attr_change));
 			if (!_vte_stream_read(m_attr_stream, attr_offset, (char *) &attr_change, sizeof (attr_change))) {
                                 _attrcpy(&attr_change.attr, &m_last_attr);
                                 attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx_or_none())->len;
@@ -2496,7 +2526,8 @@ Ring::rewrap(column_t columns,
 			gsize runlength;  /* number of bytes we process in one run: identical attributes, within paragraph */
 			if (attr_change.text_end_offset <= text_offset) {
 				/* Attr change at line boundary, advance to next attr. */
-                                attr_offset += attr_record_stride(attr_change.attr.hyperlink_length);
+                                attr_offset += attr_record_stride(attr_change.attr.hyperlink_length,
+                                                          record_has_image(attr_change));
 				if (!_vte_stream_read(m_attr_stream, attr_offset, (char *) &attr_change, sizeof (attr_change))) {
                                         _attrcpy(&attr_change.attr, &m_last_attr);
                                         attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx_or_none())->len;
