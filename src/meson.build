@@ -1097,6 +1097,64 @@ if get_option('gtk3')
   test_units += [test_vtetypes,]
 endif
 
+# Round-trip properties of the ring's compressed tier. Drives the real Ring
+# against the real streams, so it needs the ring and the stream backends rather
+# than a stub, plus the generated public headers that ring.hh reaches through
+# <vte/vte.h>. Those headers differ per backend, so it is built once per
+# enabled backend, exactly as the library is.
+
+test_ring_roundtrip_common_sources = config_sources + debug_sources + glib_glue_sources + refptr_sources + std_glue_sources + files(
+  'cxx-utils.hh',
+  'ring-roundtrip-test.cc',
+  'ring.cc',
+  'ring.hh',
+  'vtedefines.hh',
+  'vterowdata.cc',
+  'vterowdata.hh',
+  'vtestream-base.h',
+  'vtestream-file.h',
+  'vtestream.cc',
+  'vtestream.h',
+  'vteunistr.cc',
+  'vteunistr.h',
+  'vteutils.cc',
+  'vteutils.h',
+)
+
+test_ring_roundtrip_common_deps = [
+  fmt_dep,
+  gio_dep,
+  glib_dep,
+  gnutls_dep,
+  liblz4_dep,
+]
+
+if get_option('gtk3')
+  test_ring_roundtrip_gtk3 = executable(
+    'test-ring-roundtrip-gtk3',
+    cpp_args: ['-DVTE_GTK=3', '-DVTE_COMPILATION',],
+    sources: test_ring_roundtrip_common_sources + libvte_gtk3_public_headers,
+    dependencies: test_ring_roundtrip_common_deps + [gtk3_dep,],
+    include_directories: incs,
+    install: false,
+  )
+
+  test_units += [test_ring_roundtrip_gtk3,]
+endif # gtk3
+
+if get_option('gtk4')
+  test_ring_roundtrip_gtk4 = executable(
+    'test-ring-roundtrip-gtk4',
+    cpp_args: ['-DVTE_GTK=4', '-DVTE_COMPILATION',],
+    sources: test_ring_roundtrip_common_sources + libvte_gtk4_public_headers,
+    dependencies: test_ring_roundtrip_common_deps + [gtk4_dep,],
+    include_directories: incs,
+    install: false,
+  )
+
+  test_units += [test_ring_roundtrip_gtk4,]
+endif # gtk4
+
 # Run unit tests
 
 test_env = [
