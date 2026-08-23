@@ -72,7 +72,22 @@ export VTE_SIXEL=1
 # the test is a coin flip on blink phase.
 CHILD="printf '\\033[H'; cat '$SIX'; printf '\\033[20;1H'; sleep 30"
 
-"$APP" --no-decorations --geometry 80x24 -- sh -c "$CHILD" >"$WORK/app.log" 2>&1 &
+# Pin the font, because the golden is a PIXEL comparison and an image's DRAWN
+# size is (cells it occupies) x (font cell size). The cells it occupies are
+# font-independent by design - that is the fixed emulated cell - but the pixels
+# are not, so a machine whose default monospace resolves to different metrics
+# renders the same image at a different scale and every golden mismatches by a
+# uniform factor. That is not a regression, and a test that cannot tell the
+# difference is worse than no test.
+#
+# Pinning the family and size removes the settings-derived variation. It does
+# NOT make this fully portable: fontconfig still resolves "Monospace" to
+# whatever the system has. If every render case fails at once and the actual
+# frames look right but scaled, that is this, and the fix is --update-golden on
+# your machine, not a code change.
+FONT=${VTE_TEST_FONT:-Monospace 12}
+
+"$APP" --no-decorations --geometry 80x24 --font "$FONT" -- sh -c "$CHILD" >"$WORK/app.log" 2>&1 &
 APID=$!
 sleep 6
 

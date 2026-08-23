@@ -3,6 +3,24 @@ Virtual TErminal
 
 VTE provides a virtual terminal widget for GTK applications.
 
+This is a fork
+--------------
+
+Branch `sixel-cellstore` forks VTE 0.84 to make inline SIXEL images an
+attribute of the cells they cover, rather than an entry in a side table keyed by
+row - which is the design problem upstream cites when it removes SIXEL support
+from every stable branch. Images then survive reflow, erase, scrollback and
+eviction because they ride the mechanisms the ring already has, and the parallel
+row-anchored bookkeeping is deleted.
+
+**Read [SIXEL.md](SIXEL.md) for the design, what is verified, and what is not
+done.**
+
+This branch was written with AI assistance, which upstream's contribution policy
+(below) does not permit, so it is not upstreamable as authored and no merge
+request has been opened. It is published as a working fork and as a reference
+implementation. Licensing is unchanged from upstream.
+
 CI status
 ---------
 
