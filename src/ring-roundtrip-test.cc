@@ -39,9 +39,14 @@
 
 #include <glib.h>
 
+#include <algorithm>
+#include <cstring>
+#include <functional>
+#include <string>
 #include <vector>
 
 #include "ring.hh"
+#include "vtedefines.hh"
 #include "vterowdata.hh"
 #include "vteunistr.h"
 
@@ -119,8 +124,63 @@ randomise_sgr(VteCellAttr* attr)
         attr->set_deco(rand_below(256));
 }
 
-/* Append one generated row to @ring with the given wrapping and bidi flags,
- * and return the reference copy.
+/* An instruction to write a hyperlink onto a run of a generated row's cells,
+ * together with the description of the run that was written.
+ *
+ * Only the hyperlink tests below pass one of these; every other caller leaves
+ * the generated row unlinked.
+ */
+struct LinkRequest {
+        Ring::hyperlink_idx_t idx{0};   /* in: the pool idx to write */
+        bool reach_end_of_row{false};   /* in: the run must end at the last cell */
+        Ring::column_t first{0};        /* out: the first linked cell */
+        Ring::column_t last{0};         /* out: the last linked cell, inclusive */
+        Ring::column_t neighbour{0};    /* out: a cell of the same row with no link */
+};
+
+/* Write the requested hyperlink idx onto a run of @row's cells, and record
+ * where the run ended up.
+ *
+ * The run is grown outwards over fragment cells rather than being allowed to
+ * end inside a wide character. A fragment does not carry its own attributes
+ * through the stream - it is rebuilt from the attributes of the cell it
+ * continues - so a run covering a base cell but not its fragment describes a
+ * row the ring cannot produce, and the test, not the ring, would be wrong.
+ */
+static void
+write_hyperlink_run(VteRowData* row,
+                    RowSnapshot* snapshot,
+                    LinkRequest* link)
+{
+        auto const len = Ring::column_t(snapshot->cells.size());
+        g_assert_cmpint(len, >=, 8);
+
+        auto first = Ring::column_t(2 + rand_below(int(len) / 3));
+        auto last = link->reach_end_of_row
+                ? len - 1
+                : std::max(first, std::min(len - 2, first + 2 + Ring::column_t(rand_below(6))));
+
+        while (first > 0 && snapshot->cells[size_t(first)].attr.fragment())
+                first--;
+        while (last + 1 < len && snapshot->cells[size_t(last) + 1].attr.fragment())
+                last++;
+
+        g_assert_cmpint(first, >=, 1);
+        g_assert_cmpint(first, <=, last);
+        g_assert_cmpint(last, <=, len - 1);
+
+        for (auto col = first; col <= last; col++) {
+                row->cells[col].attr.hyperlink_idx = link->idx;
+                snapshot->cells[size_t(col)].attr.hyperlink_idx = link->idx;
+        }
+
+        link->first = first;
+        link->last = last;
+        link->neighbour = first - 1;
+}
+
+/* Append one generated row of @width cells to @ring with the given wrapping and
+ * bidi flags, and return the reference copy.
  *
  * The flags are a parameter rather than another random draw because the rewrap
  * tests need them to describe a paragraph: rewrap only ever sees paragraphs,
@@ -135,7 +195,9 @@ randomise_sgr(VteCellAttr* attr)
 static RowSnapshot
 append_generated_row(Ring& ring,
                      guint8 bidi_flags,
-                     bool soft_wrapped)
+                     bool soft_wrapped,
+                     int width,
+                     LinkRequest* link = nullptr)
 {
         auto snapshot = RowSnapshot{};
         snapshot.bidi_flags = bidi_flags;
@@ -143,8 +205,6 @@ append_generated_row(Ring& ring,
 
         auto* const row = ring.append(snapshot.bidi_flags);
         row->attr.soft_wrapped = snapshot.soft_wrapped;
-
-        auto const width = rand_below(80);
 
         auto attr = VteCellAttr{};
         auto run_left = 0;
@@ -225,7 +285,19 @@ append_generated_row(Ring& ring,
                 }
         }
 
+        if (link != nullptr)
+                write_hyperlink_run(row, &snapshot, link);
+
         return snapshot;
+}
+
+/* Append one generated row of a random width. */
+static RowSnapshot
+append_generated_row(Ring& ring,
+                     guint8 bidi_flags,
+                     bool soft_wrapped)
+{
+        return append_generated_row(ring, bidi_flags, soft_wrapped, rand_below(80));
 }
 
 /* Append one generated row with random wrapping and bidi flags. The freeze
@@ -305,6 +377,41 @@ assert_actually_froze(Ring& ring)
                 g_error("only %lu of %d rows left the writable window - this test "
                         "would pass without exercising the streams at all",
                         frozen, kCorpusRows);
+        }
+}
+
+/* Whether two distinct rows are both held in the streams rather than in the
+ * writable array.
+ *
+ * The ring publishes no accessor for that boundary, but it does publish one
+ * consequence of it: index() answers for a writable row out of that row's own
+ * storage, and for a frozen row out of the single row it thaws into, so two
+ * different rows answering with the same address are two frozen rows.
+ *
+ * This is used only to assert that a test is testing something. The hyperlink
+ * test below is entirely about bytes in the attribute stream, and an assertion
+ * of that kind which quietly ran against the writable array would pass while
+ * proving nothing at all.
+ */
+static bool
+rows_are_frozen(Ring& ring,
+                Ring::row_t a,
+                Ring::row_t b)
+{
+        g_assert_cmpuint(a, !=, b);
+        return ring.index(a) == ring.index(b);
+}
+
+static void
+assert_rows_are_frozen(Ring& ring,
+                       Ring::row_t a,
+                       Ring::row_t b,
+                       char const* what)
+{
+        if (!rows_are_frozen(ring, a, b)) {
+                g_error("rows %lu and %lu are not both in the streams, so %s "
+                        "would be checked against the writable array",
+                        a, b, what);
         }
 }
 
@@ -823,6 +930,439 @@ test_rewrap_canonical_state_is_a_fixed_point(void)
                 assert_marker_came_home(ring, positions[i], planted[i]);
 }
 
+/* The walker invariant: a hyperlink target is opaque bytes framed by a length.
+ *
+ * The attribute stream is a sequence of records, and a record with a hyperlink
+ * is a record followed by the target's bytes followed by two bytes repeating
+ * the target's length so that the stream can also be walked backwards. Nothing
+ * separates a record from the payload before it. The only thing that keeps the
+ * stream parseable is that every walk over it steps across a payload BY ITS
+ * LENGTH, and the ring walks it in four places: freeze_row, the forward walk of
+ * thaw_row, the backwards walk thaw_row does when it truncates, and rewrap.
+ *
+ * That is the whole invariant, and it is invisible in normal use because a real
+ * target is a short run of printable ASCII: get one of the six steps wrong by a
+ * constant and the walk still lands somewhere harmless most of the time. So the
+ * targets here are chosen to be as unlike a target as the API allows while
+ * still being legal - a single byte, the longest target that can be read back,
+ * one whose leading bytes are a forged record, one whose trailing bytes are a
+ * forged length, and one made of newlines and bytes that are not UTF-8 at all.
+ * A stride that lands short or long after any of those lands ON something that
+ * looks like a record, and the rows that follow come back as something else.
+ *
+ * Hence the shape of the assertions. Reading a target back is the direct half;
+ * the sweep over every row AFTER a payload is the other half, and it is the one
+ * that catches a mis-stride, because a misframed record corrupts the rows that
+ * follow it rather than the payload itself.
+ *
+ * What is NOT asserted, deliberately:
+ *
+ *  - the hyperlink_idx a thawed cell reports. A cell thawed for display gets
+ *    the pseudo idx VTE_HYPERLINK_IDX_TARGET_IN_STREAM, and one thawed through
+ *    get_hyperlink_at_position gets a freshly allocated pool idx. Only whether
+ *    a cell carries a link, and which target it names, are contractual.
+ *  - anything about targets longer than VTE_HYPERLINK_TOTAL_LENGTH_MAX or
+ *    containing a NUL. Freezing one of those would truncate the two byte length
+ *    while appending the whole payload and corrupt the stream by design; the
+ *    cap belongs to the escape sequence parser, and a char* cannot carry a NUL.
+ *  - that a payload is valid UTF-8 or renderable. To the ring it is bytes.
+ */
+
+/* Rows before the first payload, so that the walks have somewhere to come from,
+ * and enough rows in total that everything of interest ends up frozen with room
+ * to spare. Both are checked rather than assumed: see assert_rows_are_frozen().
+ */
+static int const kHyperlinkLeadRows = 24;
+static int const kHyperlinkCorpusRows = 320;
+
+/* A width narrow enough that most paragraphs have to be re-divided, so the
+ * rewrap walk really does cross attribute records looking for row boundaries.
+ */
+static Ring::column_t const kNarrowColumns = 37;
+
+/* Every other payload's run is made to end exactly at its row's last cell, so
+ * that the record flushed for it ends exactly where the next row's text begins.
+ * That equality is the one case the backwards walk singles out, and the runs in
+ * between cover the case where it does not hold.
+ *
+ * The designated one, the target the deepest walk backwards is aimed at, is the
+ * first - which is why the first is also the longest payload there can be.
+ */
+static size_t const kBoundaryTarget = 0;
+
+static bool
+target_reaches_end_of_row(size_t target)
+{
+        return target % 2 == 0;
+}
+
+/* Payloads that are legal for the ring to carry - NUL free and no longer than
+ * the largest length it will read back - and otherwise as hostile to a walk
+ * that guesses at framing as they can be made.
+ */
+static std::vector<std::string>
+adversarial_hyperlink_targets(void)
+{
+        auto targets = std::vector<std::string>{};
+
+        /* The longest payload the ring will read back: thaw_row reads it into a
+         * buffer of exactly this size and asserts the length against it, so
+         * this is the value sitting on the edge of both.
+         */
+        auto longest = std::string{};
+        while (longest.size() < VTE_HYPERLINK_TOTAL_LENGTH_MAX)
+                longest.push_back(char('!' + (longest.size() % 90)));
+        targets.push_back(std::move(longest));
+        g_assert_cmpuint(targets.back().size(), ==, VTE_HYPERLINK_TOTAL_LENGTH_MAX);
+
+        /* The shortest payload there is. A record, its payload and its trailing
+         * length are never closer together than this, so a stride that is off
+         * by a constant lands inside a neighbouring field rather than in the
+         * middle of a long payload where it might go unnoticed.
+         */
+        targets.emplace_back("x");
+
+        /* A payload whose leading bytes are a forged attribute record with a
+         * large hyperlink length of its own. A forward stride that landed at
+         * the start of the payload instead of past it would read this and jump
+         * off into the middle of the stream.
+         */
+        auto forgery = std::string{};
+        forgery.append(sizeof(gsize), '\x41');        /* where text_end_offset sits */
+        forgery.append(sizeof(uint32_t), '\x42');     /* where the attr word sits */
+        forgery.append(sizeof(uint64_t), '\x43');     /* where the colour triple sits */
+        forgery.push_back('\xd0');                    /* where hyperlink_length sits: */
+        forgery.push_back('\x07');                    /* 2000, little endian, NUL free */
+        g_assert_cmpuint(forgery.size(), ==, sizeof(gsize) + sizeof(VteStreamCellAttr));
+        forgery.append(200, '\x2e');
+        targets.push_back(std::move(forgery));
+
+        /* A payload whose LAST two bytes are a plausible trailing length. The
+         * backwards walk reads the two bytes that follow a payload; one that
+         * read the two bytes that end it would get 0x0122 from here and step
+         * back to a record that is not there.
+         */
+        auto decoy = std::string(300, 'T');
+        decoy[decoy.size() - 2] = '\x22';
+        decoy[decoy.size() - 1] = '\x01';
+        targets.push_back(std::move(decoy));
+
+        /* A payload that is not text: runs of newlines, which is what separates
+         * rows in the TEXT stream, and bytes that no UTF-8 decoder will accept.
+         */
+        auto binary = std::string{};
+        for (auto i = 0; i < 40; i++) {
+                binary.append(size_t(1 + i % 5), '\n');
+                for (auto b = 0; b < 6; b++)
+                        binary.push_back(char(0x80 + (i * 7 + b * 13) % 0x80));
+        }
+        targets.push_back(std::move(binary));
+
+        for (auto const& target : targets) {
+                g_assert_cmpuint(target.size(), >, 0);
+                g_assert_cmpuint(target.size(), <=, VTE_HYPERLINK_TOTAL_LENGTH_MAX);
+                g_assert_cmpuint(target.find('\0'), ==, std::string::npos);
+        }
+
+        return targets;
+}
+
+/* Where one payload was written into the corpus. */
+struct LinkedRun {
+        size_t target;            /* index into the table of targets */
+        Ring::row_t row;          /* relative to delta() */
+        Ring::column_t first;
+        Ring::column_t last;      /* inclusive */
+        Ring::column_t neighbour; /* a cell of the same row carrying no link */
+};
+
+static size_t
+first_difference(char const* got,
+                 std::string const& want)
+{
+        size_t i = 0;
+        while (got[i] != '\0' && i < want.size() && got[i] == want[i])
+                i++;
+        return i;
+}
+
+/* Append a plain row that is guaranteed to hold at least one cell.
+ *
+ * An empty row contributes no attribute change, so a run that ended on the row
+ * before it would be flushed to the stream only once a later row was frozen and
+ * the record boundary would not be where this test says it is.
+ */
+static void
+append_plain_row(Ring& ring,
+                 std::vector<RowSnapshot>* rows)
+{
+        rows->push_back(append_generated_row(ring,
+                                             guint8(rand_below(16)),
+                                             bool(rand_below(2)),
+                                             1 + rand_below(60)));
+}
+
+static void
+assert_targets_round_trip(Ring& ring,
+                          std::vector<std::string> const& targets,
+                          std::vector<LinkedRun> const& runs,
+                          std::vector<RowSnapshot> const& rows,
+                          char const* when)
+{
+        /* Every row, in particular every row that follows a payload. A forward
+         * stride that lands short or long after one reads the next record out
+         * of the middle of something else, and it is these rows, not the
+         * payload, that then come back wrong.
+         */
+        for (size_t i = 0; i < rows.size(); i++)
+                assert_row_matches(ring, ring.delta() + Ring::row_t(i), rows[i]);
+
+        for (auto const& run : runs) {
+                auto const& target = targets[run.target];
+
+                for (auto col = run.first; col <= run.last; col++) {
+                        char const* got = nullptr;
+                        auto const idx = ring.get_hyperlink_at_position(
+                                ring.delta() + run.row, col, false, &got);
+
+                        if (idx == 0 || got == nullptr) {
+                                g_error("row %lu col %ld reports no hyperlink %s, "
+                                        "but a target of %zu bytes was written there",
+                                        run.row, col, when, target.size());
+                        }
+                        if (strcmp(got, target.c_str()) != 0) {
+                                g_error("row %lu col %ld: a target of %zu bytes came "
+                                        "back as %zu bytes %s, first differing at "
+                                        "byte %zu",
+                                        run.row, col, target.size(), strlen(got),
+                                        when, first_difference(got, target));
+                        }
+                }
+
+                char const* got = nullptr;
+                auto const idx = ring.get_hyperlink_at_position(
+                        ring.delta() + run.row, run.neighbour, false, &got);
+                if (idx != 0 || got != nullptr) {
+                        g_error("row %lu col %ld carries no hyperlink but reports "
+                                "idx %u and a target of %zu bytes %s",
+                                run.row, run.neighbour, idx,
+                                got != nullptr ? strlen(got) : 0, when);
+                }
+        }
+}
+
+/* Count, over the whole ring, how many cells name each target - and fail if any
+ * cell names something else.
+ *
+ * Whether a cell carries a link is read from the cell, which is contractual;
+ * WHICH link it carries is asked of the ring, because a thawed cell's idx names
+ * the stream rather than the pool.
+ */
+static std::vector<size_t>
+count_linked_cells(Ring& ring,
+                   std::vector<std::string> const& targets)
+{
+        auto counts = std::vector<size_t>(targets.size(), 0);
+        auto linked = std::vector<Ring::column_t>{};
+
+        for (auto position = ring.delta(); position < ring.next(); position++) {
+                auto const* const row = ring.index(position);
+                g_assert_nonnull(row);
+
+                /* Collect the columns first: reading a target thaws a row over
+                 * the one this pointer is into.
+                 */
+                linked.clear();
+                for (unsigned int col = 0; col < row->len; col++) {
+                        if (row->cells[col].attr.hyperlink_idx != 0)
+                                linked.push_back(Ring::column_t(col));
+                }
+
+                for (auto const col : linked) {
+                        char const* got = nullptr;
+                        auto const idx = ring.get_hyperlink_at_position(position, col,
+                                                                       false, &got);
+                        if (idx == 0 || got == nullptr) {
+                                g_error("row %lu col %ld carries a hyperlink but "
+                                        "reports no target", position, col);
+                        }
+
+                        size_t t = 0;
+                        while (t < targets.size() && targets[t] != got)
+                                t++;
+                        if (t == targets.size()) {
+                                g_error("row %lu col %ld names a target of %zu bytes "
+                                        "that the corpus never wrote",
+                                        position, col, strlen(got));
+                        }
+                        counts[t]++;
+                }
+        }
+
+        return counts;
+}
+
+static void
+assert_counts_match(std::vector<size_t> const& got,
+                    std::vector<size_t> const& want,
+                    char const* when)
+{
+        g_assert_cmpuint(got.size(), ==, want.size());
+
+        for (size_t t = 0; t < want.size(); t++) {
+                if (got[t] != want[t]) {
+                        g_error("target %zu is on %zu cells %s, on %zu before",
+                                t, got[t], when, want[t]);
+                }
+        }
+}
+
+static void
+test_hyperlink_walker_invariant(void)
+{
+        /* Room for far more rows than the corpus produces, so that nothing is
+         * ever dropped off the top: the tail of the streams is advanced when
+         * rows are discarded, and this test is about their contents.
+         */
+        auto ring = Ring{Ring::row_t(1) << 20, true /* has_streams */};
+        ring.set_visible_rows(kVisibleRows);
+
+        auto const targets = adversarial_hyperlink_targets();
+        auto rows = std::vector<RowSnapshot>{};
+        auto runs = std::vector<LinkedRun>{};
+
+        for (auto i = 0; i < kHyperlinkLeadRows; i++)
+                append_plain_row(ring, &rows);
+
+        for (size_t t = 0; t < targets.size(); t++) {
+                auto link = LinkRequest{};
+
+                /* Allocated immediately before the cells that will name it. An
+                 * idx is safe from the collector only while it is the current
+                 * one or while a writable cell names it, and the collector runs
+                 * inside get_hyperlink_idx itself - which is the point. Once the
+                 * row is frozen the pool entry is free to go, and from then on
+                 * the stream holds the only copy of the target.
+                 */
+                link.idx = ring.get_hyperlink_idx(targets[t].c_str());
+                g_assert_cmpuint(link.idx, !=, 0);
+                link.reach_end_of_row = target_reaches_end_of_row(t);
+
+                auto row = append_generated_row(ring,
+                                                guint8(rand_below(16)),
+                                                link.reach_end_of_row
+                                                        ? false
+                                                        : bool(rand_below(2)),
+                                                24 + rand_below(40),
+                                                &link);
+                runs.push_back(LinkedRun{t, Ring::row_t(rows.size()),
+                                         link.first, link.last, link.neighbour});
+                rows.push_back(std::move(row));
+
+                /* A run's record is written only when the NEXT attribute change
+                 * is frozen, and the run still current at freezing time is
+                 * served from memory. Without a plain row behind it a payload
+                 * would never reach the stream and this test would prove
+                 * nothing.
+                 */
+                auto const plain = 1 + rand_below(3);
+                for (auto i = 0; i < plain; i++)
+                        append_plain_row(ring, &rows);
+        }
+
+        while (rows.size() < size_t(kHyperlinkCorpusRows))
+                append_plain_row(ring, &rows);
+
+        auto const boundary_row = runs[kBoundaryTarget].row;
+
+        /* A boundary run has to end on its row's last cell, and the row after it
+         * has to carry text of its own. That is what makes the flushed record's
+         * text_end_offset equal to the next row's text_start_offset, which is
+         * the case the backwards walk singles out. The designated one, the row
+         * the deepest walk backwards stops at, is checked along with the rest.
+         */
+        g_assert_true(target_reaches_end_of_row(kBoundaryTarget));
+        for (auto const& run : runs) {
+                if (!target_reaches_end_of_row(run.target))
+                        continue;
+
+                g_assert_cmpint(run.last, ==,
+                                Ring::column_t(rows[run.row].cells.size()) - 1);
+                g_assert_false(rows[run.row].soft_wrapped);
+                g_assert_cmpuint(rows[run.row + 1].cells.size(), >, 0);
+        }
+
+        assert_actually_froze(ring);
+        for (auto const& run : runs) {
+                assert_rows_are_frozen(ring, ring.delta() + run.row,
+                                       ring.delta() + run.row + 1,
+                                       "a payload and the row after it");
+        }
+
+        assert_targets_round_trip(ring, targets, runs, rows, "after freezing");
+
+        /* Now walk backwards into the frozen region. Bringing a row back into
+         * the writable array thaws every row above it, and each of those reads
+         * the record before its own by stepping back over a payload using the
+         * two byte length that follows it. The deepest probe is the row just
+         * after the designated run, so the last step of all is the one that has
+         * to notice a record ending exactly on a row boundary.
+         */
+        auto probes = std::vector<Ring::row_t>{};
+        for (auto i = 0; i < 3; i++) {
+                probes.push_back(boundary_row + 2 +
+                                 Ring::row_t(rand_below(int(rows.size()) -
+                                                        int(boundary_row) - 2)));
+        }
+        std::sort(probes.begin(), probes.end(), std::greater<Ring::row_t>{});
+        for (auto const probe : probes)
+                g_assert_nonnull(ring.index_writable(ring.delta() + probe));
+
+        auto const thawed_end = ring.next();
+        auto const thawed_start = ring.delta() + boundary_row + 1;
+        g_assert_nonnull(ring.index_writable(thawed_start));
+
+        /* Push all of it back out. The writable array holds fewer rows than
+         * twice the number just thawed, and once it is full every further
+         * append freezes exactly one row, so this many appends is more than
+         * enough - and the assertion below is what actually checks it.
+         */
+        auto const refreeze = 2 * (thawed_end - thawed_start) + 128;
+        for (Ring::row_t i = 0; i < refreeze; i++)
+                append_plain_row(ring, &rows);
+
+        assert_rows_are_frozen(ring, thawed_start, thawed_end - 1,
+                               "the region that was brought back into memory");
+
+        /* Everything that was thawed has been written to the streams a second
+         * time, from attributes the backwards walk reconstructed. Its contents
+         * did not change on the way, so every reference copy still holds.
+         */
+        assert_targets_round_trip(ring, targets, runs, rows, "after a re-freeze");
+
+        /* Finally rewrap, which walks the attribute stream a third way: not row
+         * by row but paragraph by paragraph, stepping over payloads as it goes.
+         * Rows and columns do not survive a reflow, so the check is that each
+         * target is still on exactly the cells it was on, and no target the
+         * corpus never wrote appears anywhere.
+         */
+        auto expected = std::vector<size_t>(targets.size(), 0);
+        for (auto const& run : runs)
+                expected[run.target] += size_t(run.last - run.first + 1);
+        assert_counts_match(count_linked_cells(ring, targets), expected,
+                            "before rewrapping");
+
+        VteVisualPosition* no_markers[] = { nullptr };
+
+        ring.rewrap(kNarrowColumns, no_markers);
+        assert_counts_match(count_linked_cells(ring, targets), expected,
+                            "after narrowing");
+
+        ring.rewrap(kHomeColumns, no_markers);
+        assert_counts_match(count_linked_cells(ring, targets), expected,
+                            "back at the home width");
+}
+
 int
 main(int argc,
      char* argv[])
@@ -837,6 +1377,8 @@ main(int argc,
                         test_rewrap_preserves_paragraphs);
         g_test_add_func("/vte/ring/roundtrip/rewrap/canonical-identity",
                         test_rewrap_canonical_state_is_a_fixed_point);
+        g_test_add_func("/vte/ring/roundtrip/hyperlink/walker-invariant",
+                        test_hyperlink_walker_invariant);
 
         return g_test_run();
 }
