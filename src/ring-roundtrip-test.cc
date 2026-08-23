@@ -41,8 +41,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ring.hh"
@@ -74,6 +76,17 @@ static gunichar const kWideChars[] = {
 };
 static gunichar const kCombiningChars[] = {
         0x0301 /* combining acute */, 0x0308 /* combining diaeresis */,
+};
+
+/* Printable ASCII only, which is a distinct thing to generate rather than a
+ * subset of the above. A row of nothing but bytes 32 to 126 is recorded as
+ * is_ascii, and a paragraph all of whose rows are gets reflowed by a shortcut
+ * path in rewrap that never reads the text stream and advances by a whole row
+ * of characters at a time. Nothing else in the corpus reaches that path
+ * reliably, and it is the path with the arithmetic in it.
+ */
+static gunichar const kAsciiChars[] = {
+        'a', 'Z', '0', ' ', '~', 'q', '7', '/',
 };
 
 /* One row as it stood before it was handed to the ring. VteRowData owns a
@@ -179,8 +192,13 @@ write_hyperlink_run(VteRowData* row,
         link->neighbour = first - 1;
 }
 
-/* Append one generated row of @width cells to @ring with the given wrapping and
+/* Fill @row with @width columns of generated cells and the given wrapping and
  * bidi flags, and return the reference copy.
+ *
+ * The row is a parameter rather than something appended here because the same
+ * generator has to serve both the corpora, which append, and the fuzz target,
+ * which also rewrites a row already in the ring - and rewriting a row that has
+ * been thawed back out of the streams is precisely the case worth generating.
  *
  * The flags are a parameter rather than another random draw because the rewrap
  * tests need them to describe a paragraph: rewrap only ever sees paragraphs,
@@ -193,17 +211,19 @@ write_hyperlink_run(VteRowData* row,
  * run continuation.
  */
 static RowSnapshot
-append_generated_row(Ring& ring,
-                     guint8 bidi_flags,
-                     bool soft_wrapped,
-                     int width,
-                     LinkRequest* link = nullptr)
+generate_row_into(VteRowData* row,
+                  guint8 bidi_flags,
+                  bool soft_wrapped,
+                  int width,
+                  bool ascii_only,
+                  LinkRequest* link)
 {
         auto snapshot = RowSnapshot{};
         snapshot.bidi_flags = bidi_flags;
         snapshot.soft_wrapped = soft_wrapped;
 
-        auto* const row = ring.append(snapshot.bidi_flags);
+        _vte_row_data_clear(row);
+        row->attr.bidi_flags = snapshot.bidi_flags;
         row->attr.soft_wrapped = snapshot.soft_wrapped;
 
         auto attr = VteCellAttr{};
@@ -220,7 +240,19 @@ append_generated_row(Ring& ring,
                 auto cell = VteCell{};
                 cell.attr = attr;
 
-                if (roll < 6) {
+                if (ascii_only) {
+                        /* No wide characters, no combining marks and no empty
+                         * cells: every one of those clears the record's
+                         * is_ascii bit and takes the paragraph off the shortcut
+                         * path this mode exists to reach.
+                         */
+                        cell.c = kAsciiChars[rand_below(G_N_ELEMENTS(kAsciiChars))];
+                        cell.attr.set_columns(1);
+                        cell.attr.set_fragment(false);
+                        _vte_row_data_append(row, &cell);
+                        snapshot.cells.push_back(cell);
+                        col++;
+                } else if (roll < 6) {
                         cell.c = kNarrowChars[rand_below(G_N_ELEMENTS(kNarrowChars))];
                         cell.attr.set_columns(1);
                         cell.attr.set_fragment(false);
@@ -291,6 +323,18 @@ append_generated_row(Ring& ring,
         return snapshot;
 }
 
+/* Append one generated row of @width cells to @ring. */
+static RowSnapshot
+append_generated_row(Ring& ring,
+                     guint8 bidi_flags,
+                     bool soft_wrapped,
+                     int width,
+                     LinkRequest* link = nullptr)
+{
+        return generate_row_into(ring.append(bidi_flags), bidi_flags, soft_wrapped,
+                                 width, false /* ascii_only */, link);
+}
+
 /* Append one generated row of a random width. */
 static RowSnapshot
 append_generated_row(Ring& ring,
@@ -327,36 +371,49 @@ attrs_equal(VteCellAttr const& a,
         return a.attr == b.attr && a.colors() == b.colors();
 }
 
+/* @when names the point the ring is being compared at, so that a failure from
+ * a long random sequence says which step of it diverged rather than only which
+ * row did.
+ */
 static void
 assert_row_matches(Ring& ring,
                    Ring::row_t position,
-                   RowSnapshot const& expected)
+                   RowSnapshot const& expected,
+                   char const* when = "after a round trip")
 {
         auto const* const row = ring.index(position);
         g_assert_nonnull(row);
 
         if (row->len != expected.cells.size()) {
-                g_error("row %lu: length %u after round trip, %zu before",
-                        position, row->len, expected.cells.size());
+                g_error("row %lu: length %u %s, %zu before",
+                        position, row->len, when, expected.cells.size());
         }
 
-        g_assert_cmpuint(row->attr.soft_wrapped, ==, expected.soft_wrapped);
-        g_assert_cmpuint(row->attr.bidi_flags, ==, expected.bidi_flags);
+        if (bool(row->attr.soft_wrapped) != expected.soft_wrapped) {
+                g_error("row %lu: soft_wrapped %u %s, %u before",
+                        position, row->attr.soft_wrapped, when,
+                        unsigned(expected.soft_wrapped));
+        }
+        if (row->attr.bidi_flags != expected.bidi_flags) {
+                g_error("row %lu: bidi flags %u %s, %u before",
+                        position, row->attr.bidi_flags, when, expected.bidi_flags);
+        }
 
         for (size_t col = 0; col < expected.cells.size(); col++) {
                 auto const& got = row->cells[col];
                 auto const& want = expected.cells[col];
 
                 if (got.c != want.c) {
-                        g_error("row %lu col %zu: character U+%04X after round trip, "
+                        g_error("row %lu col %zu: character U+%04X %s, "
                                 "U+%04X before",
-                                position, col, got.c, want.c);
+                                position, col, got.c, when, want.c);
                 }
                 if (!attrs_equal(got.attr, want.attr)) {
                         g_error("row %lu col %zu: attr %08x/colors %016" G_GINT64_MODIFIER "x "
-                                "after round trip, %08x/%016" G_GINT64_MODIFIER "x before",
+                                "%s, %08x/%016" G_GINT64_MODIFIER "x before",
                                 position, col,
                                 got.attr.attr, (guint64)got.attr.colors(),
+                                when,
                                 want.attr.attr, (guint64)want.attr.colors());
                 }
         }
@@ -600,7 +657,8 @@ assert_row_geometry(VteRowData const* row,
  */
 static std::vector<ParagraphSnapshot>
 read_paragraphs(Ring& ring,
-                Ring::column_t columns)
+                Ring::column_t columns,
+                bool may_end_open = false)
 {
         auto paragraphs = std::vector<ParagraphSnapshot>{};
         auto open = false;
@@ -626,7 +684,7 @@ read_paragraphs(Ring& ring,
                         open = false;
         }
 
-        if (open) {
+        if (open && !may_end_open) {
                 g_error("the ring ends in a soft wrapped row, which the corpus "
                         "never generates");
         }
@@ -1363,6 +1421,554 @@ test_hyperlink_walker_invariant(void)
                             "back at the home width");
 }
 
+/* Differential fuzzing: the ring's whole mutating surface against a model that
+ * is right by construction.
+ *
+ * Every test above pins one property of one path down with a script somebody
+ * wrote. This one is the opposite bet. It drives the ring through random
+ * sequences of every mutating call it publishes, interleaved with the freezing,
+ * thawing and rewrapping those calls trigger, and after every single call it
+ * compares the ring against the simplest correct description of what a
+ * scrollback ring is: a deque of rows, plus one number saying where the first
+ * of them sits.
+ *
+ * The interleaving is the point. resize, shrink, insert, remove,
+ * drop_scrollback and reset each move the boundary between the rows held in
+ * memory and the rows held in the streams, and each moves it differently: two
+ * drop rows off the front and advance delta, one drops them off the back and
+ * leaves delta alone, several thaw rows back out of the streams and truncate
+ * them, one throws the streams away. Mixing them reaches states no hand
+ * written script would think to write down, and one of those states is the
+ * interesting one: a row that was frozen, thawed back into memory, rewritten,
+ * and then frozen a SECOND time. Freezing appends to the streams while thawing
+ * truncates them, so that cycle is where the two can disagree about where the
+ * next row's record belongs, and nothing about it is visible until some later
+ * read comes back with a different row than the one that was written.
+ *
+ * The model deliberately knows nothing about wrapping - it is a deque, not a
+ * second implementation of the ring, and that is what makes a disagreement
+ * decidable rather than an argument between two guesses. Where the ring is
+ * entitled to reorganise rows, which is rewrap and only rewrap, the model does
+ * not try to predict the result: the check there is at the paragraph level,
+ * which reflowing is required to preserve, and the model is then resynced from
+ * the ring. Predicting the row division would be re-implementing the wrap
+ * arithmetic inside the test.
+ *
+ * The sequences are bounded and seeded rather than run under a coverage guided
+ * fuzzer, so this is an ordinary unit test that always terminates; a failure
+ * reports its seed and --seed= replays it exactly.
+ */
+
+/* Room for far more rows than any sequence can produce, so that the ring never
+ * drops a row to stay under its maximum. Capacity behaviour is not being left
+ * untested, it is being tested deliberately and in isolation by the resize and
+ * shrink operations - which is the difference between exercising it and
+ * having it happen underneath an assertion about something else.
+ */
+static Ring::row_t const kFuzzMaxRows = Ring::row_t(1) << 20;
+
+/* Enough rows appended before the sequence starts that the writable window is
+ * already full and the ring is already using the streams. Otherwise the first
+ * few dozen operations would run entirely in memory and prove nothing about
+ * serialisation. Checked rather than assumed: see the non-vacuity guard at the
+ * end of the test.
+ */
+static int const kFuzzWarmupRows = 96;
+
+/* Narrow rows, because a rewrap to a narrow width turns each of them into
+ * several and the sequences are long.
+ */
+static int const kFuzzMaxRowWidth = 20;
+
+/* How often the whole ring is compared against the model. Every operation is
+ * checked for its delta and length; the full cell for cell sweep is periodic
+ * because it costs a thaw per row.
+ */
+static int const kFuzzSweepInterval = 16;
+
+enum FuzzOp {
+        FUZZ_APPEND,
+        FUZZ_EDIT_ROW,
+        FUZZ_INSERT_ROW,
+        FUZZ_REMOVE_ROW,
+        FUZZ_RESIZE_SMALL,
+        FUZZ_SHRINK,
+        FUZZ_DROP_SCROLLBACK,
+        FUZZ_RESET,
+        FUZZ_SET_VISIBLE_ROWS,
+        FUZZ_THAW_DEEP,
+        FUZZ_REWRAP,
+        FUZZ_OP_COUNT
+};
+
+static char const* const kFuzzOpNames[FUZZ_OP_COUNT] = {
+        "append", "edit", "insert", "remove", "resize", "shrink",
+        "drop-scrollback", "reset", "set-visible-rows", "thaw", "rewrap",
+};
+
+/* Appending dominates because that is what a terminal does; everything else is
+ * frequent enough to keep colliding with it. The weights are a coverage knob
+ * and nothing depends on their exact values - but they were not guessed. They
+ * are set so that the ring's length settles well above the writable array's
+ * 32 rows, because below that nothing is ever frozen and every assertion here
+ * would be checking an in-memory array against another in-memory array.
+ */
+static int const kFuzzOpWeights[FUZZ_OP_COUNT] = {
+        45, 12, 6, 6, 3, 3, 3, 1, 4, 5, 8,
+};
+
+/* How many rows to keep out of @length, for the operations that discard rows.
+ *
+ * Uniform over the whole range would be the obvious draw, and it is wrong here:
+ * drawn every twentieth operation it holds the ring down to a handful of rows,
+ * which never leave the writable array, so the compressed tier this whole file
+ * is about would go untested behind assertions that all pass. So the draw is
+ * bimodal - usually a small bite out of the end, occasionally the full range,
+ * which still reaches one row and everything in between.
+ */
+static size_t
+fuzz_keep_count(size_t length)
+{
+        g_assert_cmpuint(length, >, 0);
+
+        if (rand_below(6) == 0)
+                return size_t(1 + rand_below(int(length)));
+
+        return length - size_t(rand_below(int(length / 8) + 1));
+}
+
+/* The reference model: row i of @rows is the ring's row at @delta + i. */
+struct RingModel {
+        std::deque<RowSnapshot> rows;
+        Ring::row_t delta;
+};
+
+static FuzzOp
+pick_fuzz_op(void)
+{
+        auto total = 0;
+        for (auto const weight : kFuzzOpWeights)
+                total += weight;
+
+        auto roll = rand_below(total);
+        for (auto op = 0; op < FUZZ_OP_COUNT; op++) {
+                roll -= kFuzzOpWeights[op];
+                if (roll < 0)
+                        return FuzzOp(op);
+        }
+
+        g_assert_not_reached();
+}
+
+static std::string
+fuzz_context(int sequence,
+             int op,
+             char const* name)
+{
+        char buf[128];
+        g_snprintf(buf, sizeof(buf), "at sequence %d step %d (%s)",
+                   sequence, op, name);
+        return std::string(buf);
+}
+
+static RowSnapshot
+generate_fuzz_row(VteRowData* row)
+{
+        auto const bidi_flags = guint8(rand_below(16));
+        auto const soft_wrapped = bool(rand_below(2));
+        auto const width = rand_below(kFuzzMaxRowWidth);
+        auto const ascii_only = rand_below(4) == 0;
+
+        return generate_row_into(row, bidi_flags, soft_wrapped, width, ascii_only,
+                                 nullptr);
+}
+
+/* The model's rows read as paragraphs, by the same rule rewrap uses: rows are
+ * joined while they are soft wrapped, fragment cells are geometry rather than
+ * content and are dropped, and a paragraph carries its FIRST row's bidi flags
+ * because that is the one rewrap keeps.
+ *
+ * The one subtlety is the last paragraph. A row's text reaches the stream as
+ * its characters plus, if it is hard wrapped, a newline - so a paragraph at the
+ * end of the ring that is soft wrapped AND has no characters contributes not
+ * one byte, and rewrap, which walks the text stream, cannot know it was ever
+ * there. Dropping such a paragraph here is not papering over a disagreement: it
+ * is the model declining to claim something the ring never stored.
+ */
+static std::vector<ParagraphSnapshot>
+model_paragraphs(RingModel const& model)
+{
+        auto paragraphs = std::vector<ParagraphSnapshot>{};
+        auto open = false;
+
+        for (auto const& row : model.rows) {
+                if (!open) {
+                        paragraphs.push_back(ParagraphSnapshot{});
+                        paragraphs.back().bidi_flags = row.bidi_flags;
+                        open = true;
+                }
+
+                for (auto const& cell : row.cells) {
+                        if (!cell.attr.fragment())
+                                paragraphs.back().cells.push_back(cell);
+                }
+
+                if (!row.soft_wrapped)
+                        open = false;
+        }
+
+        if (open && paragraphs.back().cells.empty())
+                paragraphs.pop_back();
+
+        return paragraphs;
+}
+
+/* Compare every row of the ring against the model, and report whether any of
+ * them came out of the streams.
+ *
+ * The ring publishes no accessor for the writable boundary but it does publish
+ * a consequence of it, as rows_are_frozen() explains: a frozen row is answered
+ * out of the single row the ring thaws into, so two consecutive rows answering
+ * with the same address are two frozen rows.
+ */
+static bool
+sweep_against_model(Ring& ring,
+                    RingModel const& model,
+                    char const* when)
+{
+        auto const* previous = static_cast<VteRowData const*>(nullptr);
+        auto froze = false;
+
+        for (size_t i = 0; i < model.rows.size(); i++) {
+                auto const position = model.delta + Ring::row_t(i);
+
+                auto const* const row = ring.index(position);
+                g_assert_nonnull(row);
+                if (row == previous)
+                        froze = true;
+                previous = row;
+
+                assert_row_matches(ring, position, model.rows[i], when);
+        }
+
+        return froze;
+}
+
+static void
+resync_model_from_ring(Ring& ring,
+                       RingModel& model)
+{
+        auto const rows = snapshot_rows(ring);
+
+        model.rows.assign(rows.begin(), rows.end());
+        model.delta = ring.delta();
+}
+
+/* Reflow to a random width with up to two markers riding along, check what a
+ * reflow is required to preserve, and only then resync the model.
+ *
+ * Markers are planted on cells the model knows are there and are characters:
+ * not on a fragment, not on an empty cell, never past a row's end and never on
+ * a row outside the ring. Every one of those is either a caller error the ring
+ * answers with an assertion or a documented clamp, so a marker on one of them
+ * would be asserting something rewrap never promised.
+ *
+ * What is checked afterwards is the invariant, not the outcome: the paragraphs
+ * still say what they said, no row is wider than the width asked for, no wide
+ * character was sawn in half by the wrap, and each marker still names the
+ * character it was planted on. Which row and column that character ended up at
+ * is the wrap rule's business, and restating it here would only assert that the
+ * test and the ring compute the same thing.
+ */
+static void
+fuzz_rewrap(Ring& ring,
+            RingModel& model,
+            char const* when)
+{
+        /* Sweep before reflowing, not only on the periodic schedule. After the
+         * reflow the ring's division into rows is a new one and the old one is
+         * gone, so this is the last moment at which the rows the model knows
+         * about can be compared at all - everything afterwards is necessarily
+         * the weaker paragraph level check. It also means a ring that has
+         * already diverged is caught here rather than handed to rewrap, which
+         * walks the row records as a linked structure and can spin on a
+         * corrupt one instead of returning something wrong.
+         */
+        sweep_against_model(ring, model, when);
+
+        /* Not 1 or 2: at width 1 a double width character cannot fit at all and
+         * the wrap rule emits empty rows rather than dropping it, which is legal
+         * but pathological.
+         */
+        auto const columns = Ring::column_t(3 + rand_below(130));
+
+        auto candidates = std::vector<std::pair<size_t, size_t>>{};
+        for (size_t r = 0; r < model.rows.size(); r++) {
+                for (size_t c = 0; c < model.rows[r].cells.size(); c++) {
+                        auto const& cell = model.rows[r].cells[c];
+                        if (!cell.attr.fragment() && cell.c != 0)
+                                candidates.emplace_back(r, c);
+                }
+        }
+
+        auto planted = std::vector<PlantedMarker>{};
+        auto const wanted = candidates.empty() ? 0 : rand_below(3);
+        for (auto i = 0; i < wanted; i++) {
+                auto const& pick = candidates[rand_below(int(candidates.size()))];
+                planted.push_back(PlantedMarker{"a character the model planted a marker on",
+                                                Ring::row_t(pick.first),
+                                                Ring::column_t(pick.second),
+                                                model.rows[pick.first].cells[pick.second].c});
+        }
+
+        auto positions = std::vector<VteVisualPosition>(planted.size());
+        auto markers = std::vector<VteVisualPosition*>(planted.size() + 1, nullptr);
+        for (size_t i = 0; i < planted.size(); i++) {
+                positions[i].row = long(model.delta + planted[i].row);
+                positions[i].col = planted[i].col;
+                markers[i] = &positions[i];
+        }
+
+        ring.rewrap(columns, markers.data());
+
+        /* The ring may legitimately end in a soft wrapped row here: the fuzz
+         * generates rows independently, so the last paragraph is often still
+         * open. The corpora above never do, which is why they hold that against
+         * the ring and this does not.
+         */
+        assert_paragraphs_match(read_paragraphs(ring, columns, true /* may end open */),
+                                model_paragraphs(model), columns);
+
+        for (size_t i = 0; i < planted.size(); i++)
+                assert_marker_still_on_its_character(ring, positions[i], planted[i],
+                                                     columns);
+
+        resync_model_from_ring(ring, model);
+}
+
+static void
+test_fuzz_differential(void)
+{
+        auto const sequences = g_test_thorough() ? 128 : 32;
+        auto const steps = g_test_thorough() ? 800 : 200;
+        auto sequences_that_froze = 0;
+
+        for (auto sequence = 0; sequence < sequences; sequence++) {
+                auto ring = Ring{kFuzzMaxRows, true /* has_streams */};
+                auto model = RingModel{};
+
+                model.delta = ring.delta();
+                ring.set_visible_rows(1 + rand_below(8));
+
+                for (auto i = 0; i < kFuzzWarmupRows; i++)
+                        model.rows.push_back(generate_fuzz_row(ring.append(0)));
+
+                auto froze = false;
+
+                for (auto step = 0; step < steps; step++) {
+                        auto const op = pick_fuzz_op();
+                        auto const context = fuzz_context(sequence, step,
+                                                          kFuzzOpNames[op]);
+                        auto const length = model.rows.size();
+
+                        switch (op) {
+                        case FUZZ_APPEND: {
+                                /* A burst, because a terminal scrolls in runs
+                                 * and a run is what pushes rows out of the
+                                 * writable window.
+                                 */
+                                auto const count = 1 + rand_below(8);
+                                for (auto i = 0; i < count; i++)
+                                        model.rows.push_back(generate_fuzz_row(ring.append(0)));
+                                break;
+                        }
+
+                        case FUZZ_EDIT_ROW: {
+                                if (length == 0)
+                                        break;
+
+                                /* Biased towards the oldest rows, which are the
+                                 * frozen ones: rewriting a row that had to be
+                                 * thawed first, and will be frozen again after,
+                                 * is the whole reason this operation exists.
+                                 */
+                                auto const span = rand_below(2) ?
+                                        std::max(size_t(1), length / 4) : length;
+                                auto const i = size_t(rand_below(int(span)));
+
+                                auto* const row = ring.index_writable(model.delta +
+                                                                      Ring::row_t(i));
+                                g_assert_nonnull(row);
+                                model.rows[i] = generate_fuzz_row(row);
+                                break;
+                        }
+
+                        case FUZZ_INSERT_ROW: {
+                                auto const i = size_t(rand_below(int(length) + 1));
+                                auto const bidi_flags = guint8(rand_below(16));
+
+                                ring.insert(model.delta + Ring::row_t(i), bidi_flags);
+
+                                /* insert() clears the row, so the model's copy
+                                 * is an empty, hard wrapped row carrying only
+                                 * the bidi flags it was given.
+                                 */
+                                auto inserted = RowSnapshot{};
+                                inserted.bidi_flags = bidi_flags;
+                                inserted.soft_wrapped = false;
+                                model.rows.insert(model.rows.begin() +
+                                                  std::ptrdiff_t(i),
+                                                  std::move(inserted));
+                                break;
+                        }
+
+                        case FUZZ_REMOVE_ROW: {
+                                /* Deliberately allowed to aim outside the ring:
+                                 * remove() guards itself with contains() and is
+                                 * documented to do nothing there, so that is
+                                 * behaviour worth pinning rather than caller
+                                 * error worth avoiding.
+                                 */
+                                auto const low = model.delta >= 2 ?
+                                        model.delta - 2 : Ring::row_t(0);
+                                auto const high = model.delta + Ring::row_t(length) + 2;
+                                auto const position = low +
+                                        Ring::row_t(rand_below(int(high - low) + 1));
+
+                                ring.remove(position);
+
+                                if (position >= model.delta &&
+                                    position < model.delta + Ring::row_t(length)) {
+                                        model.rows.erase(model.rows.begin() +
+                                                         std::ptrdiff_t(position - model.delta));
+                                }
+                                break;
+                        }
+
+                        case FUZZ_RESIZE_SMALL: {
+                                if (length == 0)
+                                        break;
+
+                                /* Lowering the maximum drops rows off the FRONT
+                                 * and advances delta. The maximum is put back
+                                 * immediately so that a later rewrap can never
+                                 * be the thing that truncates: rewrap dropping
+                                 * rows is a separate behaviour, and letting it
+                                 * happen underneath the paragraph check would
+                                 * silently eat the text being compared.
+                                 */
+                                auto const keep = fuzz_keep_count(length);
+
+                                ring.resize(Ring::row_t(keep));
+                                ring.resize(kFuzzMaxRows);
+
+                                auto const dropped = length - keep;
+                                model.rows.erase(model.rows.begin(),
+                                                 model.rows.begin() + std::ptrdiff_t(dropped));
+                                model.delta += Ring::row_t(dropped);
+                                break;
+                        }
+
+                        case FUZZ_SHRINK: {
+                                if (length == 0)
+                                        break;
+
+                                /* Unlike resize, shrink drops rows off the BACK
+                                 * and leaves delta where it was, walking
+                                 * backwards through the frozen region a row at a
+                                 * time to do it.
+                                 */
+                                auto const keep = fuzz_keep_count(length);
+
+                                ring.shrink(Ring::row_t(keep));
+                                model.rows.resize(keep);
+                                break;
+                        }
+
+                        case FUZZ_DROP_SCROLLBACK: {
+                                /* next() is a legal argument and means drop
+                                 * everything, so it has to stay reachable even
+                                 * though the usual draw keeps a row.
+                                 */
+                                auto const i = length == 0 || rand_below(12) == 0 ?
+                                        length : length - fuzz_keep_count(length);
+                                auto const position = model.delta + Ring::row_t(i);
+
+                                ring.drop_scrollback(position);
+
+                                model.rows.erase(model.rows.begin(),
+                                                 model.rows.begin() + std::ptrdiff_t(i));
+                                model.delta = position;
+                                break;
+                        }
+
+                        case FUZZ_RESET:
+                                ring.reset();
+
+                                /* Row numbering does not restart: the ring keeps
+                                 * counting from where it was, so delta advances
+                                 * by everything that was in it.
+                                 */
+                                model.delta += Ring::row_t(length);
+                                model.rows.clear();
+                                break;
+
+                        case FUZZ_SET_VISIBLE_ROWS:
+                                ring.set_visible_rows(Ring::row_t(1 + rand_below(8)));
+                                break;
+
+                        case FUZZ_THAW_DEEP:
+                                if (length == 0)
+                                        break;
+
+                                /* Pull the entire scrollback back into memory,
+                                 * which is the deepest walk backwards through
+                                 * the streams the ring ever does.
+                                 */
+                                g_assert_nonnull(ring.index_writable(model.delta));
+                                break;
+
+                        case FUZZ_REWRAP:
+                                fuzz_rewrap(ring, model, context.c_str());
+                                break;
+
+                        case FUZZ_OP_COUNT:
+                                g_assert_not_reached();
+                        }
+
+                        if (ring.delta() != model.delta) {
+                                g_error("delta %lu %s, model says %lu",
+                                        ring.delta(), context.c_str(), model.delta);
+                        }
+                        if (ring.length() != Ring::row_t(model.rows.size())) {
+                                g_error("length %lu %s, model says %zu",
+                                        ring.length(), context.c_str(),
+                                        model.rows.size());
+                        }
+
+                        if (step % kFuzzSweepInterval == kFuzzSweepInterval - 1)
+                                froze |= sweep_against_model(ring, model, context.c_str());
+                }
+
+                auto const context = fuzz_context(sequence, steps, "end of sequence");
+                froze |= sweep_against_model(ring, model, context.c_str());
+
+                if (froze)
+                        sequences_that_froze++;
+        }
+
+        /* Guard against the whole thing quietly proving nothing. If a change to
+         * the ring's sizing kept every sequence inside the writable array, every
+         * assertion above would still pass while never touching a stream.
+         */
+        if (sequences_that_froze * 2 <= sequences) {
+                g_error("only %d of %d sequences pushed rows out of the writable "
+                        "window - this test would pass without exercising the "
+                        "streams at all",
+                        sequences_that_froze, sequences);
+        }
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1379,6 +1985,8 @@ main(int argc,
                         test_rewrap_canonical_state_is_a_fixed_point);
         g_test_add_func("/vte/ring/roundtrip/hyperlink/walker-invariant",
                         test_hyperlink_walker_invariant);
+        g_test_add_func("/vte/ring/roundtrip/fuzz/differential",
+                        test_fuzz_differential);
 
         return g_test_run();
 }
