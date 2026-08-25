@@ -115,7 +115,13 @@ ask() {
 
         export DISPLAY=":$DISP"
         export GDK_BACKEND=x11 GSK_RENDERER=cairo LIBGL_ALWAYS_SOFTWARE=1
-        export VTE_SIXEL=1
+        # No sixel switch is set here, and none is needed: every reply this
+        # file asserts is emitted from inside #if WITH_SIXEL in vteseq.cc's
+        # XTSMGRAPHICS handler, which is a build-time condition, not the
+        # runtime VteTerminal:enable-sixel that --sixel/--no-sixel moves. (The
+        # runtime property gates the DA1 attribute at vteseq.cc:3291, which
+        # this file does not ask for.) The export of VTE_SIXEL=1 that stood
+        # here read as a precondition and was read by nothing in the tree.
 
         : > "$WORK/out"
         "$APP" --no-load-config --no-decorations --geometry 80x24 -- /bin/sh -c \

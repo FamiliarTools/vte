@@ -199,7 +199,24 @@ if get_option('sixel')
     # rows its data needs; opaque must honour the declared raster.
     'raster-transparent',
     'raster-opaque',
+    # A sixel cut off mid-stream, with no terminator. What arrived must still
+    # be drawn - the top five bands of the eight - which is the xterm #323
+    # behaviour vte.cc implements in the eos arm of its parser ABORT. Run with
+    # the child exiting rather than sleeping; see the <case>.eof note in
+    # render-test.sh.
+    'bands-truncated',
   ]
+
+  # The case the isolation test runs, which cannot be sixel_render_cases[0].
+  #
+  # That case is 'bands', and bands is font-invariant: measured on gtk3 it is
+  # byte-identical at Monospace 12, Monospace 30 and DejaVu Serif 12, because
+  # the image is drawn at its own pixel size at the terminal origin. The
+  # isolation test's fontconfig probe has nothing to go red for on such a
+  # case. bands-margin crops to the right margin, which sits at the column
+  # count times the cell width, so it does move with the font - measured
+  # AE=1764 under a fontconfig that reassigns Monospace to DejaVu Serif.
+  sixel_isolation_case = 'bands-margin'
 
   sixel_test_apps = []
 
@@ -241,22 +258,23 @@ if get_option('sixel')
     )
 
     # And they are only worth their runtime if they measure the code rather
-    # than whoever ran them. The app reads a user's vteapp.ini unless told not
-    # to, and that file sets the colours and the font the goldens were captured
-    # against. This one plants such a file on both paths the app resolves and
-    # requires the frame not to move - having first shown that the same file
-    # does move it when the app is made to load it.
+    # than whoever ran them. The runner keeps the developer's settings out of
+    # the frame with two guards - a scratch config home, and --no-load-config -
+    # and this one probes each SEPARATELY, so deleting either alone turns it
+    # red with its own message: a user fontconfig for the scratch home, a
+    # vteapp.ini forced back onto the app's own config path for the flag.
+    # Each probe is preceded by a run showing the file it plants is not inert.
     test(
       'sixel-render-isolation-' + arm[0],
       files(sixel_test_dir / 'render-isolation-test.sh'),
       args: [
         arm[1].full_path(),
         sixel_test_dir,
-        sixel_render_cases[0],
+        sixel_isolation_case,
         arm[0],
       ],
       depends: [arm[1]],
-      timeout: 180,
+      timeout: 420,
     )
 
     foreach case: sixel_render_cases

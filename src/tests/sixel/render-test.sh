@@ -94,16 +94,18 @@ broken_comparison() {
 # renderer, they were being told about their own terminal settings, and a
 # golden regenerated on that machine carried the settings into the tree.
 #
-# The scratch home on its own already hides that file, since it is where the
-# app goes looking; it is set rather than only passing the flag because a
-# config dir feeds this more than vteapp.ini - a user fontconfig under it
-# decides, measurably, which font the "Monospace" further down resolves to,
-# and the frame is compared against the font's cell.
+# The two guards - this scratch home, and the --no-load-config passed further
+# down - overlap on vteapp.ini, and each also holds something the other does
+# not. render-isolation-test.sh probes them one at a time and goes red for
+# either alone:
 #
-# --no-load-config is kept alongside it, and yes the two overlap on this file.
-# It says at the call site that this run wants none of the user's terminal
-# settings, and it holds that whether or not the search path above is the one
-# glib actually uses.
+#   - the scratch home is the only one that stops a user FONTCONFIG, which
+#     fontconfig reads from $XDG_CONFIG_HOME/fontconfig/fonts.conf without
+#     asking the app. Measured: a fonts.conf reassigning Monospace to DejaVu
+#     Serif moves bands-margin by AE=1764 once this block is deleted.
+#   - --no-load-config is the only one that stops a vteapp.ini reached by a
+#     home the app was given past this block. Measured: AE=33490.7 under such
+#     a home once the flag is deleted.
 export HOME="$WORK/home"
 export XDG_CONFIG_HOME="$HOME/.config"
 mkdir -p "$XDG_CONFIG_HOME"
@@ -128,12 +130,32 @@ export DISPLAY=":$DISP"
 export GDK_BACKEND=x11
 export GSK_RENDERER=${VTE_TEST_RENDERER:-cairo}
 export LIBGL_ALWAYS_SOFTWARE=1
-export VTE_SIXEL=1
 
 # Emit the image at the home position, then park the cursor well below it so
 # the blinking cursor can never land inside the compared region. Without this
 # the test is a coin flip on blink phase.
 CHILD="printf '\\033[H'; cat '$SIX'; printf '\\033[20;1H'; sleep 30"
+KEEP=()
+
+# A case whose fixture is a sixel with NO TERMINATOR has to be run
+# differently, and an empty <case>.eof next to the fixture says so - the flag
+# travelling with the fixture the way <case>.crop does.
+#
+# Such an image is drawn in exactly one place: process_incoming_decsixel
+# reads a parser ABORT as a truncated image rather than a cancelled one only
+# when the chunk is at eos (vte.cc), and eos is the child closing the pty. So
+# the child must EXIT, and the app is asked to --keep the window that is then
+# captured. Measured: the same fixture under the sleep above renders nothing.
+#
+# Nothing may follow the fixture on the way out either. The cursor park is an
+# ESC, and an ESC reaching the sixel parser mid-sequence is a CANCEL, which
+# deliberately does not draw. Measured with the park still in place: three
+# runs, two blank frames and one image. The cursor is turned off up front
+# instead, which is what the park was for.
+if [ -r "$SRCDIR/$CASE.eof" ]; then
+        KEEP=(--keep)
+        CHILD="printf '\\033[?25l\\033[H'; cat '$SIX'"
+fi
 
 # Pin the font, because some of the compared regions move with the cell.
 #
@@ -164,7 +186,14 @@ CHILD="printf '\\033[H'; cat '$SIX'; printf '\\033[20;1H'; sleep 30"
 # goldens were captured against moves the same three cases.
 FONT=${VTE_TEST_FONT:-Monospace 12}
 
-"$APP" --no-load-config --no-decorations --geometry 80x24 --font "$FONT" \
+# --sixel is asked for explicitly rather than relied on. The app defaults it
+# on (app.cc, gboolean sixel{true}), which is why the option is hidden from
+# --help-all, but that default is a thing a patch can change and this suite
+# would then be capturing a terminal with no images in it. The flag is real in
+# both directions: measured on gtk3, --no-sixel in its place takes bands from
+# PASS to FAIL AE=3456. It replaces an exported VTE_SIXEL=1 that nothing in
+# the tree ever read.
+"$APP" --sixel "${KEEP[@]}" --no-load-config --no-decorations --geometry 80x24 --font "$FONT" \
         -- sh -c "$CHILD" >"$WORK/app.log" 2>&1 &
 APID=$!
 sleep 6
