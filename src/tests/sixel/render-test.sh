@@ -45,7 +45,7 @@ SIX="$SRCDIR/$CASE.six"
 
 # One golden per GTK arm, because the compared frame is the WINDOW and the two
 # toolkits put the terminal at different offsets inside it: the same fixture
-# renders identically - same 96x63 px, same bands, same colours - but GTK4's
+# renders identically - same 96x72 px, same bands, same colours - but GTK4's
 # client-side border pushes the content five pixels down and right of where
 # GTK3 puts it. A single shared golden would therefore fail on one arm for a
 # reason that is not a defect, and papering over it with an offset constant
@@ -131,10 +131,25 @@ export GDK_BACKEND=x11
 export GSK_RENDERER=${VTE_TEST_RENDERER:-cairo}
 export LIBGL_ALWAYS_SOFTWARE=1
 
-# Emit the image at the home position, then park the cursor well below it so
-# the blinking cursor can never land inside the compared region. Without this
-# the test is a coin flip on blink phase.
-CHILD="printf '\\033[H'; cat '$SIX'; printf '\\033[20;1H'; sleep 30"
+# Turn the cursor OFF, then emit the image at the home position and park what
+# is now an invisible cursor below it.
+#
+# A blinking cursor inside the compared region makes the verdict a coin flip
+# on blink phase, and parking it at row 20 does not put it outside every
+# compared region: raster-opaque and raster-transparent crop 400x400, which
+# reaches down past row 20, where the other cases crop 320x130 and do not.
+#
+# It bit: raster-opaque and raster-transparent failed together on two full
+# gtk3 suite runs and passed when re-run on their own, unchanged, and the
+# pixels that differed on one of those failures were the single box
+# 10x19+1+381 - the parked row, nowhere near the image.
+#
+# Then measured directly, gtk3, raster-opaque, eight 400x400 crops taken 0.35s
+# apart: with the cursor merely parked, consecutive crops differ in exactly
+# 10x19+1+381; with the DECTCEM below, all eight crops are byte-identical.
+# The park stays, now only to keep the terminal's idea of the cursor away from
+# the image.
+CHILD="printf '\\033[?25l\\033[H'; cat '$SIX'; printf '\\033[20;1H'; sleep 30"
 KEEP=()
 
 # A case whose fixture is a sixel with NO TERMINATOR has to be run
@@ -150,8 +165,8 @@ KEEP=()
 # Nothing may follow the fixture on the way out either. The cursor park is an
 # ESC, and an ESC reaching the sixel parser mid-sequence is a CANCEL, which
 # deliberately does not draw. Measured with the park still in place: three
-# runs, two blank frames and one image. The cursor is turned off up front
-# instead, which is what the park was for.
+# runs, two blank frames and one image. So this case drops the park and keeps
+# only the DECTCEM the child above already begins with.
 if [ -r "$SRCDIR/$CASE.eof" ]; then
         KEEP=(--keep)
         CHILD="printf '\\033[?25l\\033[H'; cat '$SIX'"
@@ -297,6 +312,16 @@ fi
         broken_comparison "compare found $AE differing yet exited $CMP"
 
 echo "FAIL: $CASE differs from the golden (AE=$AE)"
-cp "$WORK/crop.png" "${GOLDEN%.png}.actual.png" 2>/dev/null
-echo "  actual frame written to ${GOLDEN%.png}.actual.png"
+# Keep the failing frame OUT of the source tree. $SRCDIR is the checked-in
+# fixture directory: writing there dirties the working copy of anyone whose
+# tree is writable, and is simply refused on the out-of-tree, read-only-srcdir
+# builds distributors use. The working directory meson gives the test is in
+# the build tree; VTE_TEST_ARTIFACT_DIR overrides it.
+ARTIFACT_DIR=${VTE_TEST_ARTIFACT_DIR:-$PWD}
+ACTUAL="$ARTIFACT_DIR/$CASE-$ARM.actual.png"
+if cp "$WORK/crop.png" "$ACTUAL" 2>/dev/null; then
+        echo "  actual frame written to $ACTUAL"
+else
+        echo "  could not write the actual frame to $ACTUAL"
+fi
 exit 1

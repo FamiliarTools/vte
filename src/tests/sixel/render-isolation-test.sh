@@ -118,7 +118,11 @@ EOF
 run_runner() {
         app=$1
         shift
-        env "$@" "$RUNNER" "$app" "$FIXTURES" "$CASE" "$ARM" >"$WORK/out" 2>&1
+        # Assigned on the shell, not handed to env: env stops reading options
+        # at its first operand, so a VAR=VALUE ahead of a "-u VAR" in "$@"
+        # makes it take the -u as a file to execute.
+        VTE_TEST_ARTIFACT_DIR="$WORK" \
+                env "$@" "$RUNNER" "$app" "$FIXTURES" "$CASE" "$ARM" >"$WORK/out" 2>&1
         STATUS=$?
 }
 

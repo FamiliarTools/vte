@@ -387,24 +387,20 @@ private:
          *
          * The frozen rows themselves do still carry the reference, so deriving
          * IS possible if the ring reads them back out of the streams. That is
-         * the option the rectangle buys off, and the price is measured, not
-         * argued. drop_images_before() runs once per line the terminal scrolls;
-         * below, one 200 row image scrolls out of a full scrollback over 250
-         * lines, against a drop_images_before() that finds an image's last row
-         * by scanning the ring for cells naming it instead of reading the
-         * rectangle:
+         * the option the rectangle buys off, and what it buys off is a per-row
+         * cost: drop_images_before() runs once per line the terminal scrolls,
+         * and a version that located an image's last row by scanning the ring
+         * would thaw rows out of the streams on every one of those lines,
+         * against a scrollback that is as deep as the user set it. The stored
+         * rectangle answers the same question from memory.
          *
-         *   scrollback     stored             derived
-         *    1000 rows      7 us, 0 reads      2210 us,   73200 reads
-         *    2000 rows      9 us, 0 reads     12042 us,  223200 reads
-         *    4000 rows      6 us, 0 reads     14739 us,  523200 reads
-         *    8000 rows      5 us, 0 reads     42764 us, 1123200 reads
-         *
-         * The reads a scrolled line costs grow one for one with the scrollback
-         * depth, so scrolling a scrollback past an image is quadratic in its
-         * depth, while the stored answer is flat and reads nothing.
-         * /vte/ring/image/dropping-a-frozen-image-reads-no-row is what holds
-         * this path at zero reads.
+         * What is checked in, and all that is claimed here, is the floor:
+         * /vte/ring/image/dropping-a-frozen-image-reads-no-row scrolls an image
+         * whose every row is frozen all the way out and asserts the ring thawed
+         * no row doing it - after first reading one row back itself, so the
+         * counter it asserts on is known to move. There is no benchmark target
+         * in the tree; the scan-based comparison was a one-off in a working
+         * copy that no longer exists, so no timings are quoted.
          *
          * The index is also the only ordered structure over images:
          * drop_images_before() stops at the first entry keyed at or after the

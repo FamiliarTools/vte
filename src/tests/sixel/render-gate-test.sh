@@ -22,8 +22,11 @@
 # shipped whose verdict came from a trim box - a number that reads 0x0 both
 # when the frames agree and when every pixel of them differs - and a guard that
 # only broke the comparator found nothing wrong with it, because a comparator
-# that refuses to run does fail loudly on any verdict at all. Every render case
-# was passing against a frame that was entirely wrong.
+# that refuses to run does fail loudly on any verdict at all. The frames those
+# render cases captured were in fact correct; what was missing was any evidence
+# that the verdict could have told if they had not been. The one run that did
+# pass against an entirely wrong frame was the deliberate probe: the golden
+# compared against its own negative passed.
 #
 # So drive the real runner five times, once per way the answer can be wrong,
 # and require it to answer each one on its own terms:
@@ -60,9 +63,9 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 # Hand the runner a scratch copy of the fixtures rather than the source tree.
-# A failing render case writes the frame it actually got next to the golden,
-# and this test exists to make it fail: pointed at the real directory it would
-# leave that artefact behind on every green run.
+# This test exists to make the runner fail, repeatedly, on every green run;
+# nothing it does should be able to touch the checked-in fixtures. The frames
+# those failures keep are steered into $WORK by run_runner below.
 FIXTURES="$WORK/fixtures"
 mkdir "$FIXTURES"
 GOLDEN="$SRCDIR/$CASE.golden-$ARM.png"
@@ -147,7 +150,8 @@ shim_changed() { awk '$1 == "changed" { print $2 }' "$1" 2>/dev/null; }
 # Run the real runner with $1 prepended to PATH. Leaves the runner's output in
 # $WORK/out and its exit status in $STATUS.
 run_runner() {
-        PATH="$1:$PATH" "$RUNNER" "$APP" "$FIXTURES" "$CASE" "$ARM" >"$WORK/out" 2>&1
+        PATH="$1:$PATH" VTE_TEST_ARTIFACT_DIR="$WORK" \
+                "$RUNNER" "$APP" "$FIXTURES" "$CASE" "$ARM" >"$WORK/out" 2>&1
         STATUS=$?
 }
 
