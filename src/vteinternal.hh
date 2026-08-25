@@ -1669,6 +1669,9 @@ public:
                         int(std::max(long(VTE_SIXEL_CELL_MIN_HEIGHT),
                                      m_cell_height_unscaled))};
         }
+
+        /* Whether the round being timed decoded an image. */
+        bool m_decoded_image{false};
 #endif /* WITH_SIXEL */
         long get_cell_width()  { ensure_font(); return m_cell_width;  }
 
