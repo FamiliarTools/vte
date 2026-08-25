@@ -84,6 +84,14 @@ public:
         //FIXMEchpe rename this to at()
         //FIXMEchpe use references not pointers
         VteRowData const* index(row_t position); /* const? */
+
+        /* For tests: how many rows the ring has read back out of the streams.
+         * A path that answers a question about a frozen row either stored the
+         * answer or went to the stream for it, and this is what tells the two
+         * apart from the outside.
+         */
+        auto rows_thawed_for_test() const noexcept { return m_rows_thawed; }
+
         bool is_soft_wrapped(row_t position);
         bool contains_prompt_beginning(row_t position);
 
@@ -326,6 +334,13 @@ private:
 	VteRowData m_cached_row;
 	row_t m_cached_row_num{(row_t)-1};
 
+        /* How many rows have been read back out of the streams. Every increment
+         * is a row that was not in memory, so this counts the ring's reads of
+         * frozen rows and nothing else. Kept so that a test can assert a path
+         * reaches its answer without one; see rows_thawed_for_test().
+         */
+        size_t m_rows_thawed{0};
+
         row_t m_visible_rows{0};  /* to keep at least a screenful of lines in memory, bug 646098 comment 12 */
 
         GPtrArray *m_hyperlinks;  /* The hyperlink pool. Contains GString* items.
@@ -361,16 +376,39 @@ private:
          * decides when an image's last row has left the ring,
          * image_is_recoverable() and the spill all have to answer for exactly
          * those rows, and no cell in memory can answer for them.
-         * find_image_anchor() is the cell-derived answer, and it returns nothing
-         * precisely for the images the index is needed for. Deriving instead of
-         * storing is therefore not a slower option, it is not an available one.
-         * The test /vte/ring/image/rectangle-answers-for-frozen-rows holds the
-         * ring in exactly that state and asks both sides.
          *
-         * It is also the only ordered structure over images: drop_images_before()
-         * runs once per row the ring discards, i.e. once per line scrolled, and
-         * stops at the first entry keyed at or after the row it is dropping. A
-         * cell-derived answer would walk the whole writable window per call.
+         * Deriving from the cells in memory is not a slower option, it is a
+         * wrong one. find_image_anchor() is that answer, and for an image whose
+         * rows have all frozen it finds nothing at all, so the image is freed
+         * while the user can still scroll back to it. The test
+         * /vte/ring/image/rectangle-answers-for-frozen-rows holds the ring in
+         * exactly that state, and it fails when drop_images_before() is made to
+         * decide from find_image_anchor().
+         *
+         * The frozen rows themselves do still carry the reference, so deriving
+         * IS possible if the ring reads them back out of the streams. That is
+         * the option the rectangle buys off, and the price is measured, not
+         * argued. drop_images_before() runs once per line the terminal scrolls;
+         * below, one 200 row image scrolls out of a full scrollback over 250
+         * lines, against a drop_images_before() that finds an image's last row
+         * by scanning the ring for cells naming it instead of reading the
+         * rectangle:
+         *
+         *   scrollback     stored             derived
+         *    1000 rows      7 us, 0 reads      2210 us,   73200 reads
+         *    2000 rows      9 us, 0 reads     12042 us,  223200 reads
+         *    4000 rows      6 us, 0 reads     14739 us,  523200 reads
+         *    8000 rows      5 us, 0 reads     42764 us, 1123200 reads
+         *
+         * The reads a scrolled line costs grow one for one with the scrollback
+         * depth, so scrolling a scrollback past an image is quadratic in its
+         * depth, while the stored answer is flat and reads nothing.
+         * /vte/ring/image/dropping-a-frozen-image-reads-no-row is what holds
+         * this path at zero reads.
+         *
+         * The index is also the only ordered structure over images:
+         * drop_images_before() stops at the first entry keyed at or after the
+         * row it is dropping, which is why the walk above is the whole cost.
          *
          * What keeps the two from drifting is that only WHOLE-ROW moves update
          * the rectangle. Every operation that moves cells within a row - ICH,

@@ -1758,6 +1758,8 @@ Ring::thaw_row(row_t position,
 
         g_assert(m_has_streams);
 
+        m_rows_thawed++;
+
 	_vte_row_data_clear (row);
 
 	attr_change.text_end_offset = 0;

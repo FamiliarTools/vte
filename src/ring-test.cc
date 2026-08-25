@@ -343,10 +343,12 @@ test_ring_image_drop_scrollback(void)
  * is.
  *
  * The rectangle is not a second opinion about the cells. It is the ring's index
- * of which ROWS an image occupies, and it cannot be derived from the cells
- * because the ring's rows are not all cells: at m_writable a row stops being
- * memory and becomes bytes in the streams. The rules that decide when an
+ * of which ROWS an image occupies, and it cannot be derived from the cells in
+ * memory because the ring's rows are not all cells: at m_writable a row stops
+ * being memory and becomes bytes in the streams. The rules that decide when an
  * image's last row has left the ring have to be exact for exactly those rows.
+ * What it would take to derive it from the frozen rows instead is the next
+ * test.
  *
  * So freeze every row an image covers and ask both sides. find_image_anchor(),
  * which is the cell-derived position, has nothing left to answer with, while
@@ -419,6 +421,68 @@ test_ring_image_rectangle_answers_for_frozen_rows(void)
         ring.validate_images();
         g_assert_cmpuint(ring.image_map().size(), ==, 0);
         g_assert_cmpuint(ring.image_memory_used(), ==, 0);
+}
+
+/* What storing the rows instead of deriving them actually buys.
+ *
+ * A frozen row is not gone: thaw_row() hands it back, image reference and all,
+ * which is how a scrolled-back image is drawn at all. So deriving an image's
+ * rows is not impossible, it is a read of the streams on drop_images_before(),
+ * which runs once for every line the terminal scrolls. The rectangle is what
+ * makes that path read nothing at all, and this is the assertion that holds it
+ * there; what the reads would cost is measured on m_image_by_top_map.
+ */
+static void
+test_ring_image_dropping_a_frozen_image_reads_no_row(void)
+{
+        auto ring = Ring{40, true};     /* with streams: freezing is the point */
+        ring.set_visible_rows(24);
+        append_rows(ring, 4);
+
+        place_image(ring, 1, 3);
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+
+        auto const* const image = ring.image_map().begin()->second.get();
+        auto const id = image->get_pool_id();
+        auto const bottom = long(image->get_bottom());
+        g_assert_cmpint(bottom, ==, 3);
+
+        /* The fixture: every row the image covers is frozen, the ring has not
+         * dropped a row yet, and the cells in memory can no longer say where
+         * the image is.
+         */
+        append_rows(ring, 36);
+        g_assert_cmpuint(ring.delta(), ==, 0);
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_cmpint(long(ring.writable_start_for_test()), >, bottom);
+        g_assert_false(ring.find_image_anchor(id).has_value());
+
+        /* And the fixture's other half: the answer IS in the streams. Reading
+         * the image's last row back produces the reference that names it, so
+         * what follows is the ring declining to pay for a read it could make,
+         * not an absence of data. It also proves the counter moves, without
+         * which the assertion below would hold for a counter that is never
+         * incremented at all.
+         */
+        auto const before_read = ring.rows_thawed_for_test();
+        auto const* const frozen = ring.index(Ring::row_t(bottom));
+        g_assert_nonnull(frozen);
+        g_assert_cmpint(frozen->len, >, 0);
+        g_assert_true(frozen->cells[0].attr.image());
+        g_assert_true(ring.image_pool().lookup(frozen->cells[0].attr.image_ref()) == image);
+        g_assert_cmpuint(ring.rows_thawed_for_test(), ==, before_read + 1);
+
+        /* The behaviour: scrolling the image out one line at a time reaches the
+         * drop - at the right row - having read no row back.
+         */
+        auto const thawed = ring.rows_thawed_for_test();
+        while (!ring.image_map().empty()) {
+                append_rows(ring, 1);
+                ring.validate_images();
+                g_assert_cmpuint(ring.delta(), <=, Ring::row_t(bottom + 1));
+        }
+        g_assert_cmpuint(ring.delta(), ==, Ring::row_t(bottom + 1));
+        g_assert_cmpuint(ring.rows_thawed_for_test(), ==, thawed);
 }
 
 #endif /* WITH_SIXEL */
@@ -2635,6 +2699,8 @@ main(int argc,
         g_test_add_func("/vte/ring/image/drop-scrollback", test_ring_image_drop_scrollback);
         g_test_add_func("/vte/ring/image/rectangle-answers-for-frozen-rows",
                         test_ring_image_rectangle_answers_for_frozen_rows);
+        g_test_add_func("/vte/ring/image/dropping-a-frozen-image-reads-no-row",
+                        test_ring_image_dropping_a_frozen_image_reads_no_row);
 #endif
 
         return g_test_run();
