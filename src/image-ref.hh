@@ -52,9 +52,21 @@ namespace vte::image {
  *      rows = ceil(VTE_SIXEL_MAX_HEIGHT / min_cell_height)
  *
  * At the upstream caps of 2048x2052 and a 4x8 cell that is 512 columns and
- * 257 rows, hence 9 bits each. Those are checked below rather than assumed,
- * so lowering the caps is free and RAISING them is a build error instead of
- * a silent wrap into the pool id - which would alias one image onto another.
+ * 257 rows, hence 9 bits each. Those are checked below, so RAISING the caps
+ * is a build error.
+ *
+ * BUT THAT CHECK IS NOT SUFFICIENT ON ITS OWN, and it is important not to
+ * read it as more than it is. k_min_cell_width/height are an ASSUMPTION, not
+ * an enforced floor: the widget clamps cell metrics only to 1x2 and inits
+ * them to 1x1, so a real layout can be finer than the assumed minimum and a
+ * legal image can genuinely need more tile columns than the field holds.
+ *
+ * The packing is therefore TOTAL: out-of-range values are masked into their
+ * own field and cannot carry into a neighbour. Silently truncating a tile
+ * coordinate draws the wrong part of the right image; letting it carry into
+ * pool_id draws part of a DIFFERENT image, so masking is strictly the less
+ * bad of the two failures. Callers that can refuse a placement must ask
+ * fits() first, and refuse, rather than relying on either.
  *
  * 14 bits of pool id is 16383 concurrently live images (0 is reserved as the
  * "no image" id so that a zeroed Ref is invalid rather than a reference to
@@ -109,11 +121,28 @@ public:
         inline constexpr Ref(uint32_t pool_id,
                              uint32_t tile_row,
                              uint32_t tile_col) noexcept
-                : m_bits{(pool_id  << k_ref_pool_id_shift) |
-                         (tile_row << k_ref_tile_row_shift) |
-                         (tile_col << k_ref_tile_col_shift)}
+                : m_bits{((pool_id  & k_ref_pool_id_max)  << k_ref_pool_id_shift) |
+                         ((tile_row & k_ref_tile_row_max) << k_ref_tile_row_shift) |
+                         ((tile_col & k_ref_tile_col_max) << k_ref_tile_col_shift)}
         {
         }
+
+        /* Whether these values can be represented exactly. A caller that is
+         * able to refuse an image - the placement path - must check this and
+         * refuse, rather than store a masked reference.
+         */
+        static inline constexpr bool fits(uint32_t pool_id,
+                                          uint32_t tile_row,
+                                          uint32_t tile_col) noexcept
+        {
+                return pool_id <= k_ref_pool_id_max &&
+                       tile_row <= k_ref_tile_row_max &&
+                       tile_col <= k_ref_tile_col_max;
+        }
+
+        /* The largest image footprint, in cells, that can be referenced. */
+        static inline constexpr uint32_t max_tile_rows = k_ref_tile_row_max + 1;
+        static inline constexpr uint32_t max_tile_cols = k_ref_tile_col_max + 1;
 
         inline constexpr uint32_t bits() const noexcept { return m_bits; }
 

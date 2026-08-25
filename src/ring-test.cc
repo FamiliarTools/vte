@@ -762,6 +762,37 @@ test_attr_stream_stripe_is_one_run(void)
 }
 
 
+
+static void
+test_image_ref_out_of_range_cannot_alias(void)
+{
+        /* A tile coordinate that exceeds its field must NEVER carry into a
+         * neighbouring field. If it does, one image silently renders slices
+         * of another - the exact failure the pool's id quarantine exists to
+         * prevent, reintroduced through the packing instead.
+         *
+         * This is reachable: the widget clamps cell metrics only to 1x2
+         * (vte.cc, set_font_desc sanity check) and inits them to 1x1, while
+         * a max-legal image is VTE_SIXEL_MAX_WIDTH x VTE_SIXEL_MAX_HEIGHT.
+         * The k_min_cell_* floor the static asserts are written against is
+         * not enforced anywhere, so the packing must be total on its own.
+         */
+        auto const overflow_col = vte::image::Ref{7, 0, vte::image::k_ref_tile_col_max + 1};
+        g_assert_cmpuint(overflow_col.pool_id(), ==, 7);
+        g_assert_cmpuint(overflow_col.tile_row(), ==, 0);
+
+        auto const overflow_row = vte::image::Ref{7, vte::image::k_ref_tile_row_max + 1, 0};
+        g_assert_cmpuint(overflow_row.pool_id(), ==, 7);
+
+        /* And the caller must be able to ASK, rather than find out by
+         * corruption, whether a placement fits at all.
+         */
+        g_assert_true(vte::image::Ref::fits(7, 0, vte::image::k_ref_tile_col_max));
+        g_assert_false(vte::image::Ref::fits(7, 0, vte::image::k_ref_tile_col_max + 1));
+        g_assert_false(vte::image::Ref::fits(7, vte::image::k_ref_tile_row_max + 1, 0));
+        g_assert_false(vte::image::Ref::fits(vte::image::k_ref_pool_id_max + 1, 0, 0));
+}
+
 int
 main(int argc,
      char* argv[])
@@ -770,6 +801,7 @@ main(int argc,
 
 #if WITH_SIXEL
         g_test_add_func("/vte/image/ref/roundtrip", test_image_ref_roundtrip);
+        g_test_add_func("/vte/image/ref/out-of-range-cannot-alias", test_image_ref_out_of_range_cannot_alias);
         g_test_add_func("/vte/image/ref/fields-do-not-alias", test_image_ref_fields_do_not_alias);
         g_test_add_func("/vte/image/ref/zero-is-not-an-image", test_image_ref_zero_is_not_an_image);
         g_test_add_func("/vte/image/ref/stripe-identity", test_image_ref_stripe_identity);
