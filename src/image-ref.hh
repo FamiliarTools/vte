@@ -26,44 +26,37 @@
 namespace vte::image {
 
 /*
- * Ref: what an image cell stores in VteCellAttr::m_link.
+ * Ref: what a cell covered by an image stores in VteCellAttr::m_link.
  *
- * Exactly 32 bits, because that is the whole budget: see the discriminated
- * union in cell.hh for why the field cannot grow and why VteCell cannot
- * either.
- *
- * Layout, most significant first:
+ * Exactly 32 bits wide; see the union in cell.hh for why the field cannot
+ * grow. Layout, most significant first:
  *
  *      pool_id  : 14   which image, an index into the image pool
  *      tile_row :  9   which cell row of that image this cell is
  *      tile_col :  9   which cell column of that image this cell is
  *
- * The coordinates are per-image, not per-screen, so a cell knows which piece
- * of the image it carries no matter where the row has since been moved to.
- * That is what lets rewrap re-anchor an image for free: rewrap rebuilds
- * row_stream alone, so the cells keep their coordinates and the image simply
- * follows the cells that survived.
+ * The tile coordinates are relative to the image, not to the screen, so a
+ * cell keeps naming the same piece of the image wherever its row is moved
+ * to. Rewrap therefore re-anchors an image for free: it rebuilds row_stream
+ * only, and the image follows the cells that survived.
  *
- * The coordinate widths are sized against the LARGEST image the parser will
- * admit, divided by the emulated cell that sixel geometry is expressed in:
+ * The coordinate widths cover the largest image the parser admits, divided
+ * by the emulated cell that sixel geometry is expressed in:
  *
  *      cols = ceil(VTE_SIXEL_MAX_WIDTH  / VTE_SIXEL_CELL_MIN_WIDTH)
  *      rows = ceil(VTE_SIXEL_MAX_HEIGHT / VTE_SIXEL_CELL_MIN_HEIGHT)
  *
- * At 2048x2052 over the 4x8 FLOOR that is exactly 512 columns and 257 rows,
- * both inside 9 bits - the floor is chosen to make this true rather than
- * discovered to be true. Images are laid out against the font's cell, which
- * is normally much larger, so this is the worst case and not the usual one.
+ * which at 2048x2052 over the 4x8 minimum is 512 columns and 257 rows, both
+ * within 9 bits. Images are laid out against the font's cell, which is
+ * normally larger, so this is the worst case rather than the usual one.
  *
- * The floor is what makes the packing safe, and it has to be ENFORCED
- * somewhere real. The widget clamps its font cell only to 1x2 pixels, so
- * without a floor of our own a legal image would need 2048 columns - 11 bits
- * - and its tail would simply never be stamped. Terminal::image_cell_size()
- * applies the floor and is the only producer of an image layout cell.
+ * The minimum has to be enforced: the widget clamps its font cell only to
+ * 1x2 pixels, and at that size a legal image would need 11 bits of column.
+ * Terminal::image_cell_size() applies the minimum and is the only producer
+ * of an image layout cell.
  *
- * 14 bits of pool id is 16383 concurrently live images (0 is reserved as the
- * "no image" id so that a zeroed Ref is invalid rather than a reference to
- * image 0).
+ * 14 bits of pool id is 16383 concurrently live images; id 0 is reserved for
+ * "no image", so that a zeroed Ref names nothing.
  */
 
 inline constexpr unsigned k_ref_pool_id_bits = 14;
@@ -85,9 +78,7 @@ inline constexpr uint32_t k_ref_tile_col_max = (1u << k_ref_tile_col_bits) - 1u;
 inline constexpr uint32_t k_ref_pool_id_none = 0u;
 
 /* The worst-case tile footprint of a legal image, in cells. Derived from the
- * caps and the emulated cell, so it is a fact about the constants rather than
- * an assumption about fonts - which is what the previous version of this got
- * wrong, by asserting against a minimum cell size nothing enforced.
+ * caps and the emulated cell, so that the assertions below hold for any font.
  */
 inline constexpr int k_max_image_tile_cols =
         (VTE_SIXEL_MAX_WIDTH + VTE_SIXEL_CELL_MIN_WIDTH - 1) / VTE_SIXEL_CELL_MIN_WIDTH;
@@ -124,9 +115,9 @@ public:
         {
         }
 
-        /* Whether these values can be represented exactly. A caller that is
-         * able to refuse an image - the placement path - must check this and
-         * refuse, rather than store a masked reference.
+        /* Whether these values can be represented exactly. The placement path
+         * must check this and refuse the image, rather than store a masked
+         * reference.
          */
         static inline constexpr bool fits(uint32_t pool_id,
                                           uint32_t tile_row,
@@ -158,9 +149,8 @@ public:
                 return (m_bits >> k_ref_tile_col_shift) & k_ref_tile_col_max;
         }
 
-        /* A Ref is valid iff it names a real image. Note that this makes a
-         * zeroed Ref invalid, so memset-ing a cell to zero cannot conjure a
-         * reference to a live image.
+        /* A Ref is valid iff it names an image. A zeroed Ref is invalid, so
+         * clearing a cell cannot conjure a reference to a live image.
          */
         inline constexpr bool valid() const noexcept
         {
@@ -173,10 +163,10 @@ public:
                 return pool_id() == other.pool_id();
         }
 
-        /* Whether two cells belong to the same stripe: one tile row of one
-         * image. The stripe is the unit of image lifetime, so that a single
-         * surviving cell pins one row of tiles rather than a whole
-         * multi-megapixel image.
+        /* Whether two cells belong to the same stripe, that is one tile row
+         * of one image. The stripe is the unit of image lifetime, so that a
+         * single surviving cell pins one row of tiles rather than the whole
+         * image.
          */
         inline constexpr bool same_stripe(Ref const& other) const noexcept
         {
@@ -192,15 +182,14 @@ public:
 static_assert(sizeof(Ref) == sizeof(uint32_t), "vte::image::Ref must be 32 bits wide");
 
 /* How much of an image, in pixels, may be printed when it starts at column
- * `left` of a screen `columns` wide.
+ * @left of a screen @columns wide; zero if it cannot be placed at all.
  *
  * DEC STD 070 11.2.2: "Sixels defined to be printed past the right margin are
- * not printed." Zero means the image cannot be placed at all.
+ * not printed."
  *
- * Pulled out as a pure function because three separate things have to agree
- * about it - the stored surface, the cell footprint, and the run of cells
- * erased underneath - and they are computed in different places. When they
- * disagree, the draw and the lifetime rules act on different rectangles.
+ * A pure function because the stored surface, the cell footprint and the run
+ * of cells erased underneath are computed in different places and must agree
+ * on the same rectangle.
  */
 inline constexpr long clipped_width_px(long image_width_px,
                                        long left,
