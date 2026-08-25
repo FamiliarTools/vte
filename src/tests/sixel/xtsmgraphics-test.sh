@@ -44,6 +44,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Ask against a scratch home, not the invoking developer's.
+#
+# The app reads $XDG_CONFIG_HOME/vteapp.ini - or $HOME/.config/vteapp.ini when
+# that is unset - at startup, and Font in that file decides the cell the
+# geometry reply is computed in. Measured on this arm: with
+# Font=Monospace 40 planted in vteapp.ini, the run before this was added
+# reported
+#
+#   FAIL XTSMGRAPHICS says 2048x1584 but CSI 14t says 2640x1584
+#
+# because 80 columns of that cell is 2640 px, which XTSMGRAPHICS clamps to
+# VTE_SIXEL_MAX_WIDTH while CSI 14t reports the window unclamped. The
+# cross-channel assertion below therefore held or failed according to what the
+# developer had in their config file.
+#
+# HOME is set rather than only passing --no-load-config because a config dir
+# feeds this beyond vteapp.ini - a user fontconfig under it decides which font
+# the default monospace resolves to, and that font is again the cell. Each of
+# the two was measured to stop the Font=Monospace 40 leak on its own.
+export HOME="$WORK/home"
+export XDG_CONFIG_HOME="$HOME/.config"
+mkdir -p "$XDG_CONFIG_HOME"
+
 # Pi numbering is xterm's: 1 is colour registers, 2 is sixel geometry, 3 is
 # ReGIS. VTE used 0 and 1, so a sender asking for the register count was told
 # the geometry and concluded it had 2048 colour registers.
@@ -95,7 +118,7 @@ ask() {
         export VTE_SIXEL=1
 
         : > "$WORK/out"
-        "$APP" --no-decorations --geometry 80x24 -- /bin/sh -c \
+        "$APP" --no-load-config --no-decorations --geometry 80x24 -- /bin/sh -c \
                 "stty raw -echo; printf '${q}'; dd bs=1 count=${n} 2>/dev/null | cat -v > $WORK/out; stty sane; sleep 1" \
                 >/dev/null 2>&1 &
         APID=$!
