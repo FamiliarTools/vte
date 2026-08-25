@@ -19,8 +19,8 @@
  *
  * Two halves of it. The lifetime half is that a write to a cell an image owns
  * takes that cell back from the image - see Terminal::erase_images_in_rect()
- * and Ring::validate_image_cells(); every sequence handler that writes cells
- * is supposed to route through the one choke point that enforces it. The
+ * and Ring::image_invariant_violation(); every sequence handler that writes
+ * cells is supposed to route through the one choke point that enforces it. The
  * geometry half is that an image is laid out against the cell this terminal
  * reports to applications - see Terminal::image_cell_size().
  *
@@ -94,26 +94,41 @@ idle(void)
         return impl->m_incoming_queue.empty();
 }
 
+/* Hold the ring to its image invariants, with an assertion that is live.
+ *
+ * This is where the checker gets its teeth. Ring::validate_images() asserts
+ * through vte_assert_*, which -DG_DISABLE_ASSERT turns into nothing, and the
+ * library objects this test links carry that flag unless the tree was
+ * configured with -Ddbg=true; Terminal::process_incoming()'s call to it is
+ * inside #if VTE_DEBUG on top of that. So in the build the suite runs, the
+ * library walks its images and concludes nothing.
+ *
+ * The same walk also ANSWERS, and this file is compiled without that flag
+ * (see the target in src/meson.build), so an assertion here is live where the
+ * ring's own is not, and a broken rule is named rather than merely counted.
+ */
+static void
+check_the_ring(Ring const& ring)
+{
+        g_assert_cmpstr(ring.image_invariant_violation(), ==, nullptr);
+}
+
+/* Feed the terminal and let the parser run.
+ *
+ * The ring is checked once the batch has been applied, which is the point
+ * Terminal::process_incoming() checks at and for the same reason: a write into
+ * a cell an image owns moves no rows, so it never reaches the ring's own
+ * validate(). Everything this file sends the terminal goes through here, so
+ * every sequence any test below feeds is checked, not only the ones a test
+ * thought to ask about.
+ */
 static void
 feed(std::string const& data)
 {
         vte_terminal_feed(terminal, data.data(), data.size());
         pump_until(idle, 5000);
-}
 
-/* Ask the ring to check its own image invariants.
- *
- * Worth calling and worth NOT relying on. Ring::validate_images() is built into
- * every build, but its assertions are vte_assert_*, which -DG_DISABLE_ASSERT
- * turns into nothing - and the library objects this test links carry that flag
- * unless the tree was configured with -Ddbg=true. Only a test's OWN
- * assertions are certain to be live here, so every fact this file depends on is
- * asserted below rather than delegated to the ring.
- */
-static void
-check_the_ring(Ring const& ring)
-{
-        ring.validate_images();
+        check_the_ring(*impl->m_screen->row_data);
 }
 
 /* The one image the terminal is holding, by the maps. */
@@ -177,8 +192,6 @@ test_combining_mark_takes_the_cell(void)
         g_assert_cmpuint(row->cells[col].attr.image_ref().pool_id(), ==, id);
         g_assert_cmpuint(row->cells[col].c, ==, VTE_OBJECT_REPLACEMENT_CHARACTER);
 
-        check_the_ring(ring);
-
         /* Put the cursor one column PAST the target and print a combining
          * acute. A zero-width character combines onto the cell to its left,
          * which is how a write reaches a cell the cursor is not on.
@@ -216,8 +229,6 @@ test_combining_mark_takes_the_cell(void)
          */
         g_assert_cmpuint(ring.image_map().size(), ==, 1);
         g_assert_cmpuint(the_image(ring)->get_pool_id(), ==, id);
-
-        check_the_ring(ring);
 }
 
 /* A rectangular copy that takes an image's cells with it.
@@ -291,7 +302,6 @@ test_copy_rect_leaves_the_image_behind(void)
         g_assert_false(row->cells[marker_col - 1].attr.image());
 
         g_assert_true(ring.image_cells_are_anchored());
-        check_the_ring(ring);
 
         /* Copy that rectangle down the page, left edge to column one. */
         feed("\x1b[" + std::to_string(screen_top) +
@@ -339,7 +349,6 @@ test_copy_rect_leaves_the_image_behind(void)
         g_assert_cmpuint(row->cells[left].attr.image_ref().pool_id(), ==, id);
 
         g_assert_true(ring.image_cells_are_anchored());
-        check_the_ring(ring);
 }
 
 /* Place the test image at the home position, on a screen holding nothing else,

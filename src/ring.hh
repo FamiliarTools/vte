@@ -432,7 +432,7 @@ private:
         void reclaim_image_spill(row_t before_row) noexcept;
 
         bool image_has_any_cell(vte::image::Image const* image) const noexcept;
-        void validate_image_cells() const;
+        char const* image_cell_violation() const noexcept;
         void drop_images_before(row_t row) noexcept;
         void drop_images_after(row_t row) noexcept;
         void drop_images_torn_by_rewrap(column_t columns) noexcept;
@@ -460,28 +460,35 @@ private:
         inline void sync_has_images() noexcept { m_has_images = !m_image_map.empty(); }
 
 public:
-        /* Check the image maps against the rows the ring actually holds, and
-         * the cells that name an image against the image they name.
+        /* Which image rule is broken, or nullptr when none is: the image maps
+         * against the rows the ring actually holds, the memory in use against
+         * the images that hold it, and the cells that name an image against the
+         * image they name.
          *
-         * validate() calls this, but only under VTE_DEBUG, which no shipping
-         * build and no default test run enables - so gating the check itself on
-         * VTE_DEBUG would leave it compiled out everywhere and prove nothing.
-         * It is built whenever images are, and the tests call it directly after
-         * every step that moves rows or images, which is where the row-keyed
-         * maps can go stale without the ring noticing.
+         * A verdict rather than an assertion, because the ring's assertions are
+         * vte_assert_*, which -DG_DISABLE_ASSERT erases from the library's
+         * objects - so a caller inside the library can be certain of the walk
+         * and never of the conclusion. A caller whose own assertions are live
+         * asserts this itself; see the comment on the definition.
          *
-         * Terminal::process_incoming() calls it too, once a batch of sequences
-         * has been applied. That is the only place a write INTO a cell can be
-         * caught: it never reaches validate(), because it goes through
-         * index_writable() and moves no rows at all.
+         * The tests ask it after every step that moves rows or images, which is
+         * where the row-keyed maps can go stale without the ring noticing, and
+         * after every batch of sequences, which is the only place a write INTO
+         * a cell can be caught: such a write never reaches validate(), because
+         * it goes through index_writable() and moves no rows at all.
+         */
+        char const* image_invariant_violation() const noexcept;
+
+        /* image_invariant_violation(), asserted. What validate() and
+         * Terminal::process_incoming() call, both of them under VTE_DEBUG,
+         * which is where the library's own assertions are live.
          */
         void validate_images() const;
 
         /* Whether every cell of the writable rows that names an image is a
          * cell of THAT image, at exactly the position its tile coordinate puts
-         * it at. The cell to image half of validate_images(), returned rather
-         * than asserted so that a caller whose own assertions are live can hold
-         * the ring to it - see the comment on the definition.
+         * it at. The cell to image half of image_invariant_violation(), also
+         * asked on its own by tests that want that half by name.
          */
         bool image_cells_are_anchored() const noexcept;
 

@@ -81,22 +81,51 @@ Ring::validate() const
 void
 Ring::validate_images() const
 {
-        /* The image maps are keyed by row number, and a row number only means
-         * anything for as long as the ring still holds that row. Nothing about
-         * freeing a row tells the maps, so every path that destroys rows has to
-         * say so itself, and a path that forgets is invisible: the ring stays
-         * self-consistent, the images just quietly stop being reachable. Checking
-         * it here turns "audit the ring by reading it" into "run any workload".
-         *
-         * Free when no image is resident, which is very nearly always: the walk
-         * is over the maps, and the mirror already says whether they are empty.
+        vte_assert_cmpstr(image_invariant_violation(), ==, nullptr);
+}
+
+/*
+ * Every image rule the ring can be held to, as a VERDICT: nullptr when they all
+ * hold, and the rule that broke when one does not.
+ *
+ * Answered rather than asserted because the ring's own assertions are
+ * vte_assert_*, which -DG_DISABLE_ASSERT erases from the library's objects, and
+ * the library carries that flag in every build that is not a debug one. A
+ * checker that walks the images and concludes nothing is not a checker, so the
+ * conclusion is handed back instead, and a caller whose own assertions are live
+ * - a test binary built without that flag - asserts it there. validate_images()
+ * is that caller for a debug build; src/image-contract-test.cc is that caller
+ * for the ones the test suite actually runs.
+ *
+ * The image maps are keyed by row number, and a row number only means anything
+ * for as long as the ring still holds that row. Nothing about freeing a row
+ * tells the maps, so every path that destroys rows has to say so itself, and a
+ * path that forgets is invisible: the ring stays self-consistent, the images
+ * just quietly stop being reachable. Asking this after any workload turns
+ * "audit the ring by reading it" into "run the terminal".
+ */
+char const*
+Ring::image_invariant_violation() const noexcept
+{
+        /* Nearly always nothing is resident, and the mirror says so without a
+         * walk. What still has to hold then is that the images which left took
+         * their budget with them - a path that frees rows without crediting
+         * them back leaves live images to be evicted for pixels nobody holds.
          */
-        if (!m_has_images)
-                return;
+        if (!m_has_images) {
+                if (!m_image_map.empty() || !m_image_by_top_map.empty())
+                        return "the ring says it holds no image and the maps hold one";
+
+                if (m_image_fast_memory_used != 0)
+                        return "image memory is charged for images the ring no longer holds";
+
+                return nullptr;
+        }
 
         /* The two maps hold the same images, one keyed by priority and one by
          * top row, so their sizes cannot drift apart. */
-        vte_assert_cmpuint(m_image_by_top_map.size(), ==, m_image_map.size());
+        if (m_image_by_top_map.size() != m_image_map.size())
+                return "the two image maps hold different numbers of images";
 
         auto memory_used = size_t{0};
 
@@ -107,7 +136,8 @@ Ring::validate_images() const
                  * its rows exists any more and nothing can ever draw it, erase it or
                  * move it again.
                  */
-                vte_assert_cmpint(long(image->get_bottom()), >=, long(m_start));
+                if (long(image->get_bottom()) < long(m_start))
+                        return "a resident image covers no row the ring still holds";
 
                 /* The by-top map is an index into the priority map: same images,
                  * each filed under the row it actually starts at. A stale key makes
@@ -118,7 +148,8 @@ Ring::validate_images() const
                 auto found = false;
                 for (auto it = begin; it != end; ++it)
                         found = found || it->second == image.get();
-                vte_assert_true(found);
+                if (!found)
+                        return "an image is filed under a top row it does not start at";
 
                 memory_used += image->resource_size();
         }
@@ -127,9 +158,10 @@ Ring::validate_images() const
          * actually hold, so that a live image is never evicted to make room for
          * pixels that are already freed or that nobody can reach.
          */
-        vte_assert_cmpuint(memory_used, ==, m_image_fast_memory_used);
+        if (memory_used != m_image_fast_memory_used)
+                return "the image memory in use is not what the resident images hold";
 
-        validate_image_cells();
+        return image_cell_violation();
 }
 
 /*
@@ -156,10 +188,11 @@ Ring::validate_images() const
  * memory budget until the ring drops its rows. That is the shape of every
  * missed erase_images_in_rect() call, which is why it is worth a second walk.
  */
-void
-Ring::validate_image_cells() const
+char const*
+Ring::image_cell_violation() const noexcept
 {
-        vte_assert_true(image_cells_are_anchored());
+        if (!image_cells_are_anchored())
+                return "a cell names an image at a tile the image does not cover";
 
         /* The other direction: no resident image has been orphaned by its own
          * cells.
@@ -180,19 +213,16 @@ Ring::validate_image_cells() const
                     long(image->get_top()) >= long(m_end))
                         continue;
 
-                vte_assert_true(image_has_any_cell(image.get()));
+                if (!image_has_any_cell(image.get()))
+                        return "a resident image has no cell left naming it";
         }
+
+        return nullptr;
 }
 
 /*
- * The cell to image direction of validate_image_cells(), asked so that it can
- * be ANSWERED and not only asserted.
- *
- * The ring's own assertions are vte_assert_*, which -DG_DISABLE_ASSERT erases
- * from the library's objects; a build that carries that flag walks the cells
- * and concludes nothing. A caller that gets the verdict back can assert it with
- * assertions of its own, which is how a test binary built without that flag can
- * hold the library to this even where the library cannot hold itself to it.
+ * The cell to image direction of image_cell_violation(), on its own so that a
+ * test can ask for that half by name.
  *
  * Answered for the writable rows, which are the ones an operation can still
  * reach. A false verdict names the cell in a debug build; the bool is what

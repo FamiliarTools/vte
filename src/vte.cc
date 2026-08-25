@@ -4242,6 +4242,13 @@ Terminal::process_incoming()
          * window, so per sequence would make an O(cells) check out of an O(1)
          * print. Once per PTY read keeps it bounded by the window, and the
          * failing sequence is the last one fed either way.
+         *
+         * Under VTE_DEBUG because a walk of the window per read is not what a
+         * terminal should spend a user's time on - so this catches a violation
+         * for whoever is running a debug build, and nothing for anyone else.
+         * The check the test suite runs is the same walk asked as a question in
+         * src/image-contract-test.cc, which feeds sequences to a real terminal
+         * and asserts the answer with assertions of its own.
          */
         m_screen->row_data->validate_images();
 #endif
