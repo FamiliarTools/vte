@@ -271,8 +271,8 @@ Terminal::switch_screen(VteScreen *new_screen)
         g_assert (m_hyperlink_hover_idx == 0);
         m_hyperlink_hover_uri = NULL;
         emit_hyperlink_hover_uri_changed(NULL);  /* FIXME only emit if really changed */
-        m_defaults.attr.hyperlink_idx = m_screen->row_data->get_hyperlink_idx(NULL);
-        g_assert (m_defaults.attr.hyperlink_idx == 0);
+        m_defaults.attr.set_hyperlink_idx(m_screen->row_data->get_hyperlink_idx(NULL));
+        g_assert (m_defaults.attr.hyperlink_idx() == 0);
 
         /* cursor.row includes insert_delta, adjust accordingly */
         auto cr = m_screen->cursor.row - m_screen->insert_delta;
@@ -1903,7 +1903,7 @@ Terminal::set_current_hyperlink(vte::parser::Sequence const& seq,
                 idx = m_screen->row_data->get_hyperlink_idx(nullptr);
         }
 
-        m_defaults.attr.hyperlink_idx = idx;
+        m_defaults.attr.set_hyperlink_idx(idx);
 }
 
 void
