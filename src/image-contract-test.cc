@@ -15,17 +15,19 @@
  * along with this library.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* The image lifetime contract, asserted on the CELLS of a real terminal.
+/* The image contract, asserted on the CELLS of a real terminal.
  *
- * The contract is that a write to a cell an image owns takes that cell back
- * from the image - see Terminal::erase_images_in_rect() and
- * Ring::validate_image_cells(). Every sequence handler that writes cells is
- * supposed to route through the one choke point that enforces it.
+ * Two halves of it. The lifetime half is that a write to a cell an image owns
+ * takes that cell back from the image - see Terminal::erase_images_in_rect()
+ * and Ring::validate_image_cells(); every sequence handler that writes cells
+ * is supposed to route through the one choke point that enforces it. The
+ * geometry half is that an image is laid out against the cell this terminal
+ * reports to applications - see Terminal::image_cell_size().
  *
- * ring-test.cc cannot check that. It drives Ring directly, so it can only ever
- * assert what a test itself chose to do to the cells; whether vteseq.cc and
- * vte.cc actually call the choke point on the way in is precisely the part it
- * has to assume. The escape sequence has to be parsed for that question to be
+ * ring-test.cc cannot check either. It drives Ring directly, so it can only
+ * ever assert what a test itself chose to do to the cells, and it has no font,
+ * so the cell an image would really be laid out against is exactly the part it
+ * has to invent. The escape sequence has to be parsed for those questions to be
  * asked at all, which needs a Terminal, which needs a widget - so this is a
  * widget test that reads cells, and it links the library's objects rather than
  * the shared library because none of that is exported.
@@ -340,6 +342,134 @@ test_copy_rect_leaves_the_image_behind(void)
         check_the_ring(ring);
 }
 
+/* Place the test image at the home position, on a screen holding nothing else,
+ * and return it. Wide enough to be several cells across on any cell this
+ * terminal can have, so that a footprint is something to measure rather than a
+ * rounding artefact.
+ */
+static vte::image::Image const*
+place_the_image(Ring const& ring)
+{
+        feed("\x1b" "c"); /* RIS, split so the c is not read as more hex */
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+
+        feed("\x1b[H"
+             "\x1bP0;0;0q"
+             "\"1;1;200;20"
+             "#0;2;0;0;100#0" +
+             std::string(200, '~') +
+             "\x1b\\");
+
+        return the_image(ring);
+}
+
+/* The cell an image is laid out against is the cell the terminal reports.
+ *
+ * CSI 14t, TIOCGWINSZ and XTSMGRAPHICS all answer with the unscaled font cell,
+ * and a sixel stream carries pixels and no way to ask for cells, so that reply
+ * is the only figure a sender can size an image from. Laying out against
+ * anything else - a fixed cell, or the cell that happened to be in effect when
+ * the first image of the session arrived - makes the image cover a rectangle
+ * of the grid its sender did not ask for, with no way to find out.
+ *
+ * The font is changed here rather than merely inspected, because a layout cell
+ * read once and cached would agree with the reported cell until something moved
+ * it and never again. The fixture is asserted first: the reported cell really
+ * did change, or the comparison after it means nothing.
+ */
+static void
+test_footprint_is_the_reported_cell(void)
+{
+        auto& ring = *impl->m_screen->row_data;
+
+        auto small = vte::take_freeable(pango_font_description_from_string("Monospace 10"));
+        vte_terminal_set_font(terminal, small.get());
+
+        auto const* image = place_the_image(ring);
+
+        /* Fixture: a font cell above the floor, so that what is compared
+         * below is the font's cell and not VTE_SIXEL_CELL_MIN_* standing in
+         * for it.
+         */
+        g_assert_cmpint(impl->m_cell_width_unscaled, >, long(VTE_SIXEL_CELL_MIN_WIDTH));
+        g_assert_cmpint(impl->m_cell_height_unscaled, >, long(VTE_SIXEL_CELL_MIN_HEIGHT));
+
+        auto const cell_w = impl->m_cell_width_unscaled;
+        auto const cell_h = impl->m_cell_height_unscaled;
+
+        g_assert_cmpint(long(image->get_cell_width()), ==, cell_w);
+        g_assert_cmpint(long(image->get_cell_height()), ==, cell_h);
+        g_assert_cmpint(long(image->get_width()), ==,
+                        (long(image->get_width_px()) + cell_w - 1) / cell_w);
+        g_assert_cmpint(long(image->get_height()), ==,
+                        (long(image->get_height_px()) + cell_h - 1) / cell_h);
+
+        auto large = vte::take_freeable(pango_font_description_from_string("Monospace 22"));
+        vte_terminal_set_font(terminal, large.get());
+
+        image = place_the_image(ring);
+
+        /* Fixture: the reported cell moved, and the image is the same pixels
+         * as before. Neither is worth asserting the contract against alone.
+         */
+        g_assert_cmpint(impl->m_cell_width_unscaled, !=, cell_w);
+        g_assert_cmpint(impl->m_cell_height_unscaled, !=, cell_h);
+        g_assert_cmpint(impl->m_cell_width_unscaled, >, long(VTE_SIXEL_CELL_MIN_WIDTH));
+
+        /* The contract: the image that arrived after the change is laid out
+         * against the cell reported after the change.
+         */
+        g_assert_cmpint(long(image->get_cell_width()), ==, impl->m_cell_width_unscaled);
+        g_assert_cmpint(long(image->get_cell_height()), ==, impl->m_cell_height_unscaled);
+        g_assert_cmpint(long(image->get_width()), ==,
+                        (long(image->get_width_px()) + impl->m_cell_width_unscaled - 1) /
+                        impl->m_cell_width_unscaled);
+
+        vte_terminal_set_font(terminal, nullptr);
+}
+
+/* The zoom does not move the footprint.
+ *
+ * GNOME/vte#253: "output some image, increase zoom and the image zooms with it
+ * (fine so far); output the same image again, and the new image is smaller than
+ * the zoomed one." The zoom scales the drawn cell and leaves the reported one
+ * alone, so an image laid out against the reported cell covers the same cells
+ * before and after, and the two placements are drawn at the same size.
+ */
+static void
+test_footprint_ignores_the_zoom(void)
+{
+        auto& ring = *impl->m_screen->row_data;
+
+        auto const* image = place_the_image(ring);
+
+        auto const cell_w = impl->m_cell_width_unscaled;
+        auto const drawn_w = impl->m_cell_width;
+        auto const width = image->get_width();
+        auto const height = image->get_height();
+
+        g_assert_cmpint(width, >=, 3);
+
+        vte_terminal_set_font_scale(terminal, 2.);
+
+        image = place_the_image(ring);
+
+        /* Fixture: the zoom took effect - the cell the image is DRAWN in grew
+         * - and it left the reported cell where it was.
+         */
+        g_assert_cmpint(impl->m_cell_width, >, drawn_w);
+        g_assert_cmpint(impl->m_cell_width_unscaled, ==, cell_w);
+
+        /* The contract: same file, same footprint, so the two placements are
+         * drawn at the same size as each other.
+         */
+        g_assert_cmpint(long(image->get_cell_width()), ==, cell_w);
+        g_assert_cmpint(image->get_width(), ==, width);
+        g_assert_cmpint(image->get_height(), ==, height);
+
+        vte_terminal_set_font_scale(terminal, 1.);
+}
+
 int
 main(int argc,
      char* argv[])
@@ -385,6 +515,15 @@ main(int argc,
         test_copy_rect_leaves_the_image_behind();
 
         g_print("PASS: a rectangular copy does not copy the image\n");
+
+        test_footprint_ignores_the_zoom();
+
+        g_print("PASS: the zoom does not move an image's footprint\n");
+
+        /* Last, because it leaves the terminal on a different font. */
+        test_footprint_is_the_reported_cell();
+
+        g_print("PASS: an image is laid out against the reported cell\n");
 
         return 0;
 }
