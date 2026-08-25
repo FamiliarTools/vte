@@ -222,10 +222,11 @@ if get_option('sixel')
       timeout: 120,
     )
 
-    # The render cases above are only worth their runtime if they can fail.
-    # This one breaks the comparison they read their verdict from and requires
-    # the runner to report that, rather than reading a comparison that did not
-    # run as a frame that matched.
+    # The render cases above are only worth their runtime if their verdict
+    # tells a right frame from a wrong one. This one damages the captured frame
+    # in each of the ways it can be wrong - one pixel, every pixel, one column
+    # short - and requires the runner to reject each while still passing the
+    # frame it captured untouched.
     test(
       'sixel-render-gate-' + arm[0],
       files(sixel_test_dir / 'render-gate-test.sh'),
@@ -236,7 +237,7 @@ if get_option('sixel')
         arm[0],
       ],
       depends: [arm[1]],
-      timeout: 120,
+      timeout: 240,
     )
 
     # And they are only worth their runtime if they measure the code rather
