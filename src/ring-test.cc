@@ -1456,6 +1456,165 @@ test_ring_image_spill_is_reclaimed(void)
         g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 0);
 }
 
+
+static void
+test_ring_image_limit_is_enforced(void)
+{
+        /* The image memory budget is real API now, not a #define. chpe asked
+         * for it twice: "some API to set the hard resource limit (like we have
+         * the number-of-scrollback-lines API)" (vte#255).
+         *
+         * Each image here is 4 cells wide by 1 tall at 10x20, so 40x20 px,
+         * 3200 bytes. A 20 KiB budget therefore holds a handful and must
+         * evict the rest.
+         */
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        auto const budget = size_t{20 * 1024};
+        ring.set_image_memory_max(budget);
+        g_assert_cmpuint(ring.image_memory_max(), ==, budget);
+
+        /* Different rows: images stacked on the same row replace each other,
+         * so only one would ever be resident and the budget would never bind.
+         */
+        for (auto i = 0; i < 100; i++)
+                place_image(ring, 2 + (i % 20), 1);
+
+        /* Bounded, and actually holding several - a bound that only ever
+         * holds one image is not testing a bound.
+         */
+        g_assert_cmpuint(ring.image_map().size(), >, 1);
+        g_assert_cmpuint(ring.image_memory_used(), <=, budget);
+
+        /* The counter still agrees with what is resident - the budget is only
+         * meaningful if the number it is compared against is true.
+         */
+        auto sum = size_t{0};
+        for (auto const& [priority, image] : ring.image_map())
+                sum += image->resource_size();
+        g_assert_cmpuint(sum, ==, ring.image_memory_used());
+
+        /* The survivors are the NEWEST: eviction takes the oldest first, so
+         * what is on screen now outlives what scrolled past.
+         */
+        auto const newest = ring.image_map().rbegin()->first;
+        for (auto const& [priority, image] : ring.image_map())
+                g_assert_cmpuint(priority, >, newest - ring.image_map().size());
+}
+
+static void
+test_ring_image_limit_zero_disables(void)
+{
+        /* Zero is a meaningful setting, not a degenerate one: it is how a
+         * caller turns images off by resource policy rather than by refusing
+         * to parse them.
+         */
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        ring.set_image_memory_max(0);
+
+        for (auto i = 0; i < 10; i++)
+                place_image(ring, 2 + i, 1);
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+        g_assert_cmpuint(ring.image_memory_used(), ==, 0);
+}
+
+static void
+test_ring_image_limit_shrinks_immediately(void)
+{
+        /* Lowering the budget must take effect at once, not at the next
+         * image: a caller reducing it is reclaiming memory now.
+         */
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        for (auto i = 0; i < 20; i++)
+                place_image(ring, 2 + i, 1);
+
+        /* Several resident, so lowering the budget has something to reclaim. */
+        g_assert_cmpuint(ring.image_map().size(), >, 1);
+        g_assert_cmpuint(ring.image_memory_used(), >, 3200);
+
+        ring.set_image_memory_max(3200);
+        g_assert_cmpuint(ring.image_memory_used(), <=, 3200);
+}
+
+
+static void
+test_image_geometry_follows_its_layout_cell(void)
+{
+        /* An image is laid out against one cell and keeps it: the footprint
+         * is measured in that cell, and so is the draw.
+         *
+         * Which cell that is, is Terminal::image_cell_size()'s business - the
+         * font's, floored - and is asserted where a font exists, in
+         * image-contract-test.cc. What is asserted here is what the image does
+         * with the cell it was given, since the anchoring rules and the draw
+         * both read the answer back.
+         */
+        auto const width_px = 95;
+        auto const height_px = 45;
+        auto const epsilon = 1e-9;
+
+        auto make = [&](int cell_w, int cell_h) {
+                auto surface = vte::take_freeable
+                        (cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+                                                    width_px, height_px));
+                return std::make_unique<vte::image::Image>(std::move(surface),
+                                                           1, width_px, height_px,
+                                                           0, 0, cell_w, cell_h);
+        };
+
+        auto const image = make(10, 20);
+        auto const coarse = make(20, 40);
+
+        /* Fixture: two images of the same pixels, laid out against cells that
+         * really do differ. Without that the comparison below is vacuous.
+         */
+        g_assert_cmpint(image->get_cell_width(), ==, 10);
+        g_assert_cmpint(image->get_cell_height(), ==, 20);
+        g_assert_cmpint(coarse->get_cell_width(), ==, 20);
+        g_assert_cmpint(coarse->get_cell_height(), ==, 40);
+
+        /* The footprint covers the pixels, and no more than it must: a
+         * partial trailing cell still occupies a whole cell, because a cell
+         * is the smallest thing that can carry a reference and pixels outside
+         * the footprint are pixels nothing can draw.
+         */
+        g_assert_cmpint(image->get_width() * image->get_cell_width(), >=, width_px);
+        g_assert_cmpint(image->get_height() * image->get_cell_height(), >=, height_px);
+        g_assert_cmpint((image->get_width() - 1) * image->get_cell_width(), <, width_px);
+        g_assert_cmpint((image->get_height() - 1) * image->get_cell_height(), <, height_px);
+
+        /* And the cell is what decides how many: the same pixels over a cell
+         * twice the size cover fewer cells on both axes.
+         */
+        g_assert_cmpint(coarse->get_width(), <, image->get_width());
+        g_assert_cmpint(coarse->get_height(), <, image->get_height());
+
+        /* Drawn against the cell it was laid out at, an image is its own
+         * size; drawn against a larger one it grows by the ratio, which is
+         * how an image keeps covering the same cells when the font changes
+         * under it. The footprint does not move with the draw.
+         */
+        g_assert_cmpfloat_with_epsilon(image->get_width_pixels(image->get_cell_width()),
+                                       double(width_px), epsilon);
+        g_assert_cmpfloat_with_epsilon(image->get_height_pixels(image->get_cell_height()),
+                                       double(height_px), epsilon);
+        g_assert_cmpfloat_with_epsilon(image->get_width_pixels(2 * image->get_cell_width()),
+                                       2. * width_px, epsilon);
+
+        auto const cols = image->get_width();
+        (void)image->get_width_pixels(3 * image->get_cell_width());
+        g_assert_cmpint(image->get_width(), ==, cols);
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1465,6 +1624,7 @@ main(int argc,
 #if WITH_SIXEL
         g_test_add_func("/vte/sixel/right-margin-clip", test_sixel_right_margin_clip);
         g_test_add_func("/vte/image/ref/roundtrip", test_image_ref_roundtrip);
+        g_test_add_func("/vte/image/geometry-follows-layout-cell", test_image_geometry_follows_its_layout_cell);
         g_test_add_func("/vte/image/ref/covers-max-legal-image", test_image_ref_covers_max_legal_image);
         g_test_add_func("/vte/image/ref/out-of-range-cannot-alias", test_image_ref_out_of_range_cannot_alias);
         g_test_add_func("/vte/image/ref/fields-do-not-alias", test_image_ref_fields_do_not_alias);
@@ -1505,6 +1665,10 @@ main(int argc,
 
         g_test_add_func("/vte/ring/image/pixels-survive-eviction", test_ring_image_pixels_survive_eviction);
         g_test_add_func("/vte/ring/image/spill-is-reclaimed", test_ring_image_spill_is_reclaimed);
+
+        g_test_add_func("/vte/ring/image/limit-is-enforced", test_ring_image_limit_is_enforced);
+        g_test_add_func("/vte/ring/image/limit-zero-disables", test_ring_image_limit_zero_disables);
+        g_test_add_func("/vte/ring/image/limit-shrinks-immediately", test_ring_image_limit_shrinks_immediately);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

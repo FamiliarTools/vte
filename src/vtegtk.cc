@@ -1013,6 +1013,9 @@ try
                 case PROP_ENABLE_SIXEL:
                         g_value_set_boolean (value, vte_terminal_get_enable_sixel (terminal));
                         break;
+                case PROP_IMAGE_LIMIT:
+                        g_value_set_uint64 (value, vte_terminal_get_image_limit (terminal));
+                        break;
                 case PROP_ENCODING:
                         g_value_set_string (value, vte_terminal_get_encoding (terminal));
                         break;
@@ -1175,6 +1178,9 @@ try
                         break;
                 case PROP_ENABLE_SIXEL:
                         vte_terminal_set_enable_sixel (terminal, g_value_get_boolean (value));
+                        break;
+                case PROP_IMAGE_LIMIT:
+                        vte_terminal_set_image_limit (terminal, g_value_get_uint64 (value));
                         break;
                 case PROP_ENCODING:
                         vte_terminal_set_encoding (terminal, g_value_get_string (value), NULL);
@@ -2354,6 +2360,22 @@ vte_terminal_class_init(VteTerminalClass *klass)
 #endif
                                       (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY));
 
+        /**
+         * VteTerminal:image-limit:
+         *
+         * The amount of memory, in bytes, that the terminal may use for
+         * images received via SIXEL. Images exceeding the limit are evicted
+         * oldest first; their pixels remain in the scrollback stream and are
+         * drawn again when scrolled back to.
+         *
+         * Setting this to 0 disables images.
+         *
+         * Since: 0.86
+         */
+        pspecs[PROP_IMAGE_LIMIT] =
+                g_param_spec_uint64 ("image-limit", nullptr, nullptr,
+                                     0, G_MAXUINT64, VTE_IMAGE_MEMORY_MAX_DEFAULT,
+                                     (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY));
 
         /**
          * VteTerminal:font-options:
@@ -7438,6 +7460,61 @@ try
 catch (...)
 {
         vte::log_exception();
+}
+
+/**
+ * vte_terminal_set_image_limit:
+ * @terminal: a #VteTerminal
+ * @limit: the image memory limit, in bytes
+ *
+ * Sets how much memory @terminal may use for images received via SIXEL.
+ * Images exceeding the limit are evicted oldest first; their pixels remain
+ * in the scrollback stream and are drawn again when scrolled back to.
+ *
+ * A @limit of 0 disables images.
+ *
+ * Since: 0.86
+ */
+void
+vte_terminal_set_image_limit(VteTerminal *terminal,
+                             guint64 limit) noexcept
+try
+{
+#if WITH_SIXEL
+        g_return_if_fail(VTE_IS_TERMINAL(terminal));
+
+        if (WIDGET(terminal)->set_image_limit(size_t(limit)))
+                g_object_notify_by_pspec(G_OBJECT(terminal), pspecs[PROP_IMAGE_LIMIT]);
+#endif
+}
+catch (...)
+{
+        vte::log_exception();
+}
+
+/**
+ * vte_terminal_get_image_limit:
+ * @terminal: a #VteTerminal
+ *
+ * Returns: the image memory limit, in bytes
+ *
+ * Since: 0.86
+ */
+guint64
+vte_terminal_get_image_limit(VteTerminal *terminal) noexcept
+try
+{
+#if WITH_SIXEL
+        g_return_val_if_fail(VTE_IS_TERMINAL(terminal), 0);
+        return guint64(WIDGET(terminal)->image_limit());
+#else
+        return 0;
+#endif
+}
+catch (...)
+{
+        vte::log_exception();
+        return 0;
 }
 
 /**

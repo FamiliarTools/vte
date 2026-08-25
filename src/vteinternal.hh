@@ -604,6 +604,30 @@ public:
 
         constexpr bool sixel_enabled() const noexcept { return m_sixel_enabled; }
 
+        /* The image memory budget, in bytes, applied to both screens' rings.
+         *
+         * Zero means no image memory at all, which disables images: every
+         * image is immediately over budget and evicted as soon as it is
+         * placed. That is a deliberate value, not a degenerate one - it is
+         * how a caller turns images off by resource policy rather than by
+         * refusing to parse them.
+         */
+        bool set_image_limit(size_t limit) noexcept
+        {
+                if (m_image_limit == limit)
+                        return false;
+
+                m_image_limit = limit;
+                m_normal_screen.row_data->set_image_memory_max(limit);
+                m_alternate_screen.row_data->set_image_memory_max(limit);
+                invalidate_all();
+                return true;
+        }
+
+        constexpr size_t image_limit() const noexcept { return m_image_limit; }
+
+        size_t m_image_limit{VTE_IMAGE_MEMORY_MAX_DEFAULT};
+
 	/* State variables for handling match checks. */
         int m_match_regex_next_tag{0};
         auto regex_match_next_tag() noexcept { return m_match_regex_next_tag++; }

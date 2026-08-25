@@ -31,10 +31,6 @@
 
 #include <algorithm>
 
-/* We should be able to hold a single fullscreen 4K image at most.
- * 35MiB equals 3840 * 2160 * 4 plus a little extra. */
-#define IMAGE_FAST_MEMORY_USED_MAX (35 * 1024 * 1024)
-
 /* Hard limit on number of images to keep around. This limits the impact
  * of potential issues related to algorithmic complexity. */
 #define IMAGE_FAST_COUNT_MAX 4096
@@ -623,7 +619,7 @@ Ring::reclaim_image_spill(row_t before_row) noexcept
 void
 Ring::image_gc() noexcept
 {
-        while (m_image_fast_memory_used > IMAGE_FAST_MEMORY_USED_MAX ||
+        while (m_image_fast_memory_used > m_image_memory_max ||
                m_image_map.size() > IMAGE_FAST_COUNT_MAX) {
                 if (m_image_map.empty()) {
                         /* If this happens, we've miscounted somehow. */

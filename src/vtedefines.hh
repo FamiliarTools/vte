@@ -148,6 +148,13 @@
  */
 #define VTE_OBJECT_REPLACEMENT_CHARACTER (0xfffcu)
 
+/* Default image memory budget, in bytes. Settable per terminal through
+ * vte_terminal_set_image_limit(); this is only where it starts.
+ *
+ * Enough to hold a single fullscreen 4K image: 3840 * 2160 * 4 plus a little.
+ */
+#define VTE_IMAGE_MEMORY_MAX_DEFAULT (35 * 1024 * 1024)
+
 /* The SMALLEST cell an image may be laid out against.
  *
  * Images are laid out against the font's cell - see
