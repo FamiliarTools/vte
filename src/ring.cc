@@ -107,6 +107,28 @@ Ring::validate_images() const
 char const*
 Ring::image_invariant_violation() const noexcept
 {
+        /* The pool holds a live id for exactly the images the ring holds, and
+         * each of them resolves back to the image it was allocated for.
+         *
+         * The pool is non-owning: a live id whose image has been destroyed
+         * points at freed memory, and any cell naming it - or any walk that
+         * looks the id up - reads it. It is also unreclaimable, since a sweep
+         * only ever returns retired ids, so a path that destroys images
+         * without saying so spends the id space as well. Counting is what
+         * catches the ids the ring has stopped mentioning; resolving is what
+         * catches an image the pool has stopped answering for.
+         *
+         * Asked before the no-images shortcut below, because the emptied ring
+         * is precisely where a forgotten retire hides.
+         */
+        if (m_image_pool.live_count() != m_image_map.size())
+                return "the pool holds a live id for an image the ring does not";
+
+        for (auto const& [priority, image] : m_image_map) {
+                if (m_image_pool.lookup(image->get_pool_id()) != image.get())
+                        return "a resident image's id does not resolve to it";
+        }
+
         /* Nearly always nothing is resident, and the mirror says so without a
          * walk. What still has to hold then is that the images which left took
          * their budget with them - a path that frees rows without crediting
@@ -1985,6 +2007,15 @@ Ring::reset()
         m_cached_row_num = (row_t)-1;
 
 #if WITH_SIXEL
+        /* Say that the images are going, as every other path that destroys
+         * them does. The pool does not own them, so an id left Live after its
+         * image is destroyed resolves to freed memory, and nothing ever takes
+         * it back: only a sweep returns an id, and a sweep only ever returns a
+         * retired one.
+         */
+        for (auto const& [priority, image] : m_image_map)
+                note_image_freed(image.get());
+
         m_image_by_top_map.clear();
         m_image_map.clear();
         m_next_image_priority = 0;
@@ -1992,6 +2023,12 @@ Ring::reset()
         m_placing_image = nullptr;
         m_images_changed = false;
         sync_has_images();
+
+        /* Every row went with the streams, so nothing can name those ids any
+         * more and they are reclaimable now rather than at whatever later
+         * sweep the id space happens to run out at.
+         */
+        sweep_image_pool();
 #endif
 
         return m_end;

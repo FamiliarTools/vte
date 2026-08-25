@@ -33,6 +33,7 @@
 #include <map>
 #include <set>
 #include <utility>
+#include <vector>
 
 #include "cell.hh"
 #include "image-ref.hh"
@@ -71,7 +72,11 @@ static int const kCellHeight = 20;
  *     overcount is then paid for by evicting images that are still on screen.
  * (c) Indexing. The by-top map holds the same images as the priority map, each
  *     filed under the row it really starts at.
- * (d) Anchoring. Every cell that names an image holds U+FFFC as one whole cell,
+ * (d) Naming. The pool calls an id live for exactly the images the ring holds,
+ *     and each of those ids resolves back to its own image. The pool does not
+ *     own the images, so a live id whose image is gone reads freed memory, and
+ *     no sweep can ever take it back.
+ * (e) Anchoring. Every cell that names an image holds U+FFFC as one whole cell,
  *     and sits exactly where its tile coordinate says that piece of the picture
  *     belongs. The cells are what the draw walks and what every text-moving
  *     operation moves; the rectangle is what every lifetime rule reads. They
@@ -1004,6 +1009,94 @@ test_ring_image_pool_sweep_reclaims(void)
                       ring2.image_map().begin()->second.get());
 }
 
+static void
+test_ring_image_reset_retires_every_id(void)
+{
+        /* Ring::reset() destroys every image at once, and the pool does not
+         * own them: an id it still calls live afterwards resolves to a
+         * destroyed vte::image::Image, which is what any cell naming it, and
+         * the ring's own walks, would then read.
+         */
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        place_image(ring, 2, 3);
+        place_image(ring, 8, 3);
+
+        /* The fixture: two resident images, each with an id that resolves to
+         * it. That is the state reset() has to take apart.
+         */
+        g_assert_cmpuint(ring.image_map().size(), ==, 2);
+        g_assert_cmpuint(ring.image_pool().live_count(), ==, 2);
+
+        auto ids = std::vector<uint32_t>{};
+        for (auto const& [priority, image] : ring.image_map()) {
+                auto const id = image->get_pool_id();
+                g_assert_cmpuint(id, !=, vte::image::k_ref_pool_id_none);
+                g_assert_true(ring.image_pool().lookup(id) == image.get());
+                ids.push_back(id);
+        }
+
+        ring.reset();
+        ring.validate_images();
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+
+        /* Not one of them resolves any more. Anything an id still answered
+         * with here would be a destroyed image.
+         */
+        for (auto const id : ids)
+                g_assert_null(ring.image_pool().lookup(id));
+
+        g_assert_cmpuint(ring.image_pool().live_count(), ==, 0);
+}
+
+static void
+test_ring_image_reset_returns_the_ids(void)
+{
+        /* Place, reset, repeat: every RIS and every "reset" the user runs
+         * takes this path, so it must not spend the id space. A live id is
+         * unreclaimable - only a sweep returns an id, and only a retired one -
+         * so leaked ids accumulate until append_image() can allocate no more
+         * and silently drops every image from then on.
+         */
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+
+        append_rows(ring, 24);
+        place_image(ring, 2, 3);
+
+        /* The fixture: the image really took an id out of the pool. */
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_cmpuint(ring.image_pool().live_count(), ==, 1);
+        g_assert_cmpuint(ring.image_map().begin()->second->get_pool_id(),
+                         !=, vte::image::k_ref_pool_id_none);
+
+        ring.reset();
+        auto const available = ring.image_pool().available();
+
+        /* A reset does not rewind the row numbering, so each round places its
+         * image against the rows that round appended.
+         */
+        for (auto i = 0; i < 200; i++) {
+                auto const base = long(ring.next());
+                append_rows(ring, 24);
+                place_image(ring, base + 2, 3);
+                g_assert_cmpuint(ring.image_map().size(), ==, 1);
+                ring.reset();
+        }
+
+        ring.validate_images();
+
+        /* Two hundred images later the pool is exactly where the first reset
+         * left it: the ids came back rather than piling up.
+         */
+        g_assert_cmpuint(ring.image_pool().live_count(), ==, 0);
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 0);
+        g_assert_cmpuint(ring.image_pool().available(), ==, available);
+}
+
 
 static void
 test_ring_image_cells_carry_the_reference(void)
@@ -1256,6 +1349,14 @@ test_ring_image_reference_survives_freeze(void)
         g_assert_cmpint(row->len, >, 0);
         row->cells[0].attr.set_image_ref(vte::image::Ref{id, 3, 0});
         g_assert_true(ring.index(1)->cells[0].attr.image());
+
+        /* The id is retired, which is the state a freed image leaves its own
+         * id in and the only way the ring can hold one that resolves to
+         * nothing. Leaving it live would be a state the ring cannot reach: a
+         * live id names an image the ring holds.
+         */
+        ring.image_pool().retire(id);
+        g_assert_null(ring.image_pool().lookup(id));
 
         /* Push it far out of the writable window, so it is frozen. */
         append_rows(ring, 200);
@@ -2280,6 +2381,8 @@ main(int argc,
         g_test_add_func("/vte/ring/image-pool/allocates", test_ring_image_pool_allocates);
         g_test_add_func("/vte/ring/image-pool/retires-with-the-image", test_ring_image_pool_retires_with_the_image);
         g_test_add_func("/vte/ring/image-pool/sweep-reclaims", test_ring_image_pool_sweep_reclaims);
+        g_test_add_func("/vte/ring/image-pool/reset-retires-every-id", test_ring_image_reset_retires_every_id);
+        g_test_add_func("/vte/ring/image-pool/reset-returns-the-ids", test_ring_image_reset_returns_the_ids);
 
         g_test_add_func("/vte/ring/image-pool/cells-hold-object-replacement", test_ring_image_cells_hold_object_replacement);
         g_test_add_func("/vte/ring/image-pool/covers-every-cell-it-claims", test_ring_image_covers_every_cell_it_claims);

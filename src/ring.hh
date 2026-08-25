@@ -462,7 +462,8 @@ private:
 public:
         /* Which image rule is broken, or nullptr when none is: the image maps
          * against the rows the ring actually holds, the memory in use against
-         * the images that hold it, and the cells that name an image against the
+         * the images that hold it, the ids the pool calls live against the
+         * images the ring holds, and the cells that name an image against the
          * image they name.
          *
          * A verdict rather than an assertion, because the ring's assertions are
