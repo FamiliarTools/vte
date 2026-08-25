@@ -43,9 +43,15 @@ static void activate(GtkApplication *app, gpointer u) {
         vte_terminal_set_enable_sixel(a, TRUE);
         vte_terminal_set_enable_sixel(b, TRUE);
 
+#if GTK_CHECK_VERSION(4, 0, 0)
         gtk_box_append(GTK_BOX(box), GTK_WIDGET(a));
         gtk_box_append(GTK_BOX(box), GTK_WIDGET(b));
         gtk_window_set_child(GTK_WINDOW(win), box);
+#else
+        gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(a), TRUE, TRUE, 0);
+        gtk_box_pack_start(GTK_BOX(box), GTK_WIDGET(b), TRUE, TRUE, 0);
+        gtk_container_add(GTK_CONTAINER(win), box);
+#endif
 
         /* A: the aggressor, or idle in the control run. */
         char *acmd;
@@ -75,7 +81,11 @@ static void activate(GtkApplication *app, gpointer u) {
                                  on_spawn, NULL);
 
         gtk_window_set_default_size(GTK_WINDOW(win), 1000, 600);
+#if GTK_CHECK_VERSION(4, 0, 0)
         gtk_window_present(GTK_WINDOW(win));
+#else
+        gtk_widget_show_all(win);
+#endif
 }
 
 int main(int argc, char **argv) {
