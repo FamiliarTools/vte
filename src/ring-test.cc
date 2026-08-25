@@ -119,12 +119,19 @@ widen_row(Ring& ring,
 }
 
 /* Place an image @rows_tall rows tall and four cells wide, with its top left
- * corner at ring row @top, column @left, then end its emission burst the way
- * the sixel path does.
+ * corner at ring row @top, column @left: append it, anchor it to the cells it
+ * covers, and end its emission burst, the way the sixel path does.
  *
- * @left has to be the column the caller then stamps at: the image's rectangle
- * and the cells that carry it are two halves of one fact, and a fixture that
- * puts them in different places is not a state the terminal can produce.
+ * The stamping is part of placing rather than left to the caller, because the
+ * image's rectangle and the cells that carry it are two halves of one fact and
+ * an image with neither half is not a state the terminal can produce - it would
+ * be a picture nothing draws, nothing moves and nothing can erase. A fixture
+ * that reaches only the first half never reaches the state the assertions are
+ * about.
+ *
+ * Only cells that already exist are stamped, which is also what the real path's
+ * stamp does over a row too short to carry the whole stripe: widen the rows
+ * first if the test needs the picture wider than one cell.
  */
 static void
 place_image(Ring& ring,
@@ -141,6 +148,13 @@ place_image(Ring& ring,
                           width_px, height_px,
                           left, top,
                           kCellWidth, kCellHeight);
+
+        /* append_image() left the new image marked as the one being placed,
+         * which is what stamp_image_row() writes the reference of.
+         */
+        for (auto r = 0; r < rows_tall; r++)
+                ring.stamp_image_row(top + r, left, 4, uint32_t(r));
+
         ring.set_placing_image(nullptr);
 
         /* Placing runs the image GC, so it both adds to the maps and may evict

@@ -4223,6 +4223,28 @@ Terminal::process_incoming()
         /* The cursor shouldn't be above or below the addressable
          * part of the display buffer. */
         vte_assert_cmpint(m_screen->cursor.row, >=, m_screen->insert_delta);
+
+#if WITH_SIXEL
+        /* And the images still say the same thing the cells do.
+         *
+         * The ring checks this from Ring::validate(), which the ring calls on
+         * its OWN operations - inserting, removing, resetting, rewrapping
+         * rows. Those are not how the contract is usually broken. It is broken
+         * by a sequence handler writing into cells an image owns without
+         * routing through the choke point, and a write into an existing cell
+         * goes through index_writable() and never reaches validate(). So the
+         * ring cannot see the case the contract is about, and this is where a
+         * batch of sequences has finished being applied and the cells are
+         * supposed to be consistent again.
+         *
+         * Here rather than per sequence, and per sequence is what it would
+         * have to be to name the culprit - but this walks the whole writable
+         * window, so per sequence would make an O(cells) check out of an O(1)
+         * print. Once per PTY read keeps it bounded by the window, and the
+         * failing sequence is the last one fed either way.
+         */
+        m_screen->row_data->validate_images();
+#endif
 #endif
 
         if (context.m_modified) {

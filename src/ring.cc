@@ -138,12 +138,23 @@ Ring::validate_images() const
  * that images exist. So the maps agreeing with themselves says nothing about
  * where the picture actually is; only the cells can say that.
  *
- * Checked in one direction, because only one direction is an invariant. Every
- * cell that names an image is that image's and sits where it says it sits. A
- * cell INSIDE an image's rectangle may legitimately not be the image's at all,
- * either because a write took that cell back - a partial erase keeps the rest
- * of the picture - or because the row was too short to be stamped when the
- * image was placed.
+ * Two questions, one per direction, and they fail differently.
+ *
+ * Cell to image: every cell that names an image is that image's and sits where
+ * it says it sits. Not the converse - a cell INSIDE an image's rectangle may
+ * legitimately not be the image's at all, either because a write took that cell
+ * back - a partial erase keeps the rest of the picture - or because the row was
+ * too short to be stamped when the image was placed. So this direction is asked
+ * of cells, never of the rectangle.
+ *
+ * Image to cell: every image the writable rows could answer for still has at
+ * least one cell naming it. A walk over cells cannot ask that, because the
+ * violation is the ABSENCE of a cell: a path that takes an image's cells
+ * without telling the choke point leaves every remaining cell perfectly
+ * consistent and the image resident over a rectangle nothing names. It draws
+ * nothing, no operation can reach it, and it holds its pixels against the
+ * memory budget until the ring drops its rows. That is the shape of every
+ * missed erase_images_in_rect() call, which is why it is worth a second walk.
  */
 void
 Ring::validate_image_cells() const
@@ -203,6 +214,28 @@ Ring::validate_image_cells() const
                         vte_assert_cmpint(long(c), ==,
                                           long(image->get_left()) + long(ref.tile_col()));
                 }
+        }
+
+        /* The other direction: no resident image has been orphaned by its own
+         * cells.
+         *
+         * Only asked where the writable rows can answer it. An image whose rows
+         * have all frozen into the scrollback has no writable cell to find and
+         * is not an orphan - its references went into the stream with their
+         * rows, and it is the stream that will hand them back on the way up.
+         * An image being placed is exempt as everywhere else: its cells are
+         * stamped a row at a time after it is appended, so it genuinely has
+         * none for the length of its own burst.
+         */
+        for (auto const& [priority, image] : m_image_map) {
+                if (image.get() == m_placing_image)
+                        continue;
+
+                if (long(image->get_bottom()) < long(m_writable) ||
+                    long(image->get_top()) >= long(m_end))
+                        continue;
+
+                vte_assert_true(image_has_any_cell(image.get()));
         }
 }
 

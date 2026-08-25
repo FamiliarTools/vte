@@ -468,6 +468,11 @@ public:
          * It is built whenever images are, and the tests call it directly after
          * every step that moves rows or images, which is where the row-keyed
          * maps can go stale without the ring noticing.
+         *
+         * Terminal::process_incoming() calls it too, once a batch of sequences
+         * has been applied. That is the only place a write INTO a cell can be
+         * caught: it never reaches validate(), because it goes through
+         * index_writable() and moves no rows at all.
          */
         void validate_images() const;
 
