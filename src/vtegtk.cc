@@ -2364,9 +2364,14 @@ vte_terminal_class_init(VteTerminalClass *klass)
          * VteTerminal:image-limit:
          *
          * The amount of memory, in bytes, that the terminal may use for
-         * images received via SIXEL. Images exceeding the limit are evicted
-         * oldest first; their pixels remain in the scrollback stream and are
-         * drawn again when scrolled back to.
+         * images received via SIXEL. Images exceeding the limit are evicted,
+         * those that have already scrolled into the scrollback first and
+         * oldest first among those; their pixels remain in the scrollback
+         * stream and are drawn again when scrolled back to.
+         *
+         * An image that has not scrolled into the scrollback yet has nothing
+         * to be read back from, so it is evicted only when the limit cannot
+         * be met without it, and its pixels are then lost.
          *
          * Setting this to 0 disables images.
          *
@@ -7468,8 +7473,13 @@ catch (...)
  * @limit: the image memory limit, in bytes
  *
  * Sets how much memory @terminal may use for images received via SIXEL.
- * Images exceeding the limit are evicted oldest first; their pixels remain
+ * Images exceeding the limit are evicted, those that have already scrolled
+ * into the scrollback first and oldest first among those; their pixels remain
  * in the scrollback stream and are drawn again when scrolled back to.
+ *
+ * An image that has not scrolled into the scrollback yet has nothing to be
+ * read back from, so it is evicted only when the limit cannot be met without
+ * it, and its pixels are then lost.
  *
  * A @limit of 0 disables images.
  *

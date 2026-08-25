@@ -1760,6 +1760,66 @@ test_ring_image_limit_shrinks_immediately(void)
         g_assert_cmpuint(ring.image_memory_used(), <=, 3200);
 }
 
+static void
+test_ring_image_limit_spares_the_unrecoverable(void)
+{
+        /* Of two images the budget can only keep one, the one to drop is the
+         * one that can be read back, not simply the older one.
+         *
+         * The two orders differ as soon as the cursor has moved back up the
+         * screen: an image placed above one that has already reached the
+         * scrollback is the YOUNGER of the two, and it is the one with nowhere
+         * to be read back from.
+         */
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 10);
+
+        /* The older image, far enough down the ring that the writable window
+         * will still be holding its row; then the younger one above it, which
+         * that window will have left behind.
+         */
+        place_image(ring, 8, 1);
+        auto const unrecoverable = ring.image_map().rbegin()->first;
+
+        place_image(ring, 2, 1);
+        auto const recoverable = ring.image_map().rbegin()->first;
+
+        g_assert_cmpuint(unrecoverable, <, recoverable);
+
+        /* Scroll until row 2 is frozen and row 8 is not. Without that split the
+         * two orders pick the same image and the test proves nothing.
+         */
+        append_rows(ring, 28);
+        g_assert_cmpuint(ring.writable_start_for_test(), >, 2);
+        g_assert_cmpuint(ring.writable_start_for_test(), <=, 8);
+
+        /* Both still resident, and together over the budget about to be set. */
+        g_assert_cmpuint(ring.image_map().size(), ==, 2);
+        auto const budget = ring.image_map().begin()->second->resource_size();
+        g_assert_cmpuint(ring.image_memory_used(), >, budget);
+
+        ring.set_image_memory_max(budget);
+        ring.validate_images();
+
+        g_assert_cmpuint(ring.image_memory_used(), <=, budget);
+        g_assert_true(ring.image_map().find(unrecoverable) != ring.image_map().end());
+        g_assert_true(ring.image_map().find(recoverable) == ring.image_map().end());
+        g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 1);
+
+        /* And the one that went was only moved: its row reads back with its
+         * picture, which is what makes it the harmless one to take.
+         */
+        auto const* const data = ring.index(2);
+        g_assert_nonnull(data);
+        g_assert_cmpint(data->len, >, 0);
+        g_assert_true(data->cells[0].attr.image());
+
+        auto const* const image = ring.image_pool().lookup(data->cells[0].attr.image_ref());
+        g_assert_nonnull(image);
+        g_assert_cmpuint(image->get_priority(), ==, recoverable);
+}
+
 
 static void
 test_image_geometry_follows_its_layout_cell(void)
@@ -2241,6 +2301,7 @@ main(int argc,
         g_test_add_func("/vte/ring/image/limit-is-enforced", test_ring_image_limit_is_enforced);
         g_test_add_func("/vte/ring/image/limit-zero-disables", test_ring_image_limit_zero_disables);
         g_test_add_func("/vte/ring/image/limit-shrinks-immediately", test_ring_image_limit_shrinks_immediately);
+        g_test_add_func("/vte/ring/image/limit-spares-the-unrecoverable", test_ring_image_limit_spares_the_unrecoverable);
 
         g_test_add_func("/vte/ring/scrollback-restore-respects-the-budget", test_ring_scrollback_restore_respects_the_budget);
         g_test_add_func("/vte/ring/cached-row-holds-its-image-id", test_ring_cached_row_holds_its_image_id);

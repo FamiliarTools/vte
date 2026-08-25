@@ -815,6 +815,25 @@ Ring::reclaim_image_spill(row_t before_row) noexcept
         _vte_stream_advance_tail(m_image_stream, tail);
 }
 
+/*
+ * Whether evicting @image would only move its pixels, rather than destroy them.
+ *
+ * thaw_row() is the one caller of restore_image(), so an image can be read back
+ * exactly when every row that names it is frozen. A row still in the writable
+ * window is never thawed and its cells are drawn straight out of the array, so
+ * evicting an image anchored there loses the picture for good - and loses it
+ * even for the scrollback, since the reference the row freezes later resolves
+ * through the pool to an image that is no longer in it.
+ */
+bool
+Ring::image_is_recoverable(vte::image::Image const* image) const noexcept
+{
+        if (!m_has_streams || m_image_stream == nullptr)
+                return false;
+
+        return long(image->get_bottom()) < long(m_writable);
+}
+
 void
 Ring::image_gc(vte::image::Image const* exempt) noexcept
 {
@@ -825,20 +844,40 @@ Ring::image_gc(vte::image::Image const* exempt) noexcept
                         break;
                 }
 
-                /* Oldest first, except that an image restored from the
-                 * scrollback a moment ago must not be the victim.
+                /* The oldest image that can be read back again, and only
+                 * failing that the oldest image at all.
                  *
-                 * It is by construction the OLDEST thing in the map - that is
-                 * what being in the scrollback means - so without this it would
-                 * be evicted immediately every time and the row that faulted it
-                 * in would fault it again on the next frame.
+                 * Age alone is the wrong order: an image the cursor moved back
+                 * up to is younger than one that has already scrolled into the
+                 * scrollback, and taking the older of the two throws away the
+                 * one picture of the two that could not be recovered while
+                 * leaving the one that could. The budget is still a bound
+                 * though, so when nothing recoverable is left the oldest goes
+                 * anyway - otherwise a screenful of images would raise the
+                 * limit to whatever it happens to need.
+                 *
+                 * An image restored from the scrollback a moment ago is exempt.
+                 * It is by construction both the OLDEST thing in the map and
+                 * recoverable, so without this it would be picked every time
+                 * and the row that faulted it in would fault it again on the
+                 * next frame.
                  */
-                auto victim = m_image_map.begin();
-                if (exempt != nullptr && victim->second.get() == exempt) {
-                        ++victim;
+                auto victim = m_image_map.end();
+                for (auto it = m_image_map.begin(); it != m_image_map.end(); ++it) {
+                        if (exempt != nullptr && it->second.get() == exempt)
+                                continue;
+
                         if (victim == m_image_map.end())
+                                victim = it;
+
+                        if (image_is_recoverable(it->second.get())) {
+                                victim = it;
                                 break;
+                        }
                 }
+
+                if (victim == m_image_map.end())
+                        break;
 
                 auto& image = victim->second;
 

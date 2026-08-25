@@ -426,6 +426,7 @@ private:
         std::map<size_t /* priority */, ImageSpill> m_image_spill{};
 
         void append_stream_image_ref() noexcept;
+        bool image_is_recoverable(vte::image::Image const* image) const noexcept;
         void spill_image(vte::image::Image const* image) noexcept;
         vte::image::Image* restore_image(size_t priority) /* throws */;
         void reclaim_image_spill(row_t before_row) noexcept;
