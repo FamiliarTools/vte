@@ -128,6 +128,82 @@ Ring::validate_images() const
          * pixels that are already freed or that nobody can reach.
          */
         vte_assert_cmpuint(memory_used, ==, m_image_fast_memory_used);
+
+        validate_image_cells();
+}
+
+/*
+ * The cells are what an image IS: the draw walks them, and scrolling,
+ * insertion, deletion and rewrap move a picture by moving them without knowing
+ * that images exist. So the maps agreeing with themselves says nothing about
+ * where the picture actually is; only the cells can say that.
+ *
+ * Checked in one direction, because only one direction is an invariant. Every
+ * cell that names an image is that image's and sits where it says it sits. A
+ * cell INSIDE an image's rectangle may legitimately not be the image's at all,
+ * either because a write took that cell back - a partial erase keeps the rest
+ * of the picture - or because the row was too short to be stamped when the
+ * image was placed.
+ */
+void
+Ring::validate_image_cells() const
+{
+        for (auto r = m_writable; r < m_end; r++) {
+                auto const* const row = get_writable_index(r);
+
+                for (auto c = 0; c < row->len; c++) {
+                        auto const& cell = row->cells[c];
+                        if (!cell.attr.image())
+                                continue;
+
+                        /* The cell holds the image rather than the text that
+                         * was there, as one whole cell. Text extraction appends
+                         * each non-fragment cell's own c, so a cell still
+                         * holding its old character copies as that character,
+                         * and a fragment copies as nothing at all.
+                         */
+                        vte_assert_cmpuint(cell.c, ==, VTE_OBJECT_REPLACEMENT_CHARACTER);
+                        vte_assert_cmpuint(cell.attr.columns(), ==, 1);
+                        vte_assert_false(cell.attr.fragment());
+
+                        auto const ref = cell.attr.image_ref();
+                        auto const* const image = m_image_pool.lookup(ref);
+
+                        /* An id that resolves to nothing is a normal outcome:
+                         * the image has been freed and the cell is on its way
+                         * out with its row. Nothing can be asked of a picture
+                         * that is gone.
+                         */
+                        if (image == nullptr)
+                                continue;
+
+                        /* An image is exempt from every rule that moves images
+                         * for as long as its own emission burst is running, so
+                         * its rectangle is deliberately behind its cells until
+                         * the burst ends.
+                         */
+                        if (image == m_placing_image)
+                                continue;
+
+                        /* The tile coordinate names a piece of THIS picture. */
+                        vte_assert_cmpint(long(ref.tile_row()), <, long(image->get_height()));
+                        vte_assert_cmpint(long(ref.tile_col()), <, long(image->get_width()));
+
+                        /* And the cell sits exactly where that piece belongs.
+                         * This is the anchoring itself. A path that moves cells
+                         * without moving the image, or an image without its
+                         * cells, leaves a rectangle naming rows and columns the
+                         * picture no longer covers - and the rectangle is what
+                         * decides which images an erase can reach, which ones
+                         * the scrollback has taken, and which ones a reflow
+                         * tears apart.
+                         */
+                        vte_assert_cmpint(long(r), ==,
+                                          long(image->get_top()) + long(ref.tile_row()));
+                        vte_assert_cmpint(long(c), ==,
+                                          long(image->get_left()) + long(ref.tile_col()));
+                }
+        }
 }
 
 #endif /* WITH_SIXEL */

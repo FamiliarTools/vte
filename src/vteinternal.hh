@@ -1847,6 +1847,14 @@ public:
          * overwrites cells routes through here. Whole-image delete on any
          * intersection, see Ring::erase_images_in_rect().
          *
+         * What owes this call is a write to a cell that EXISTS, since a cell is
+         * how an image is stored and taking one is how it is taken back.
+         * Lengthening a row does not: _vte_row_data_fill() only ever appends, so
+         * ensure_cursor() and the smart tab in move_cursor_tab_forward() create
+         * cells at columns the image was never anchored in - the same state a
+         * partial erase leaves, and one the draw already reads as a gap in the
+         * picture rather than as part of it.
+         *
          * A terminal that holds no image is the overwhelmingly common case and it
          * must not pay for this: the test is one predicted branch on a value the
          * caller already has in cache, and everything else is out of line.
