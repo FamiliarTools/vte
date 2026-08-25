@@ -112,6 +112,20 @@ def truncated(s):
     return s[:int(len(s) * 0.6)]
 
 
+def cursor_right(s, enable):
+    """bands.six with DECSET 8452 set or reset, then a marker character.
+
+    Mode 8452 (MinTTY/RLogin) asks that the cursor be left to the RIGHT of
+    the image on its last row, instead of on the row below it. The marker
+    shows where the cursor actually ended up, which is the only way to see
+    a cursor-positioning rule in a still frame.
+    """
+    # The marker records where the cursor ENDED UP; the cursor is then
+    # parked far away, because leaving it next to the marker puts a blinking
+    # block inside the compared region and makes the test a coin flip.
+    return ('\x1b[?8452' + ('h' if enable else 'l')) + s + 'M' + '\x1b[23;1H'
+
+
 if __name__ == '__main__':
     b = bands_six()
     open('bands.six', 'w').write(b)
@@ -119,4 +133,6 @@ if __name__ == '__main__':
     open('bands-margin.six', 'w').write(at_right_margin(b))
     open('undefined-registers.six', 'w').write(undefined_registers())
     open('bands-truncated.six', 'w').write(truncated(b))
+    open('cursor-right-on.six', 'w').write(cursor_right(b, True))
+    open('cursor-right-off.six', 'w').write(cursor_right(b, False))
     print('wrote bands.six (%d bytes), bands-gch.six, bands-margin.six' % len(b))
