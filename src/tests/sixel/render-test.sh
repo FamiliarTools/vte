@@ -85,6 +85,29 @@ broken_comparison() {
         exit 1
 }
 
+# Run against a scratch home, not the invoking developer's.
+#
+# The app reads $XDG_CONFIG_HOME/vteapp.ini - or $HOME/.config/vteapp.ini when
+# that is unset - at startup, and that file sets the very inputs the golden was
+# captured against: the colours, the margins, the font, whether sixel is
+# enabled at all. A developer who has one was not being told about the
+# renderer, they were being told about their own terminal settings, and a
+# golden regenerated on that machine carried the settings into the tree.
+#
+# The scratch home on its own already hides that file, since it is where the
+# app goes looking; it is set rather than only passing the flag because a
+# config dir feeds this more than vteapp.ini - a user fontconfig under it
+# decides, measurably, which font the "Monospace" further down resolves to,
+# and the frame is compared against the font's cell.
+#
+# --no-load-config is kept alongside it, and yes the two overlap on this file.
+# It says at the call site that this run wants none of the user's terminal
+# settings, and it holds that whether or not the search path above is the one
+# glib actually uses.
+export HOME="$WORK/home"
+export XDG_CONFIG_HOME="$HOME/.config"
+mkdir -p "$XDG_CONFIG_HOME"
+
 # Let X pick a free display and TELL us which, rather than guessing a number.
 #
 # Guessing collides: meson runs these tests in parallel, so two of them can
@@ -126,7 +149,8 @@ CHILD="printf '\\033[H'; cat '$SIX'; printf '\\033[20;1H'; sleep 30"
 # your machine, not a code change.
 FONT=${VTE_TEST_FONT:-Monospace 12}
 
-"$APP" --no-decorations --geometry 80x24 --font "$FONT" -- sh -c "$CHILD" >"$WORK/app.log" 2>&1 &
+"$APP" --no-load-config --no-decorations --geometry 80x24 --font "$FONT" \
+        -- sh -c "$CHILD" >"$WORK/app.log" 2>&1 &
 APID=$!
 sleep 6
 

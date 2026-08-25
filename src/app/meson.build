@@ -239,6 +239,25 @@ if get_option('sixel')
       timeout: 120,
     )
 
+    # And they are only worth their runtime if they measure the code rather
+    # than whoever ran them. The app reads a user's vteapp.ini unless told not
+    # to, and that file sets the colours and the font the goldens were captured
+    # against. This one plants such a file on both paths the app resolves and
+    # requires the frame not to move - having first shown that the same file
+    # does move it when the app is made to load it.
+    test(
+      'sixel-render-isolation-' + arm[0],
+      files(sixel_test_dir / 'render-isolation-test.sh'),
+      args: [
+        arm[1].full_path(),
+        sixel_test_dir,
+        sixel_render_cases[0],
+        arm[0],
+      ],
+      depends: [arm[1]],
+      timeout: 180,
+    )
+
     foreach case: sixel_render_cases
       test(
         'sixel-render-' + case + '-' + arm[0],
