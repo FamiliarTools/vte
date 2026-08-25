@@ -1929,6 +1929,134 @@ test_ring_rewrap_with_images(void)
         }
 }
 
+/* Build what an image emitted in the middle of a wrapped paragraph leaves
+ * behind: a paragraph too wide for the reflow below, then the row above the
+ * image, then the image itself on row 2, one row tall and four cells wide.
+ *
+ * @tear_above is the only difference between the two arms - whether that row
+ * above is hard wrapped, which is precisely what
+ * Terminal::erase_image_rect()'s set_hard_wrapped(top - 1) does when the image
+ * is placed.
+ *
+ * Returns the image's pool id.
+ */
+static uint32_t
+place_image_below_a_boundary(Ring& ring,
+                             bool tear_above)
+{
+        ring.set_visible_rows(24);
+        append_rows(ring, 8);
+
+        /* Wider than the width rewrapped to below, so the paragraph splits in
+         * two and every row under it shifts down. An image whose top merely
+         * stays put would not exercise the re-anchoring at all.
+         */
+        widen_row(ring, 0, 12);
+
+        widen_row(ring, 1, 4);
+        ring.index_writable(1)->attr.soft_wrapped = !tear_above;
+
+        widen_row(ring, 2, 4);
+        place_image(ring, 2, 1);
+        auto* const image = ring.image_map().rbegin()->second.get();
+
+        ring.set_placing_image(image);
+        ring.stamp_image_row(2, 0, 4, 0);
+        ring.set_placing_image(nullptr);
+        ring.validate_images();
+
+        return image->get_pool_id();
+}
+
+static void
+test_ring_rewrap_needs_the_boundary_above_torn(void)
+{
+        /* Placing an image tears the paragraph apart above it, and that tear is
+         * what carries the picture through a reflow.
+         *
+         * An image is a rectangle of PHYSICAL rows, so it survives a rewrap
+         * only if each of its rows comes out of the reflow the same way it went
+         * in - and a paragraph that continues INTO the image's top row rewrites
+         * that row as thoroughly as anything below it does.
+         * drop_images_torn_by_rewrap() therefore holds the row above the top to
+         * the same rule as the covered rows, and an image that fails it is
+         * deleted rather than left claiming rows that now hold something else.
+         *
+         * So the row above being hard wrapped is not a detail of how the image
+         * is drawn: it is the difference between the picture surviving the
+         * first window resize and being destroyed by it.
+         */
+        auto const columns = Ring::column_t{6};
+
+        /* Torn: the state erase_image_rect() leaves behind. */
+        {
+                auto ring = Ring{1024, true};
+                auto const id = place_image_below_a_boundary(ring, true);
+
+                /* The fixture really is in the state the assertions describe:
+                 * the boundary is torn, and the cells carry the picture.
+                 */
+                g_assert_false(ring.is_soft_wrapped(1));
+                auto const before = image_cell_positions(ring, id);
+                g_assert_cmpuint(before.size(), ==, 4);
+                for (auto c = 0u; c < 4u; c++)
+                        g_assert_true((before.at({0, c}) == std::pair<long, long>{2, c}));
+
+                ring.rewrap_for_test(columns);
+                ring.validate_images();
+
+                /* The reflow really did split the paragraph above, so the rows
+                 * under it moved and the image had to be re-anchored rather
+                 * than left where it was.
+                 */
+                g_assert_cmpint(long(ring.next() - ring.delta()), ==, 9);
+
+                g_assert_cmpuint(ring.image_map().size(), ==, 1);
+                auto const* const image = ring.image_map().begin()->second.get();
+                g_assert_cmpint(long(image->get_top()), ==, 3);
+
+                auto const after = image_cell_positions(ring, id);
+                g_assert_cmpuint(after.size(), ==, 4);
+                for (auto c = 0u; c < 4u; c++)
+                        g_assert_true((after.at({0, c}) == std::pair<long, long>{3, c}));
+        }
+
+        /* Glued: the state without the tear, which the terminal produces
+         * whenever an image is emitted part way through a wrapped paragraph.
+         */
+        {
+                auto ring = Ring{1024, true};
+                auto const id = place_image_below_a_boundary(ring, false);
+
+                g_assert_true(ring.is_soft_wrapped(1));
+                g_assert_cmpuint(image_cell_positions(ring, id).size(), ==, 4);
+
+                ring.rewrap_for_test(columns);
+                ring.validate_images();
+
+                /* The image is gone, and its memory with it. */
+                g_assert_cmpuint(ring.image_map().size(), ==, 0);
+                g_assert_cmpuint(ring.image_memory_used(), ==, 0);
+                g_assert_false(ring.has_images());
+
+                /* And gone for a reason, not by accident: the paragraph above
+                 * really did reflow across the boundary, so that the row the
+                 * image's stripe used to have to itself now begins with that
+                 * paragraph's text. Keeping the image would have drawn it
+                 * under text that is not where it was emitted.
+                 */
+                auto const* const row = ring.index(2);
+                g_assert_nonnull(row);
+                g_assert_cmpint(row->len, ==, long(columns));
+                for (auto c = 0; c < 4; c++) {
+                        g_assert_false(row->cells[c].attr.image());
+                        g_assert_cmpuint(row->cells[c].c, ==, 'x');
+                }
+                for (auto c = 4; c < long(columns); c++)
+                        g_assert_true(row->cells[c].attr.image());
+        }
+}
+
 
 static void
 test_ring_scrollback_restore_respects_the_budget(void)
@@ -2103,6 +2231,8 @@ main(int argc,
         g_test_add_func("/vte/ring/scrollback-restore-respects-the-budget", test_ring_scrollback_restore_respects_the_budget);
         g_test_add_func("/vte/ring/cached-row-holds-its-image-id", test_ring_cached_row_holds_its_image_id);
         g_test_add_func("/vte/ring/rewrap-with-images", test_ring_rewrap_with_images);
+        g_test_add_func("/vte/ring/rewrap-needs-the-boundary-above-torn",
+                        test_ring_rewrap_needs_the_boundary_above_torn);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);
