@@ -29,35 +29,26 @@ namespace vte::image {
 /*
  * PoolT: the id space that vte::image::Ref::pool_id() indexes into.
  *
- * A cell names its image by a 14-bit id and nothing else - there is no room
- * in VteCellAttr for a generation counter. That makes id REUSE the central
- * hazard, and it is not a leak, it is a wrong picture: if an image is freed
- * while a cell in the scrollback still refers to its id, and that id is
- * immediately handed to the next image, the stale cell silently starts
- * displaying the new image. Worse, it does so at the stale cell's own tile
- * coordinates, so the result is a slice of one image embedded in another.
+ * A cell names its image by a 14-bit id alone; there is no room in
+ * VteCellAttr for a generation counter. Reusing an id while a cell in the
+ * scrollback still refers to it would make that cell display a slice of a
+ * different image, at its own tile coordinates.
  *
- * The fix is to make an id unreusable until nothing refers to it, which is
- * mark and sweep - the pattern the ring already uses for hyperlink indices
- * in hyperlink_gc(), for the same reason and at the same amortised cost.
- * An id is therefore in one of three states:
+ * An id is therefore made unreusable until nothing refers to it, by mark and
+ * sweep, as the ring already does for hyperlink indices in hyperlink_gc().
+ * An id is in one of three states:
  *
  *      Free      - available to allocate.
  *      Live      - allocated, payload resolvable.
- *      Retired   - the image is gone, but cells may still refer to the id.
- *                  Resolves to nullptr, and is NOT available to allocate.
+ *      Retired   - the image is gone, but cells may still refer to the id;
+ *                  resolves to nullptr, and is not available to allocate.
  *
  * retire() moves Live to Retired. Only a sweep moves Retired to Free, and
- * only for ids that the sweep did not see referenced. A retired id that is
- * still referenced stays retired: reuse is what we are preventing, and its
- * cells resolve to nullptr and draw as ordinary background until they die.
- * The retained set is therefore bounded by the ring, not unbounded.
+ * only for ids it did not see referenced, so the retained set is bounded by
+ * the ring. This is why lookup() returning nullptr is an expected outcome
+ * that callers handle by drawing nothing.
  *
- * Note this is why lookup() returning nullptr is a NORMAL outcome that
- * callers must handle by drawing nothing, rather than an assertion. A cell
- * outliving its image is expected, not a bug.
- *
- * The pool is non-owning: it maps id to payload. Ownership stays with
+ * The pool is non-owning: it maps id to payload, and ownership stays with
  * whoever holds the images.
  */
 
@@ -102,8 +93,7 @@ public:
         }
 
         /* Allocate an id for a payload. Returns k_ref_pool_id_none if the id
-         * space is exhausted, which the caller must treat as "cannot store
-         * this image" rather than ignoring.
+         * space is exhausted; the caller must then refuse the image.
          */
         uint32_t allocate(T* payload) noexcept
         {
@@ -184,7 +174,7 @@ public:
         }
 
         /* Returns the number of ids returned to the free list. A sweep that
-         * was never begun frees nothing, rather than freeing everything.
+         * was never begun frees nothing.
          */
         size_t sweep_end() noexcept
         {
