@@ -30,6 +30,9 @@
 
 #include "ring.hh"
 #include "vterowdata.hh"
+#include "cell.hh"
+#include "image-ref.hh"
+#include "image-pool.hh"
 
 #if WITH_SIXEL
 
@@ -282,6 +285,373 @@ test_ring_image_drop_scrollback(void)
 
 #endif /* WITH_SIXEL */
 
+
+/* vte::image::Ref packing, and the VteCellAttr union it lives in. */
+
+static void
+test_image_ref_roundtrip(void)
+{
+        /* Every field survives packing, including at its maximum. */
+        struct { uint32_t id, row, col; } const cases[] = {
+                { 1, 0, 0 },
+                { 1, 0, 1 },
+                { 1, 1, 0 },
+                { 12345, 7, 400 },
+                { vte::image::k_ref_pool_id_max, 0, 0 },
+                { 1, vte::image::k_ref_tile_row_max, 0 },
+                { 1, 0, vte::image::k_ref_tile_col_max },
+                { vte::image::k_ref_pool_id_max,
+                  vte::image::k_ref_tile_row_max,
+                  vte::image::k_ref_tile_col_max },
+        };
+
+        for (auto const& c : cases) {
+                auto const ref = vte::image::Ref{c.id, c.row, c.col};
+                g_assert_cmpuint(ref.pool_id(), ==, c.id);
+                g_assert_cmpuint(ref.tile_row(), ==, c.row);
+                g_assert_cmpuint(ref.tile_col(), ==, c.col);
+                g_assert_true(ref.valid());
+
+                /* Bits survive a trip through the raw 32-bit form. */
+                g_assert_true(vte::image::Ref{ref.bits()} == ref);
+        }
+}
+
+static void
+test_image_ref_fields_do_not_alias(void)
+{
+        /* The three fields must not overlap: a maxed-out coordinate must not
+         * bleed into the pool id and alias one image onto another.
+         */
+        auto const id_only = vte::image::Ref{vte::image::k_ref_pool_id_max, 0, 0};
+        auto const row_only = vte::image::Ref{0, vte::image::k_ref_tile_row_max, 0};
+        auto const col_only = vte::image::Ref{0, 0, vte::image::k_ref_tile_col_max};
+
+        g_assert_cmpuint(id_only.bits() & row_only.bits(), ==, 0);
+        g_assert_cmpuint(id_only.bits() & col_only.bits(), ==, 0);
+        g_assert_cmpuint(row_only.bits() & col_only.bits(), ==, 0);
+
+        /* Together they account for all 32 bits. */
+        g_assert_cmpuint(id_only.bits() | row_only.bits() | col_only.bits(),
+                         ==, 0xffffffffu);
+
+        /* A maximal coordinate leaves the pool id alone. */
+        auto const maxed = vte::image::Ref{7,
+                                           vte::image::k_ref_tile_row_max,
+                                           vte::image::k_ref_tile_col_max};
+        g_assert_cmpuint(maxed.pool_id(), ==, 7);
+}
+
+static void
+test_image_ref_zero_is_not_an_image(void)
+{
+        /* A zeroed Ref must not name a live image: cells are memset to zero
+         * in places, and that must not conjure a reference to image 0.
+         */
+        g_assert_false(vte::image::Ref{}.valid());
+        g_assert_false(vte::image::Ref{0u}.valid());
+        auto const no_image = vte::image::Ref{vte::image::k_ref_pool_id_none, 5, 5};
+        g_assert_false(no_image.valid());
+
+        /* basic_cell is not an image cell. */
+        g_assert_false(basic_cell.attr.image());
+}
+
+static void
+test_image_ref_stripe_identity(void)
+{
+        auto const a = vte::image::Ref{42, 3, 0};
+        auto const b = vte::image::Ref{42, 3, 100};
+        auto const c = vte::image::Ref{42, 4, 0};
+        auto const d = vte::image::Ref{43, 3, 0};
+
+        /* Same image, same tile row: one stripe, the unit of lifetime. */
+        g_assert_true(a.same_stripe(b));
+        g_assert_true(a.same_image(c));
+        g_assert_false(a.same_stripe(c));   /* different tile row */
+        g_assert_false(a.same_image(d));
+        g_assert_false(a.same_stripe(d));
+}
+
+static void
+test_cell_attr_union_tagging(void)
+{
+        VteCell cell = basic_cell;
+
+        /* Starts life as a hyperlink cell holding no hyperlink. */
+        g_assert_false(cell.attr.image());
+        g_assert_cmpuint(cell.attr.hyperlink_idx(), ==, 0);
+        g_assert_cmpuint(cell.attr.hyperlink_idx_or_none(), ==, 0);
+
+        cell.attr.set_hyperlink_idx(1234);
+        g_assert_false(cell.attr.image());
+        g_assert_cmpuint(cell.attr.hyperlink_idx(), ==, 1234);
+
+        /* Storing an image reference flips the tag with it, so the tag and
+         * the payload cannot disagree.
+         */
+        auto const ref = vte::image::Ref{99, 2, 3};
+        cell.attr.set_image_ref(ref);
+        g_assert_true(cell.attr.image());
+        g_assert_true(cell.attr.image_ref() == ref);
+
+        /* An image cell reports no hyperlink, in range, rather than
+         * reinterpreting the image bits as an index into the GC bitmap.
+         */
+        g_assert_cmpuint(cell.attr.hyperlink_idx_or_none(), ==, 0);
+
+        /* And back again. */
+        cell.attr.set_hyperlink_idx(7);
+        g_assert_false(cell.attr.image());
+        g_assert_cmpuint(cell.attr.hyperlink_idx(), ==, 7);
+}
+
+static void
+test_cell_attr_image_tag_survives_sgr_reset(void)
+{
+        /* reset_sgr_attributes() must not strip the tag off a cell whose
+         * m_link still holds an image reference: that would reinterpret
+         * those bits as a hyperlink index.
+         */
+        VteCell cell = basic_cell;
+        auto const ref = vte::image::Ref{1234, 5, 6};
+        cell.attr.set_image_ref(ref);
+
+        cell.attr.set_bold(true);
+        cell.attr.set_underline(2);
+        cell.attr.reset_sgr_attributes();
+
+        g_assert_false(cell.attr.bold());
+        g_assert_true(cell.attr.image());
+        g_assert_true(cell.attr.image_ref() == ref);
+}
+
+static void
+test_cell_sizes_unchanged(void)
+{
+        /* The whole design exists to avoid growing these. */
+        g_assert_cmpuint(sizeof(VteCell), ==, 20);
+        g_assert_cmpuint(sizeof(VteCellAttr), ==, 16);
+}
+
+
+/* The image id pool. */
+
+using TestPool = vte::image::PoolT<int>;
+
+static void
+test_image_pool_allocate_lookup(void)
+{
+        TestPool pool;
+        int a = 1, b = 2;
+
+        auto const ida = pool.allocate(&a);
+        auto const idb = pool.allocate(&b);
+
+        /* Never hands out the reserved "no image" id. */
+        g_assert_cmpuint(ida, !=, vte::image::k_ref_pool_id_none);
+        g_assert_cmpuint(idb, !=, vte::image::k_ref_pool_id_none);
+        g_assert_cmpuint(ida, !=, idb);
+
+        g_assert_true(pool.lookup(ida) == &a);
+        g_assert_true(pool.lookup(idb) == &b);
+        g_assert_cmpuint(pool.live_count(), ==, 2);
+
+        /* Resolvable through a Ref, which is how the draw path will do it. */
+        auto const ref = vte::image::Ref{ida, 0, 0};
+        g_assert_true(pool.lookup(ref) == &a);
+
+        /* The reserved id resolves to nothing. */
+        g_assert_null(pool.lookup(vte::image::k_ref_pool_id_none));
+}
+
+static void
+test_image_pool_retire_resolves_to_null(void)
+{
+        /* A cell outliving its image is normal, not an error: it must
+         * resolve to nothing and draw as background.
+         */
+        TestPool pool;
+        int a = 1;
+
+        auto const ida = pool.allocate(&a);
+        pool.retire(ida);
+
+        g_assert_null(pool.lookup(ida));
+        g_assert_cmpuint(pool.live_count(), ==, 0);
+        g_assert_cmpuint(pool.retired_count(), ==, 1);
+}
+
+static void
+test_image_pool_no_reuse_before_sweep(void)
+{
+        /* THE hazard this pool exists to prevent. If a retired id were
+         * handed straight back out, a stale cell still holding it would
+         * silently start displaying the NEW image, at the stale cell's own
+         * tile coordinates - a slice of one image embedded in another.
+         */
+        TestPool pool;
+        int a = 1, b = 2;
+
+        auto const ida = pool.allocate(&a);
+        pool.retire(ida);
+
+        /* Allocating many times must never return the quarantined id. */
+        for (int i = 0; i < 64; i++) {
+                auto const id = pool.allocate(&b);
+                g_assert_cmpuint(id, !=, ida);
+        }
+}
+
+static void
+test_image_pool_sweep_frees_unreferenced(void)
+{
+        TestPool pool;
+        int a = 1, b = 2;
+
+        auto const ida = pool.allocate(&a);
+        pool.retire(ida);
+
+        /* A sweep in which nothing referenced the id releases it. */
+        pool.sweep_begin();
+        auto const freed = pool.sweep_end();
+        g_assert_cmpuint(freed, ==, 1);
+        g_assert_cmpuint(pool.retired_count(), ==, 0);
+
+        /* Only now may it come back. */
+        auto const idb = pool.allocate(&b);
+        g_assert_cmpuint(idb, ==, ida);
+        g_assert_true(pool.lookup(idb) == &b);
+}
+
+static void
+test_image_pool_sweep_keeps_referenced(void)
+{
+        /* A retired id that a surviving cell still names must STAY
+         * quarantined across arbitrarily many sweeps.
+         */
+        TestPool pool;
+        int a = 1, b = 2;
+
+        auto const ida = pool.allocate(&a);
+        pool.retire(ida);
+
+        for (int round = 0; round < 8; round++) {
+                pool.sweep_begin();
+                pool.mark(ida);          /* a stale cell still refers to it */
+                g_assert_cmpuint(pool.sweep_end(), ==, 0);
+                g_assert_cmpuint(pool.retired_count(), ==, 1);
+
+                auto const id = pool.allocate(&b);
+                g_assert_cmpuint(id, !=, ida);
+        }
+
+        /* Once the last referring cell is gone, the id is reclaimed. */
+        pool.sweep_begin();
+        g_assert_cmpuint(pool.sweep_end(), ==, 1);
+}
+
+static void
+test_image_pool_sweep_does_not_touch_live(void)
+{
+        /* A sweep that nobody marked must not free LIVE ids: an unmarked
+         * live image is one whose cells simply were not walked, not a dead
+         * one. Only Retired is a sweep's business.
+         */
+        TestPool pool;
+        int a = 1;
+
+        auto const ida = pool.allocate(&a);
+
+        pool.sweep_begin();
+        g_assert_cmpuint(pool.sweep_end(), ==, 0);
+
+        g_assert_true(pool.lookup(ida) == &a);
+        g_assert_cmpuint(pool.live_count(), ==, 1);
+}
+
+static void
+test_image_pool_sweep_end_without_begin(void)
+{
+        /* An unbegun sweep must free nothing rather than everything: the
+         * marks are all clear, so a naive implementation would reclaim every
+         * retired id while its cells still point at them.
+         */
+        TestPool pool;
+        int a = 1;
+
+        auto const ida = pool.allocate(&a);
+        pool.retire(ida);
+
+        g_assert_cmpuint(pool.sweep_end(), ==, 0);
+        g_assert_cmpuint(pool.retired_count(), ==, 1);
+}
+
+static void
+test_image_pool_exhaustion(void)
+{
+        /* The id space is 14 bits and can genuinely run out. Exhaustion must
+         * report failure, not wrap around onto a live id.
+         */
+        TestPool pool;
+        int a = 1;
+
+        std::vector<uint32_t> ids;
+        for (;;) {
+                auto const id = pool.allocate(&a);
+                if (id == vte::image::k_ref_pool_id_none)
+                        break;
+                ids.push_back(id);
+                g_assert_cmpuint(ids.size(), <=, vte::image::k_ref_pool_id_max);
+        }
+
+        /* Exactly the ids 1..max, each handed out once. */
+        g_assert_cmpuint(ids.size(), ==, vte::image::k_ref_pool_id_max);
+        g_assert_cmpuint(pool.available(), ==, 0);
+
+        /* Every id fits the Ref field it has to live in. */
+        for (auto const id : ids) {
+                auto const ref = vte::image::Ref{id, 0, 0};
+                g_assert_cmpuint(ref.pool_id(), ==, id);
+        }
+
+        /* Still exhausted while everything is live. */
+        g_assert_cmpuint(pool.allocate(&a), ==, vte::image::k_ref_pool_id_none);
+
+        /* Retiring alone does not help; only a completed sweep does. */
+        pool.retire(ids[0]);
+        g_assert_cmpuint(pool.allocate(&a), ==, vte::image::k_ref_pool_id_none);
+
+        pool.sweep_begin();
+        g_assert_cmpuint(pool.sweep_end(), ==, 1);
+        g_assert_cmpuint(pool.allocate(&a), ==, ids[0]);
+}
+
+static void
+test_image_pool_retire_is_idempotent(void)
+{
+        /* Double retire must not push the id onto the free list twice, which
+         * would later hand the same id to two different images at once.
+         */
+        TestPool pool;
+        int a = 1, b = 2, c = 3;
+
+        auto const ida = pool.allocate(&a);
+        pool.retire(ida);
+        pool.retire(ida);
+        pool.retire(ida);
+
+        pool.sweep_begin();
+        g_assert_cmpuint(pool.sweep_end(), ==, 1);
+
+        auto const id1 = pool.allocate(&b);
+        auto const id2 = pool.allocate(&c);
+        g_assert_cmpuint(id1, ==, ida);
+        g_assert_cmpuint(id2, !=, id1);
+        g_assert_true(pool.lookup(id1) == &b);
+        g_assert_true(pool.lookup(id2) == &c);
+}
+
 int
 main(int argc,
      char* argv[])
@@ -289,6 +659,24 @@ main(int argc,
         g_test_init(&argc, &argv, nullptr);
 
 #if WITH_SIXEL
+        g_test_add_func("/vte/image/ref/roundtrip", test_image_ref_roundtrip);
+        g_test_add_func("/vte/image/ref/fields-do-not-alias", test_image_ref_fields_do_not_alias);
+        g_test_add_func("/vte/image/ref/zero-is-not-an-image", test_image_ref_zero_is_not_an_image);
+        g_test_add_func("/vte/image/ref/stripe-identity", test_image_ref_stripe_identity);
+        g_test_add_func("/vte/cell/attr/union-tagging", test_cell_attr_union_tagging);
+        g_test_add_func("/vte/cell/attr/image-tag-survives-sgr-reset", test_cell_attr_image_tag_survives_sgr_reset);
+        g_test_add_func("/vte/cell/sizes-unchanged", test_cell_sizes_unchanged);
+
+        g_test_add_func("/vte/image/pool/allocate-lookup", test_image_pool_allocate_lookup);
+        g_test_add_func("/vte/image/pool/retire-resolves-to-null", test_image_pool_retire_resolves_to_null);
+        g_test_add_func("/vte/image/pool/no-reuse-before-sweep", test_image_pool_no_reuse_before_sweep);
+        g_test_add_func("/vte/image/pool/sweep-frees-unreferenced", test_image_pool_sweep_frees_unreferenced);
+        g_test_add_func("/vte/image/pool/sweep-keeps-referenced", test_image_pool_sweep_keeps_referenced);
+        g_test_add_func("/vte/image/pool/sweep-does-not-touch-live", test_image_pool_sweep_does_not_touch_live);
+        g_test_add_func("/vte/image/pool/sweep-end-without-begin", test_image_pool_sweep_end_without_begin);
+        g_test_add_func("/vte/image/pool/exhaustion", test_image_pool_exhaustion);
+        g_test_add_func("/vte/image/pool/retire-is-idempotent", test_image_pool_retire_is_idempotent);
+
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);
         g_test_add_func("/vte/ring/image/resize-grow", test_ring_image_resize_grow);
