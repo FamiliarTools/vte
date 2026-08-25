@@ -107,7 +107,10 @@ def truncated(s):
     What a dropped connection or `head -c` produces. xterm has rendered the
     part that arrived since patch #323; discarding it means a user who
     cats a partially-downloaded image sees nothing rather than the top of
-    it. Cut at 60%, which leaves five of the eight bands.
+    it. Cut at 60%. What that leaves is not a whole number of bands: read
+    off the golden, the first four bands are drawn in full at 9 px each and
+    the fifth (yellow) gets 6 of its 9 rows, y=37..42 where a whole band
+    would run y=37..45.
 
     Rendered by the sixel-render-bands-truncated-* tests, which need the pty
     to reach end of stream for it; see bands-truncated.eof and the note it is

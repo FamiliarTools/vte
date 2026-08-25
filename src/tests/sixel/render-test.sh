@@ -44,12 +44,36 @@ UPDATE=${5:-}
 SIX="$SRCDIR/$CASE.six"
 
 # One golden per GTK arm, because the compared frame is the WINDOW and the two
-# toolkits put the terminal at different offsets inside it: the same fixture
-# renders identically - same 96x72 px, same bands, same colours - but GTK4's
-# client-side border pushes the content five pixels down and right of where
-# GTK3 puts it. A single shared golden would therefore fail on one arm for a
-# reason that is not a defect, and papering over it with an offset constant
-# would make the compared region a knob that can silently drift off the image.
+# toolkits put the terminal at different offsets inside it: GTK4's client-side
+# border pushes the content five pixels down and right of where GTK3 puts it.
+# A single shared golden would therefore fail on one arm for a reason that is
+# not a defect, and papering over it with an offset constant would make the
+# compared region a knob that can silently drift off the image.
+#
+# How much of the per-arm delta that offset accounts for was measured, case by
+# case, by shifting the gtk3 golden five pixels and diffing it against the
+# gtk4 one over the overlap. Five of the nine come out at AE=0 - bands,
+# bands-gch, bands-truncated, raster-opaque, undefined-registers - so for
+# those the offset IS the whole difference, image pixels included. Four do
+# not, and the residue is not spread over the frame (boxes are in the shifted
+# frame's coordinates):
+#
+#   cursor-right-off    AE=67.8706   differing box 10x17+1+80
+#   cursor-right-on     AE=61.5569   differing box 10x17+1+80
+#   raster-transparent  AE=42.6392   differing box 10x14+1+23
+#   bands-margin        AE=1163.48   differing box 23x125+771+0
+#
+# The first three are one text cell each - the marker glyph, greys either side
+# of black on both arms, so the two toolkits antialias the same glyph
+# differently. bands-margin's is the right-hand end of an 800 px crop that on
+# gtk4, whose terminal is inset, has run past the window: magenta all the way
+# across on gtk3, window border and desktop on gtk4.
+#
+# So: the 5 px offset explains every image pixel measured here, and the
+# remainder is glyph antialiasing plus one crop that outruns the gtk4 window.
+# Neither of those is an image the renderer drew differently, and neither is
+# hidden by the per-arm goldens - each arm is still compared byte for byte
+# against itself.
 GOLDEN="$SRCDIR/$CASE.golden-$ARM.png"
 
 for tool in Xvfb import compare convert; do
@@ -137,7 +161,11 @@ export LIBGL_ALWAYS_SOFTWARE=1
 # A blinking cursor inside the compared region makes the verdict a coin flip
 # on blink phase, and parking it at row 20 does not put it outside every
 # compared region: raster-opaque and raster-transparent crop 400x400, which
-# reaches down past row 20, where the other cases crop 320x130 and do not.
+# reaches down past row 20. No other case does - the crops are 320x130
+# (bands, bands-gch, bands-truncated, cursor-right-on, cursor-right-off),
+# 800x130 (bands-margin) and 320x80 (undefined-registers), and both of those
+# heights stop far above the parked row, which the measurement below puts at
+# y=381.
 #
 # It bit: raster-opaque and raster-transparent failed together on two full
 # gtk3 suite runs and passed when re-run on their own, unchanged, and the

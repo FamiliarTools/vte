@@ -829,8 +829,13 @@ Ring::restore_image(size_t priority) /* throws */
         /* Faulting an image back in from the scrollback ADDS to the budget, so
          * it has to be collected against like any other addition. Without this
          * scrolling back through history that held images pulls every one of
-         * them into RAM and nothing ever evicts them: measured at 8.3 times the
-         * configured budget from Page Up alone.
+         * them into RAM and nothing ever evicts them.
+         *
+         * Reproducible from this tree: delete this call and
+         * /vte/ring/scrollback-restore-respects-the-budget goes red on the
+         * first row read back, at (12800 <= 9600). Drop its in-loop bound as
+         * well, so the whole Page Up sweep runs, and its twelve images end at
+         * 38400 against the same 9600 budget - four times it.
          */
         image_gc(raw);
 
@@ -911,10 +916,21 @@ Ring::image_gc(vte::image::Image const* exempt) noexcept
                  * limit to whatever it happens to need.
                  *
                  * An image restored from the scrollback a moment ago is exempt.
-                 * It is by construction both the OLDEST thing in the map and
-                 * recoverable, so without this it would be picked every time
-                 * and the row that faulted it in would fault it again on the
-                 * next frame.
+                 * It came out of the spill, so it is recoverable by
+                 * construction, and the rule above prefers exactly that - which
+                 * means the collection this fault-in triggers can undo the
+                 * fault-in itself and hand the row back an image that is gone
+                 * again. Held: ignoring @exempt turns
+                 * /vte/ring/scrollback-restore-respects-the-budget red on
+                 * 'restored != ring.image_map().end()' - the image just read
+                 * back missing from the map.
+                 *
+                 * Only recoverability is load-bearing here. It is NOT also the
+                 * oldest thing in the map: restore_image() reinserts under the
+                 * image's ORIGINAL priority, so once more than one image has
+                 * been faulted in the earlier ones sort ahead of it. Probed
+                 * over that same test's sweep, @exempt was m_image_map.begin()
+                 * on the first fault-in and on none of the ten after it.
                  */
                 auto victim = m_image_map.end();
                 for (auto it = m_image_map.begin(); it != m_image_map.end(); ++it) {

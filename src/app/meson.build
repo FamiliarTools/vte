@@ -200,8 +200,9 @@ if get_option('sixel')
     'raster-transparent',
     'raster-opaque',
     # A sixel cut off mid-stream, with no terminator. What arrived must still
-    # be drawn - the top five bands of the eight - which is the xterm #323
-    # behaviour vte.cc implements in the eos arm of its parser ABORT. Run with
+    # be drawn - the first four of the eight bands whole and 6 of the fifth
+    # band's 9 pixel rows - which is the xterm #323 behaviour vte.cc
+    # implements in the eos arm of its parser ABORT. Run with
     # the child exiting rather than sleeping; see the <case>.eof note in
     # render-test.sh.
     'bands-truncated',

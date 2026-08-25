@@ -2516,8 +2516,13 @@ test_ring_scrollback_restore_respects_the_budget(void)
          * Faulting an image in from the scrollback ADDS to the accounting, so
          * it has to be collected against like any other addition. It was not:
          * indexing rows read-only, which is all Page Up does, pulled every
-         * image back into RAM and nothing evicted them. Measured at 8.3 times
-         * the configured budget before the fix.
+         * image back into RAM and nothing evicted them.
+         *
+         * That is what this holds, and the magnitude is reproducible: delete
+         * the image_gc() call at the end of Ring::restore_image() and this
+         * goes red on the first row read back, at (12800 <= 9600). Drop the
+         * in-loop bound below too, so the whole sweep runs, and the twelve
+         * images end at 38400 against the same 9600 budget - four times it.
          */
         auto const image_count = 12;
 
