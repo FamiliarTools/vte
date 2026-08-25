@@ -610,14 +610,15 @@ void vte_terminal_set_enable_sixel(VteTerminal *terminal,
                                     gboolean enabled) _VTE_CXX_NOEXCEPT _VTE_GNUC_NONNULL(1);
 
 _VTE_PUBLIC
+gboolean vte_terminal_get_enable_sixel(VteTerminal *terminal) _VTE_CXX_NOEXCEPT _VTE_GNUC_NONNULL(1);
+
+/* Set or get the memory limit for images */
+_VTE_PUBLIC
 void vte_terminal_set_image_limit(VteTerminal *terminal,
                                   guint64 limit) _VTE_CXX_NOEXCEPT _VTE_GNUC_NONNULL(1);
 
 _VTE_PUBLIC
 guint64 vte_terminal_get_image_limit(VteTerminal *terminal) _VTE_CXX_NOEXCEPT _VTE_GNUC_NONNULL(1);
-
-_VTE_PUBLIC
-gboolean vte_terminal_get_enable_sixel(VteTerminal *terminal) _VTE_CXX_NOEXCEPT _VTE_GNUC_NONNULL(1);
 
 _VTE_PUBLIC
 void vte_terminal_set_xalign(VteTerminal* terminal,

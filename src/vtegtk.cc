@@ -2365,19 +2365,19 @@ vte_terminal_class_init(VteTerminalClass *klass)
         /**
          * VteTerminal:image-limit:
          *
-         * The amount of memory, in bytes, that the terminal may use to hold
-         * images received through SIXEL. Images beyond the budget are evicted
-         * oldest first; their pixels move to the scrollback stream, so an
-         * evicted image still reappears when scrolled back to.
+         * The amount of memory, in bytes, that the terminal may use for
+         * images received via SIXEL. Images exceeding the limit are evicted
+         * oldest first; their pixels remain in the scrollback stream and are
+         * drawn again when scrolled back to.
          *
-         * Setting this to 0 means images are given no memory at all, which
-         * disables them.
+         * Setting this to 0 disables images.
+         *
+         * Since: 0.86
          */
         pspecs[PROP_IMAGE_LIMIT] =
                 g_param_spec_uint64 ("image-limit", nullptr, nullptr,
                                      0, G_MAXUINT64, VTE_IMAGE_MEMORY_MAX_DEFAULT,
                                      (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY));
-
 
         /**
          * VteTerminal:font-options:
@@ -7467,16 +7467,15 @@ catch (...)
 /**
  * vte_terminal_set_image_limit:
  * @terminal: a #VteTerminal
- * @limit: the image memory budget, in bytes
+ * @limit: the image memory limit, in bytes
  *
- * Sets how much memory @terminal may use to hold images received through
- * SIXEL. Images over the budget are evicted oldest first.
+ * Sets how much memory @terminal may use for images received via SIXEL.
+ * Images exceeding the limit are evicted oldest first; their pixels remain
+ * in the scrollback stream and are drawn again when scrolled back to.
  *
- * Eviction is not loss: an evicted image's pixels are kept in the scrollback
- * stream, so it is drawn again if it is scrolled back to. The budget bounds
- * memory, not the lifetime of what the user saw.
+ * A @limit of 0 disables images.
  *
- * A @limit of 0 gives images no memory and so disables them.
+ * Since: 0.86
  */
 void
 vte_terminal_set_image_limit(VteTerminal *terminal,
@@ -7499,7 +7498,9 @@ catch (...)
  * vte_terminal_get_image_limit:
  * @terminal: a #VteTerminal
  *
- * Returns: the image memory budget, in bytes
+ * Returns: the image memory limit, in bytes
+ *
+ * Since: 0.86
  */
 guint64
 vte_terminal_get_image_limit(VteTerminal *terminal) noexcept
