@@ -485,6 +485,21 @@ Ring::sweep_image_pool() noexcept
                 }
         }
 
+        /* The cached row is a thawed copy of a frozen row, and its cells name
+         * images by the ids they resolved to when it was thawed. index()
+         * serves it again without re-thawing, and get_hyperlink_at_position()
+         * leaves cells in it with no row number attached at all, so it holds
+         * references exactly as a writable row does. A sweep blind to it frees
+         * an id the cache still names, and the next image allocated takes that
+         * id and is drawn where the old one was - which is the aliasing the
+         * pool exists to make impossible.
+         */
+        for (auto j = 0; j < m_cached_row.len; j++) {
+                auto const& cell = m_cached_row.cells[j];
+                if (cell.attr.image())
+                        m_image_pool.mark(cell.attr.image_ref());
+        }
+
         /* An image that is still resident keeps its id whether or not any
          * cell names it yet: the cells are stamped separately from the
          * allocation, so an image can legitimately exist for a moment with

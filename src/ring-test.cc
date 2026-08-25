@@ -1797,16 +1797,24 @@ test_image_footprint_is_font_independent(void)
         g_assert_cmpint(image->get_width(), ==, expect_cols);
 }
 
-/* REPRO SCRATCH: does the cached thawed row keep a reclaimable id? */
+/* The cached thawed row holds image references, and the pool must count them.
+ *
+ * index() thaws a frozen row into one cache and then serves that same copy
+ * again without re-thawing, so its cells go on naming images by the ids they
+ * resolved to at thaw time. If the sweep does not see those cells it frees an
+ * id that is still named, the next image allocated takes it, and the cached
+ * row draws a picture that is not its own - precisely the reuse the pool
+ * exists to prevent, arrived at without a single cell being corrupted.
+ */
 static void
-test_repro_cached_row_stale_id(void)
+test_ring_cached_row_holds_its_image_id(void)
 {
         auto ring = Ring{1024, true};
         ring.set_visible_rows(24);
         append_rows(ring, 4);
 
         place_image(ring, 1, 1);
-        auto* image = ring.image_map().begin()->second.get();
+        auto* const image = ring.image_map().begin()->second.get();
         ring.set_placing_image(image);
         ring.stamp_image_row(1, 0, 1, 0);
         ring.set_placing_image(nullptr);
@@ -1814,37 +1822,43 @@ test_repro_cached_row_stale_id(void)
         /* Freeze it into the scrollback. */
         append_rows(ring, 200);
 
-        /* Thaw it into m_cached_row: this is what the draw loop does. */
-        auto const* thawed = ring.index(1);
+        /* Thaw it into the cached row: this is what the draw loop does. */
+        auto const* const thawed = ring.index(1);
         g_assert_nonnull(thawed);
+        g_assert_cmpint(thawed->len, >, 0);
+        g_assert_true(thawed->cells[0].attr.image());
+
         auto const ref = thawed->cells[0].attr.image_ref();
-        auto const stale_id = ref.pool_id();
-        g_print("REPRO: cached row id=%u resolves=%p image=%p\n",
-                stale_id, (void*)ring.image_pool().lookup(ref), (void*)image);
+        auto const cached_id = ref.pool_id();
+        g_assert_cmpuint(cached_id, !=, vte::image::k_ref_pool_id_none);
         g_assert_true(ring.image_pool().lookup(ref) == image);
 
-        /* Memory pressure evicts the image: the id retires. */
+        /* Memory pressure evicts the image: the id retires, and the cached row
+         * is left naming it.
+         */
         ring.evict_all_images_for_test();
         ring.validate_images();
         g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
 
-        /* A sweep, as append_image() runs on id exhaustion. */
+        /* A sweep, as append_image() runs on id exhaustion. The cached row is
+         * a reference, so the id must not come back to the free list.
+         */
         ring.sweep_image_pool_for_test();
-        g_print("REPRO: after sweep retired=%zu\n", ring.image_pool().retired_count());
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
 
-        /* The next image takes the id back. */
+        /* So the next image cannot be given that id. */
         place_image(ring, 300, 1);
-        auto* newimg = ring.image_map().rbegin()->second.get();
-        g_print("REPRO: new image id=%u (stale was %u)\n",
-                newimg->get_pool_id(), stale_id);
+        auto* const newimg = ring.image_map().rbegin()->second.get();
+        g_assert_cmpuint(newimg->get_pool_id(), !=, cached_id);
 
-        /* And index() serves the CACHED row, without re-thawing. */
-        auto const* again = ring.index(1);
-        auto const ref2 = again->cells[0].attr.image_ref();
-        auto* resolved = ring.image_pool().lookup(ref2);
-        g_print("REPRO: cached row now id=%u resolves=%p newimg=%p ALIASED=%d\n",
-                ref2.pool_id(), (void*)resolved, (void*)newimg,
-                (int)(resolved != nullptr && resolved == newimg));
+        /* And the cached row, served again without re-thawing, still resolves
+         * to nothing rather than to the new picture.
+         */
+        auto const* const again = ring.index(1);
+        g_assert_nonnull(again);
+        g_assert_true(again->cells[0].attr.image());
+        g_assert_cmpuint(again->cells[0].attr.image_ref().pool_id(), ==, cached_id);
+        g_assert_null(ring.image_pool().lookup(again->cells[0].attr.image_ref()));
 }
 
 
@@ -2017,10 +2031,6 @@ main(int argc,
         g_test_init(&argc, &argv, nullptr);
 
 #if WITH_SIXEL
-        g_test_add_func("/vte/repro/cached-row-stale-id", test_repro_cached_row_stale_id);
-#endif
-
-#if WITH_SIXEL
         g_test_add_func("/vte/sixel/right-margin-clip", test_sixel_right_margin_clip);
         g_test_add_func("/vte/image/ref/roundtrip", test_image_ref_roundtrip);
         g_test_add_func("/vte/image/footprint-is-font-independent", test_image_footprint_is_font_independent);
@@ -2072,6 +2082,7 @@ main(int argc,
         g_test_add_func("/vte/ring/image/limit-shrinks-immediately", test_ring_image_limit_shrinks_immediately);
 
         g_test_add_func("/vte/ring/scrollback-restore-respects-the-budget", test_ring_scrollback_restore_respects_the_budget);
+        g_test_add_func("/vte/ring/cached-row-holds-its-image-id", test_ring_cached_row_holds_its_image_id);
         g_test_add_func("/vte/ring/rewrap-with-images", test_ring_rewrap_with_images);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
