@@ -72,6 +72,10 @@ Ring::validate() const
 #endif
 }
 
+#else
+#define validate(...) do { } while(0)
+#endif
+
 #if WITH_SIXEL
 
 void
@@ -124,13 +128,85 @@ Ring::validate_images() const
          * pixels that are already freed or that nobody can reach.
          */
         vte_assert_cmpuint(memory_used, ==, m_image_fast_memory_used);
+
+        validate_image_cells();
+}
+
+/*
+ * The cells are what an image IS: the draw walks them, and scrolling,
+ * insertion, deletion and rewrap move a picture by moving them without knowing
+ * that images exist. So the maps agreeing with themselves says nothing about
+ * where the picture actually is; only the cells can say that.
+ *
+ * Checked in one direction, because only one direction is an invariant. Every
+ * cell that names an image is that image's and sits where it says it sits. A
+ * cell INSIDE an image's rectangle may legitimately not be the image's at all,
+ * either because a write took that cell back - a partial erase keeps the rest
+ * of the picture - or because the row was too short to be stamped when the
+ * image was placed.
+ */
+void
+Ring::validate_image_cells() const
+{
+        for (auto r = m_writable; r < m_end; r++) {
+                auto const* const row = get_writable_index(r);
+
+                for (auto c = 0; c < row->len; c++) {
+                        auto const& cell = row->cells[c];
+                        if (!cell.attr.image())
+                                continue;
+
+                        /* The cell holds the image rather than the text that
+                         * was there, as one whole cell. Text extraction appends
+                         * each non-fragment cell's own c, so a cell still
+                         * holding its old character copies as that character,
+                         * and a fragment copies as nothing at all.
+                         */
+                        vte_assert_cmpuint(cell.c, ==, VTE_OBJECT_REPLACEMENT_CHARACTER);
+                        vte_assert_cmpuint(cell.attr.columns(), ==, 1);
+                        vte_assert_false(cell.attr.fragment());
+
+                        auto const ref = cell.attr.image_ref();
+                        auto const* const image = m_image_pool.lookup(ref);
+
+                        /* An id that resolves to nothing is a normal outcome:
+                         * the image has been freed and the cell is on its way
+                         * out with its row. Nothing can be asked of a picture
+                         * that is gone.
+                         */
+                        if (image == nullptr)
+                                continue;
+
+                        /* An image is exempt from every rule that moves images
+                         * for as long as its own emission burst is running, so
+                         * its rectangle is deliberately behind its cells until
+                         * the burst ends.
+                         */
+                        if (image == m_placing_image)
+                                continue;
+
+                        /* The tile coordinate names a piece of THIS picture. */
+                        vte_assert_cmpint(long(ref.tile_row()), <, long(image->get_height()));
+                        vte_assert_cmpint(long(ref.tile_col()), <, long(image->get_width()));
+
+                        /* And the cell sits exactly where that piece belongs.
+                         * This is the anchoring itself. A path that moves cells
+                         * without moving the image, or an image without its
+                         * cells, leaves a rectangle naming rows and columns the
+                         * picture no longer covers - and the rectangle is what
+                         * decides which images an erase can reach, which ones
+                         * the scrollback has taken, and which ones a reflow
+                         * tears apart.
+                         */
+                        vte_assert_cmpint(long(r), ==,
+                                          long(image->get_top()) + long(ref.tile_row()));
+                        vte_assert_cmpint(long(c), ==,
+                                          long(image->get_left()) + long(ref.tile_col()));
+                }
+        }
 }
 
 #endif /* WITH_SIXEL */
-
-#else
-#define validate(...) do { } while(0)
-#endif
 
 Ring::Ring(row_t max_rows,
            bool has_streams)
@@ -408,6 +484,21 @@ Ring::sweep_image_pool() noexcept
                         if (cell.attr.image())
                                 m_image_pool.mark(cell.attr.image_ref());
                 }
+        }
+
+        /* The cached row is a thawed copy of a frozen row, and its cells name
+         * images by the ids they resolved to when it was thawed. index()
+         * serves it again without re-thawing, and get_hyperlink_at_position()
+         * leaves cells in it with no row number attached at all, so it holds
+         * references exactly as a writable row does. A sweep blind to it frees
+         * an id the cache still names, and the next image allocated takes that
+         * id and is drawn where the old one was - which is the aliasing the
+         * pool exists to make impossible.
+         */
+        for (auto j = 0; j < m_cached_row.len; j++) {
+                auto const& cell = m_cached_row.cells[j];
+                if (cell.attr.image())
+                        m_image_pool.mark(cell.attr.image_ref());
         }
 
         /* An image that is still resident keeps its id whether or not any
