@@ -29,10 +29,12 @@
 
 #if WITH_SIXEL
 #include "cairo-glue.hh"
+#include "vtetypes.hh"
 #include "image.hh"
 #include "image-pool.hh"
 #include <map>
 #include <memory>
+#include <optional>
 #endif
 
 #include <type_traits>
@@ -585,7 +587,7 @@ public:
         /* Where an image actually sits, according to the cells that name it.
          *
          * Returns the screen position of the image's top-left tile, found by
-         * looking for the cell holding Ref{id, 0, 0}. Answers false when no
+         * looking for the cell holding tile 0,0 of @pool_id. Nothing when no
          * such cell is present in the writable rows - the image may be
          * entirely in the scrollback, or its anchoring cell may have been
          * overwritten.
@@ -595,26 +597,25 @@ public:
          * deletion, rewrap - without any of those operations having to know
          * that images exist.
          */
-        bool find_image_anchor(uint32_t pool_id,
-                               row_t* out_row,
-                               column_t* out_col) const noexcept;
+        std::optional<vte::grid::coords> find_image_anchor(vte::image::pool_id_t pool_id) const noexcept;
 
         /* Stamp the cells of one row of the image being placed with the
          * reference that names it.
          *
-         * @image_row is the row's index within the IMAGE, not the screen, so
-         * the cell keeps knowing which piece of the picture it carries after
-         * the row has been scrolled, rewrapped or moved.
+         * @position is where on the screen the stripe starts, and @tile_row is
+         * the row's index within the IMAGE, so the cell keeps knowing which
+         * piece of the picture it carries after the row has been scrolled,
+         * rewrapped or moved. The two are separate types because they are
+         * separate spaces: a screen row is not a tile row.
          *
          * Only cells that already exist are stamped, and the stamp stops at
          * the end of the row. Terminal::erase_image_rect() creates the cells
          * the image covers before it stamps them, so in the terminal every
          * cell of the stripe carries the reference.
          */
-        void stamp_image_row(row_t position,
-                             column_t left,
+        void stamp_image_row(vte::grid::coords const& position,
                              column_t columns,
-                             uint32_t image_row) noexcept;
+                             vte::image::tile_row_t tile_row) noexcept;
 
         inline bool take_images_changed() noexcept {
                 auto const changed = m_images_changed;

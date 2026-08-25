@@ -296,11 +296,11 @@ Ring::image_cells_are_anchored() const noexcept
                                 continue;
 
                         /* The tile coordinate names a piece of THIS picture. */
-                        if (long(ref.tile_row()) >= long(image->get_height()) ||
-                            long(ref.tile_col()) >= long(image->get_width())) {
+                        if (long(ref.tile_row().value()) >= long(image->get_height()) ||
+                            long(ref.tile_col().value()) >= long(image->get_width())) {
                                 _vte_debug_print(vte::debug::category::RING,
                                                  "Image cell at {},{} names tile {},{} outside its image",
-                                                 r, c, ref.tile_row(), ref.tile_col());
+                                                 r, c, ref.tile_row().value(), ref.tile_col().value());
                                 return false;
                         }
 
@@ -320,11 +320,11 @@ Ring::image_cells_are_anchored() const noexcept
                          * does not cover, and only one run of the two can be
                          * where the image says it is.
                          */
-                        if (long(r) != long(image->get_top()) + long(ref.tile_row()) ||
-                            long(c) != long(image->get_left()) + long(ref.tile_col())) {
+                        if (long(r) != long(image->get_top()) + long(ref.tile_row().value()) ||
+                            long(c) != long(image->get_left()) + long(ref.tile_col().value())) {
                                 _vte_debug_print(vte::debug::category::RING,
                                                  "Image cell at {},{} names tile {},{} of an image at {},{}",
-                                                 r, c, ref.tile_row(), ref.tile_col(),
+                                                 r, c, ref.tile_row().value(), ref.tile_col().value(),
                                                  image->get_top(), image->get_left());
                                 return false;
                         }
@@ -528,13 +528,11 @@ Ring::image_gc_region() noexcept
  * exists, this is conservative in the safe direction - it can only fail to
  * reclaim an id, never reclaim one too early.
  */
-bool
-Ring::find_image_anchor(uint32_t pool_id,
-                        row_t* out_row,
-                        column_t* out_col) const noexcept
+std::optional<vte::grid::coords>
+Ring::find_image_anchor(vte::image::pool_id_t pool_id) const noexcept
 {
         if (pool_id == vte::image::k_ref_pool_id_none)
-                return false;
+                return std::nullopt;
 
         for (auto i = m_writable; i < m_end; i++) {
                 auto const row = get_writable_index(i);
@@ -546,23 +544,22 @@ Ring::find_image_anchor(uint32_t pool_id,
                         auto const ref = attr.image_ref();
                         if (ref.pool_id() != pool_id)
                                 continue;
-                        if (ref.tile_row() != 0 || ref.tile_col() != 0)
+                        if (ref.tile_row() != vte::image::tile_row_t{0} ||
+                            ref.tile_col() != vte::image::tile_col_t{0})
                                 continue;
 
-                        *out_row = i;
-                        *out_col = j;
-                        return true;
+                        return vte::grid::coords(vte::grid::row_t(i),
+                                                 vte::grid::column_t(j));
                 }
         }
 
-        return false;
+        return std::nullopt;
 }
 
 void
-Ring::stamp_image_row(row_t position,
-                      column_t left,
+Ring::stamp_image_row(vte::grid::coords const& position,
                       column_t columns,
-                      uint32_t image_row) noexcept
+                      vte::image::tile_row_t tile_row) noexcept
 {
         if (m_placing_image == nullptr)
                 return;
@@ -571,24 +568,29 @@ Ring::stamp_image_row(row_t position,
         if (id == vte::image::k_ref_pool_id_none)
                 return;
 
-        if (position < m_writable || position >= m_end)
+        if (position.row() < 0)
                 return;
 
-        auto const row = get_writable_index(position);
+        auto const ring_row = row_t(position.row());
+        if (ring_row < m_writable || ring_row >= m_end)
+                return;
+
+        auto const row = get_writable_index(ring_row);
+        auto const left = column_t(position.column());
 
         for (auto col = std::max(left, column_t{0}); col < left + columns; col++) {
                 if (col >= row->len)
                         break;
 
-                auto const tile_col = uint32_t(col - left);
+                auto const tile_col = vte::image::tile_col_t(uint32_t(col - left));
 
                 /* Refuse rather than store a masked reference: a truncated
                  * tile coordinate draws the wrong part of the image.
                  */
-                if (!vte::image::Ref::fits(id, image_row, tile_col))
+                if (!vte::image::Ref::fits(id, tile_row, tile_col))
                         continue;
 
-                row->cells[col].attr.set_image_ref(vte::image::Ref{id, image_row, tile_col});
+                row->cells[col].attr.set_image_ref(vte::image::Ref{id, tile_row, tile_col});
 
                 /* The cell is the image's now, so it holds the object
                  * replacement character rather than whatever text the erase
@@ -1873,7 +1875,7 @@ Ring::thaw_row(row_t position,
                         auto const base = cell.attr.image_ref();
                         cell.attr.set_image_ref(vte::image::Ref{base.pool_id(),
                                                                 base.tile_row(),
-                                                                stream_image_tile_col});
+                                                                vte::image::tile_col_t{stream_image_tile_col}});
                         if (stream_image_tile_col < vte::image::k_ref_tile_col_max)
                                 stream_image_tile_col++;
                 }

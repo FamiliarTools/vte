@@ -55,7 +55,7 @@ private:
          * the image is not addressable by any cell, which is a resource
          * failure rather than a normal state.
          */
-        uint32_t m_pool_id{vte::image::k_ref_pool_id_none};
+        vte::image::pool_id_t m_pool_id{vte::image::k_ref_pool_id_none};
 
 
 #if VTE_GTK == 4
@@ -95,7 +95,7 @@ public:
 
         inline constexpr auto get_priority() const noexcept { return m_priority; }
         inline constexpr auto get_pool_id() const noexcept { return m_pool_id; }
-        inline void set_pool_id(uint32_t id) noexcept { m_pool_id = id; }
+        inline void set_pool_id(pool_id_t id) noexcept { m_pool_id = id; }
         inline constexpr auto get_left() const noexcept { return m_left_cells; }
         inline auto get_top() const noexcept { return m_top_cells; }
         inline void set_top(int row) noexcept { m_top_cells = row; }

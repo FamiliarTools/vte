@@ -19,11 +19,67 @@
 
 #pragma once
 
+#include <compare>
 #include <cstdint>
 
 #include "vtedefines.hh"
 
 namespace vte::image {
+
+/*
+ * The three coordinate spaces an image reference is made of, each its own
+ * type.
+ *
+ * They are all small unsigned numbers, so telling them apart by parameter
+ * name alone leaves a transposition to compile, to store a well-formed
+ * reference, and to draw the wrong piece of the wrong picture. That is a
+ * runtime bug that has to be found by a checker; with a type per space it is
+ * a build error instead.
+ *
+ * One tagged template rather than three near-identical classes: the shared
+ * behaviour is written once, and each alias below is still a distinct type.
+ * Arithmetic stays within a space - a tile column plus an offset is a tile
+ * column - and conversion is explicit in both directions, so a raw number
+ * cannot stand in for a coordinate either.
+ */
+template<typename Tag>
+class coord_t {
+public:
+        coord_t() = default;
+
+        inline constexpr explicit coord_t(uint32_t value) noexcept
+                : m_value{value}
+        {
+        }
+
+        inline constexpr uint32_t value() const noexcept { return m_value; }
+
+        /* Offsetting within one space: the draw path walks a run of tile
+         * columns.
+         */
+        inline constexpr coord_t operator+(uint32_t offset) const noexcept
+        {
+                return coord_t{m_value + offset};
+        }
+
+        inline constexpr auto operator<=>(coord_t const&) const noexcept = default;
+
+private:
+        uint32_t m_value{0};
+};
+
+struct pool_id_tag;
+struct tile_row_tag;
+struct tile_col_tag;
+
+/* Which image: an index into the image pool. */
+using pool_id_t = coord_t<pool_id_tag>;
+
+/* Which cell row and column OF THAT IMAGE a cell carries. Relative to the
+ * image, never to the screen; see Ref below.
+ */
+using tile_row_t = coord_t<tile_row_tag>;
+using tile_col_t = coord_t<tile_col_tag>;
 
 /*
  * Ref: what a cell covered by an image stores in VteCellAttr::m_link.
@@ -75,7 +131,7 @@ inline constexpr uint32_t k_ref_tile_row_max = (1u << k_ref_tile_row_bits) - 1u;
 inline constexpr uint32_t k_ref_tile_col_max = (1u << k_ref_tile_col_bits) - 1u;
 
 /* The pool id reserved to mean "not an image". */
-inline constexpr uint32_t k_ref_pool_id_none = 0u;
+inline constexpr pool_id_t k_ref_pool_id_none = pool_id_t{0u};
 
 /* The worst-case tile footprint of a legal image, in cells. Derived from the
  * caps and the smallest layout cell, so that the assertions below hold for
@@ -107,12 +163,12 @@ public:
         {
         }
 
-        inline constexpr Ref(uint32_t pool_id,
-                             uint32_t tile_row,
-                             uint32_t tile_col) noexcept
-                : m_bits{((pool_id  & k_ref_pool_id_max)  << k_ref_pool_id_shift) |
-                         ((tile_row & k_ref_tile_row_max) << k_ref_tile_row_shift) |
-                         ((tile_col & k_ref_tile_col_max) << k_ref_tile_col_shift)}
+        inline constexpr Ref(pool_id_t pool_id,
+                             tile_row_t tile_row,
+                             tile_col_t tile_col) noexcept
+                : m_bits{((pool_id.value()  & k_ref_pool_id_max)  << k_ref_pool_id_shift) |
+                         ((tile_row.value() & k_ref_tile_row_max) << k_ref_tile_row_shift) |
+                         ((tile_col.value() & k_ref_tile_col_max) << k_ref_tile_col_shift)}
         {
         }
 
@@ -120,13 +176,13 @@ public:
          * able to refuse an image - the placement path - must check this and
          * refuse, rather than store a masked reference.
          */
-        static inline constexpr bool fits(uint32_t pool_id,
-                                          uint32_t tile_row,
-                                          uint32_t tile_col) noexcept
+        static inline constexpr bool fits(pool_id_t pool_id,
+                                          tile_row_t tile_row,
+                                          tile_col_t tile_col) noexcept
         {
-                return pool_id <= k_ref_pool_id_max &&
-                       tile_row <= k_ref_tile_row_max &&
-                       tile_col <= k_ref_tile_col_max;
+                return pool_id.value() <= k_ref_pool_id_max &&
+                       tile_row.value() <= k_ref_tile_row_max &&
+                       tile_col.value() <= k_ref_tile_col_max;
         }
 
         /* The largest image footprint, in cells, that can be referenced. */
@@ -135,19 +191,19 @@ public:
 
         inline constexpr uint32_t bits() const noexcept { return m_bits; }
 
-        inline constexpr uint32_t pool_id() const noexcept
+        inline constexpr pool_id_t pool_id() const noexcept
         {
-                return (m_bits >> k_ref_pool_id_shift) & k_ref_pool_id_max;
+                return pool_id_t{(m_bits >> k_ref_pool_id_shift) & k_ref_pool_id_max};
         }
 
-        inline constexpr uint32_t tile_row() const noexcept
+        inline constexpr tile_row_t tile_row() const noexcept
         {
-                return (m_bits >> k_ref_tile_row_shift) & k_ref_tile_row_max;
+                return tile_row_t{(m_bits >> k_ref_tile_row_shift) & k_ref_tile_row_max};
         }
 
-        inline constexpr uint32_t tile_col() const noexcept
+        inline constexpr tile_col_t tile_col() const noexcept
         {
-                return (m_bits >> k_ref_tile_col_shift) & k_ref_tile_col_max;
+                return tile_col_t{(m_bits >> k_ref_tile_col_shift) & k_ref_tile_col_max};
         }
 
         /* A Ref is valid iff it names a real image. Note that this makes a

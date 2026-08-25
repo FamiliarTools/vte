@@ -39,6 +39,14 @@
 #include "image-ref.hh"
 #include "image-pool.hh"
 
+/* The image coordinate spaces, spelled out. Each is its own type, so these
+ * tests have to name the space they mean too, and a transposed pair of them
+ * does not build.
+ */
+using pool_id_t = vte::image::pool_id_t;
+using tile_row_t = vte::image::tile_row_t;
+using tile_col_t = vte::image::tile_col_t;
+
 #if WITH_SIXEL
 
 #include <cairo.h>
@@ -158,7 +166,9 @@ place_image(Ring& ring,
          * which is what stamp_image_row() writes the reference of.
          */
         for (auto r = 0; r < rows_tall; r++)
-                ring.stamp_image_row(top + r, left, 4, uint32_t(r));
+                ring.stamp_image_row(vte::grid::coords(top + r, left),
+                                     4,
+                                     tile_row_t(uint32_t(r)));
 
         ring.set_placing_image(nullptr);
 
@@ -352,10 +362,12 @@ test_image_ref_roundtrip(void)
         };
 
         for (auto const& c : cases) {
-                auto const ref = vte::image::Ref{c.id, c.row, c.col};
-                g_assert_cmpuint(ref.pool_id(), ==, c.id);
-                g_assert_cmpuint(ref.tile_row(), ==, c.row);
-                g_assert_cmpuint(ref.tile_col(), ==, c.col);
+                auto const ref = vte::image::Ref{pool_id_t{c.id},
+                                                 tile_row_t{c.row},
+                                                 tile_col_t{c.col}};
+                g_assert_cmpuint(ref.pool_id().value(), ==, c.id);
+                g_assert_cmpuint(ref.tile_row().value(), ==, c.row);
+                g_assert_cmpuint(ref.tile_col().value(), ==, c.col);
                 g_assert_true(ref.valid());
 
                 /* Bits survive a trip through the raw 32-bit form. */
@@ -369,9 +381,13 @@ test_image_ref_fields_do_not_alias(void)
         /* The three fields must not overlap: a maxed-out coordinate must not
          * bleed into the pool id and alias one image onto another.
          */
-        auto const id_only = vte::image::Ref{vte::image::k_ref_pool_id_max, 0, 0};
-        auto const row_only = vte::image::Ref{0, vte::image::k_ref_tile_row_max, 0};
-        auto const col_only = vte::image::Ref{0, 0, vte::image::k_ref_tile_col_max};
+        auto const id_only = vte::image::Ref{pool_id_t{vte::image::k_ref_pool_id_max},
+                                             tile_row_t{0}, tile_col_t{0}};
+        auto const row_only = vte::image::Ref{pool_id_t{0},
+                                              tile_row_t{vte::image::k_ref_tile_row_max},
+                                              tile_col_t{0}};
+        auto const col_only = vte::image::Ref{pool_id_t{0}, tile_row_t{0},
+                                              tile_col_t{vte::image::k_ref_tile_col_max}};
 
         g_assert_cmpuint(id_only.bits() & row_only.bits(), ==, 0);
         g_assert_cmpuint(id_only.bits() & col_only.bits(), ==, 0);
@@ -382,10 +398,10 @@ test_image_ref_fields_do_not_alias(void)
                          ==, 0xffffffffu);
 
         /* A maximal coordinate leaves the pool id alone. */
-        auto const maxed = vte::image::Ref{7,
-                                           vte::image::k_ref_tile_row_max,
-                                           vte::image::k_ref_tile_col_max};
-        g_assert_cmpuint(maxed.pool_id(), ==, 7);
+        auto const maxed = vte::image::Ref{pool_id_t{7},
+                                           tile_row_t{vte::image::k_ref_tile_row_max},
+                                           tile_col_t{vte::image::k_ref_tile_col_max}};
+        g_assert_cmpuint(maxed.pool_id().value(), ==, 7);
 }
 
 static void
@@ -396,7 +412,8 @@ test_image_ref_zero_is_not_an_image(void)
          */
         g_assert_false(vte::image::Ref{}.valid());
         g_assert_false(vte::image::Ref{0u}.valid());
-        auto const no_image = vte::image::Ref{vte::image::k_ref_pool_id_none, 5, 5};
+        auto const no_image = vte::image::Ref{vte::image::k_ref_pool_id_none,
+                                             tile_row_t{5}, tile_col_t{5}};
         g_assert_false(no_image.valid());
 
         /* basic_cell is not an image cell. */
@@ -406,10 +423,10 @@ test_image_ref_zero_is_not_an_image(void)
 static void
 test_image_ref_stripe_identity(void)
 {
-        auto const a = vte::image::Ref{42, 3, 0};
-        auto const b = vte::image::Ref{42, 3, 100};
-        auto const c = vte::image::Ref{42, 4, 0};
-        auto const d = vte::image::Ref{43, 3, 0};
+        auto const a = vte::image::Ref{pool_id_t{42}, tile_row_t{3}, tile_col_t{0}};
+        auto const b = vte::image::Ref{pool_id_t{42}, tile_row_t{3}, tile_col_t{100}};
+        auto const c = vte::image::Ref{pool_id_t{42}, tile_row_t{4}, tile_col_t{0}};
+        auto const d = vte::image::Ref{pool_id_t{43}, tile_row_t{3}, tile_col_t{0}};
 
         /* Same image, same tile row: one stripe, the unit of lifetime. */
         g_assert_true(a.same_stripe(b));
@@ -417,6 +434,78 @@ test_image_ref_stripe_identity(void)
         g_assert_false(a.same_stripe(c));   /* different tile row */
         g_assert_false(a.same_image(d));
         g_assert_false(a.same_stripe(d));
+}
+
+/* Whether a Ref can be built from these argument types, in this order, and
+ * whether the ring's one stamping call can be made with them. Both are asked
+ * of the type system alone: nothing is constructed or called.
+ */
+template<typename... Args>
+concept ref_buildable_from = requires (Args... args) {
+        vte::image::Ref{args...};
+};
+
+template<typename... Args>
+concept stamp_callable_with = requires (Ring& ring, Args... args) {
+        ring.stamp_image_row(args...);
+};
+
+static void
+test_image_coordinate_spaces_are_distinct(void)
+{
+        /* An image reference mixes three spaces - which picture, and which
+         * row and column OF that picture - and the ring's stamping call adds
+         * two more, a ring row and a screen column. They are all small
+         * numbers, so a transposition of any two is a well-formed value that
+         * draws the wrong tile, or the right tile in the wrong place.
+         *
+         * These assertions ask the compiler to refuse the wrong orders.
+         *
+         * The fixture first: the well-formed order IS accepted, so a refusal
+         * below is about the order and not about the expression being
+         * malformed for some other reason.
+         */
+        g_assert_true((ref_buildable_from<pool_id_t, tile_row_t, tile_col_t>));
+
+        /* Every other order of the same three values is refused. */
+        g_assert_false((ref_buildable_from<tile_row_t, pool_id_t, tile_col_t>));
+        g_assert_false((ref_buildable_from<pool_id_t, tile_col_t, tile_row_t>));
+        g_assert_false((ref_buildable_from<tile_col_t, tile_row_t, pool_id_t>));
+        g_assert_false((ref_buildable_from<tile_row_t, tile_col_t, pool_id_t>));
+        g_assert_false((ref_buildable_from<tile_col_t, pool_id_t, tile_row_t>));
+
+        /* And so is the shape all of them used to have: three bare numbers,
+         * which every order above satisfies equally well.
+         */
+        g_assert_false((ref_buildable_from<uint32_t, uint32_t, uint32_t>));
+
+        /* The raw 32-bit form stays: it is how the bits stored in a cell and
+         * in the attr stream become a Ref again, and one number cannot be
+         * mistaken for a coordinate.
+         */
+        g_assert_true((ref_buildable_from<uint32_t>));
+
+        /* The same question of the call that mixes a ring row, a screen
+         * column, a count of columns and a tile row.
+         */
+        g_assert_true((stamp_callable_with<vte::grid::coords,
+                                           Ring::column_t,
+                                           tile_row_t>));
+
+        g_assert_false((stamp_callable_with<vte::grid::coords,
+                                            tile_row_t,
+                                            Ring::column_t>));
+        g_assert_false((stamp_callable_with<tile_row_t,
+                                            Ring::column_t,
+                                            vte::grid::coords>));
+
+        /* Including the shape it used to have, where the position, the count
+         * and the tile row were four numbers in a row.
+         */
+        g_assert_false((stamp_callable_with<Ring::row_t,
+                                            Ring::column_t,
+                                            Ring::column_t,
+                                            uint32_t>));
 }
 
 static void
@@ -436,7 +525,7 @@ test_cell_attr_union_tagging(void)
         /* Storing an image reference flips the tag with it, so the tag and
          * the payload cannot disagree.
          */
-        auto const ref = vte::image::Ref{99, 2, 3};
+        auto const ref = vte::image::Ref{pool_id_t{99}, tile_row_t{2}, tile_col_t{3}};
         cell.attr.set_image_ref(ref);
         g_assert_true(cell.attr.image());
         g_assert_true(cell.attr.image_ref() == ref);
@@ -460,7 +549,7 @@ test_cell_attr_image_tag_survives_sgr_reset(void)
          * those bits as a hyperlink index.
          */
         VteCell cell = basic_cell;
-        auto const ref = vte::image::Ref{1234, 5, 6};
+        auto const ref = vte::image::Ref{pool_id_t{1234}, tile_row_t{5}, tile_col_t{6}};
         cell.attr.set_image_ref(ref);
 
         cell.attr.set_bold(true);
@@ -495,16 +584,16 @@ test_image_pool_allocate_lookup(void)
         auto const idb = pool.allocate(&b);
 
         /* Never hands out the reserved "no image" id. */
-        g_assert_cmpuint(ida, !=, vte::image::k_ref_pool_id_none);
-        g_assert_cmpuint(idb, !=, vte::image::k_ref_pool_id_none);
-        g_assert_cmpuint(ida, !=, idb);
+        g_assert_cmpuint(ida.value(), !=, vte::image::k_ref_pool_id_none.value());
+        g_assert_cmpuint(idb.value(), !=, vte::image::k_ref_pool_id_none.value());
+        g_assert_cmpuint(ida.value(), !=, idb.value());
 
         g_assert_true(pool.lookup(ida) == &a);
         g_assert_true(pool.lookup(idb) == &b);
         g_assert_cmpuint(pool.live_count(), ==, 2);
 
         /* Resolvable through a Ref, which is how the draw path will do it. */
-        auto const ref = vte::image::Ref{ida, 0, 0};
+        auto const ref = vte::image::Ref{ida, tile_row_t{0}, tile_col_t{0}};
         g_assert_true(pool.lookup(ref) == &a);
 
         /* The reserved id resolves to nothing. */
@@ -545,7 +634,7 @@ test_image_pool_no_reuse_before_sweep(void)
         /* Allocating many times must never return the quarantined id. */
         for (int i = 0; i < 64; i++) {
                 auto const id = pool.allocate(&b);
-                g_assert_cmpuint(id, !=, ida);
+                g_assert_cmpuint(id.value(), !=, ida.value());
         }
 }
 
@@ -566,7 +655,7 @@ test_image_pool_sweep_frees_unreferenced(void)
 
         /* Only now may it come back. */
         auto const idb = pool.allocate(&b);
-        g_assert_cmpuint(idb, ==, ida);
+        g_assert_cmpuint(idb.value(), ==, ida.value());
         g_assert_true(pool.lookup(idb) == &b);
 }
 
@@ -589,7 +678,7 @@ test_image_pool_sweep_keeps_referenced(void)
                 g_assert_cmpuint(pool.retired_count(), ==, 1);
 
                 auto const id = pool.allocate(&b);
-                g_assert_cmpuint(id, !=, ida);
+                g_assert_cmpuint(id.value(), !=, ida.value());
         }
 
         /* Once the last referring cell is gone, the id is reclaimed. */
@@ -642,7 +731,7 @@ test_image_pool_exhaustion(void)
         TestPool pool;
         int a = 1;
 
-        std::vector<uint32_t> ids;
+        std::vector<pool_id_t> ids;
         for (;;) {
                 auto const id = pool.allocate(&a);
                 if (id == vte::image::k_ref_pool_id_none)
@@ -657,20 +746,20 @@ test_image_pool_exhaustion(void)
 
         /* Every id fits the Ref field it has to live in. */
         for (auto const id : ids) {
-                auto const ref = vte::image::Ref{id, 0, 0};
-                g_assert_cmpuint(ref.pool_id(), ==, id);
+                auto const ref = vte::image::Ref{id, tile_row_t{0}, tile_col_t{0}};
+                g_assert_cmpuint(ref.pool_id().value(), ==, id.value());
         }
 
         /* Still exhausted while everything is live. */
-        g_assert_cmpuint(pool.allocate(&a), ==, vte::image::k_ref_pool_id_none);
+        g_assert_cmpuint(pool.allocate(&a).value(), ==, vte::image::k_ref_pool_id_none.value());
 
         /* Retiring alone does not help; only a completed sweep does. */
         pool.retire(ids[0]);
-        g_assert_cmpuint(pool.allocate(&a), ==, vte::image::k_ref_pool_id_none);
+        g_assert_cmpuint(pool.allocate(&a).value(), ==, vte::image::k_ref_pool_id_none.value());
 
         pool.sweep_begin();
         g_assert_cmpuint(pool.sweep_end(), ==, 1);
-        g_assert_cmpuint(pool.allocate(&a), ==, ids[0]);
+        g_assert_cmpuint(pool.allocate(&a).value(), ==, ids[0].value());
 }
 
 static void
@@ -692,8 +781,8 @@ test_image_pool_retire_is_idempotent(void)
 
         auto const id1 = pool.allocate(&b);
         auto const id2 = pool.allocate(&c);
-        g_assert_cmpuint(id1, ==, ida);
-        g_assert_cmpuint(id2, !=, id1);
+        g_assert_cmpuint(id1.value(), ==, ida.value());
+        g_assert_cmpuint(id2.value(), !=, id1.value());
         g_assert_true(pool.lookup(id1) == &b);
         g_assert_true(pool.lookup(id2) == &c);
 }
@@ -743,13 +832,17 @@ freeze_cost_of_row(LinkPattern pattern)
                         /* What a real image row looks like: one image, one
                          * stripe, the tile column advancing per cell.
                          */
-                        cell.attr.set_image_ref(vte::image::Ref{1, 0, uint32_t(i)});
+                        cell.attr.set_image_ref(vte::image::Ref{pool_id_t{1},
+                                                                tile_row_t{0},
+                                                                tile_col_t{uint32_t(i)}});
                         break;
                 case LinkPattern::DistinctImage:
                         /* Genuinely different runs: a separate image per cell.
                          * These MUST each cost a record.
                          */
-                        cell.attr.set_image_ref(vte::image::Ref{uint32_t(i) + 1, 0, 0});
+                        cell.attr.set_image_ref(vte::image::Ref{pool_id_t{uint32_t(i) + 1},
+                                                                tile_row_t{0},
+                                                                tile_col_t{0}});
                         break;
                 }
                 _vte_row_data_append(row, &cell);
@@ -832,20 +925,28 @@ test_image_ref_out_of_range_cannot_alias(void)
          * bug elsewhere degrades to the wrong tile rather than the wrong
          * image.
          */
-        auto const overflow_col = vte::image::Ref{7, 0, vte::image::k_ref_tile_col_max + 1};
-        g_assert_cmpuint(overflow_col.pool_id(), ==, 7);
-        g_assert_cmpuint(overflow_col.tile_row(), ==, 0);
+        auto const overflow_col = vte::image::Ref{pool_id_t{7}, tile_row_t{0},
+                                                  tile_col_t{vte::image::k_ref_tile_col_max + 1}};
+        g_assert_cmpuint(overflow_col.pool_id().value(), ==, 7);
+        g_assert_cmpuint(overflow_col.tile_row().value(), ==, 0);
 
-        auto const overflow_row = vte::image::Ref{7, vte::image::k_ref_tile_row_max + 1, 0};
-        g_assert_cmpuint(overflow_row.pool_id(), ==, 7);
+        auto const overflow_row = vte::image::Ref{pool_id_t{7},
+                                                  tile_row_t{vte::image::k_ref_tile_row_max + 1},
+                                                  tile_col_t{0}};
+        g_assert_cmpuint(overflow_row.pool_id().value(), ==, 7);
 
         /* And the caller must be able to ASK, rather than find out by
          * corruption, whether a placement fits at all.
          */
-        g_assert_true(vte::image::Ref::fits(7, 0, vte::image::k_ref_tile_col_max));
-        g_assert_false(vte::image::Ref::fits(7, 0, vte::image::k_ref_tile_col_max + 1));
-        g_assert_false(vte::image::Ref::fits(7, vte::image::k_ref_tile_row_max + 1, 0));
-        g_assert_false(vte::image::Ref::fits(vte::image::k_ref_pool_id_max + 1, 0, 0));
+        g_assert_true(vte::image::Ref::fits(pool_id_t{7}, tile_row_t{0},
+                                            tile_col_t{vte::image::k_ref_tile_col_max}));
+        g_assert_false(vte::image::Ref::fits(pool_id_t{7}, tile_row_t{0},
+                                             tile_col_t{vte::image::k_ref_tile_col_max + 1}));
+        g_assert_false(vte::image::Ref::fits(pool_id_t{7},
+                                             tile_row_t{vte::image::k_ref_tile_row_max + 1},
+                                             tile_col_t{0}));
+        g_assert_false(vte::image::Ref::fits(pool_id_t{vte::image::k_ref_pool_id_max + 1},
+                                             tile_row_t{0}, tile_col_t{0}));
 }
 
 
@@ -862,15 +963,15 @@ test_image_ref_covers_max_legal_image(void)
                         int(vte::image::k_ref_tile_row_max) + 1);
 
         /* And the extreme corner really does round-trip. */
-        auto const corner = vte::image::Ref{vte::image::k_ref_pool_id_max,
-                                            uint32_t(vte::image::k_max_image_tile_rows - 1),
-                                            uint32_t(vte::image::k_max_image_tile_cols - 1)};
-        g_assert_true(vte::image::Ref::fits(vte::image::k_ref_pool_id_max,
-                                            vte::image::k_max_image_tile_rows - 1,
-                                            vte::image::k_max_image_tile_cols - 1));
-        g_assert_cmpuint(corner.tile_col(), ==, uint32_t(vte::image::k_max_image_tile_cols - 1));
-        g_assert_cmpuint(corner.tile_row(), ==, uint32_t(vte::image::k_max_image_tile_rows - 1));
-        g_assert_cmpuint(corner.pool_id(), ==, vte::image::k_ref_pool_id_max);
+        auto const corner = vte::image::Ref{pool_id_t{vte::image::k_ref_pool_id_max},
+                                            tile_row_t{uint32_t(vte::image::k_max_image_tile_rows - 1)},
+                                            tile_col_t{uint32_t(vte::image::k_max_image_tile_cols - 1)}};
+        g_assert_true(vte::image::Ref::fits(pool_id_t{vte::image::k_ref_pool_id_max},
+                                            tile_row_t{uint32_t(vte::image::k_max_image_tile_rows - 1)},
+                                            tile_col_t{uint32_t(vte::image::k_max_image_tile_cols - 1)}));
+        g_assert_cmpuint(corner.tile_col().value(), ==, uint32_t(vte::image::k_max_image_tile_cols - 1));
+        g_assert_cmpuint(corner.tile_row().value(), ==, uint32_t(vte::image::k_max_image_tile_rows - 1));
+        g_assert_cmpuint(corner.pool_id().value(), ==, vte::image::k_ref_pool_id_max);
 }
 
 
@@ -941,10 +1042,10 @@ test_ring_image_pool_allocates(void)
         auto seen = std::set<uint32_t>{};
         for (auto const& [priority, image] : ring.image_map()) {
                 auto const id = image->get_pool_id();
-                g_assert_cmpuint(id, !=, vte::image::k_ref_pool_id_none);
+                g_assert_cmpuint(id.value(), !=, vte::image::k_ref_pool_id_none.value());
                 g_assert_true(ring.image_pool().lookup(id) == image.get());
-                g_assert_false(seen.contains(id));
-                seen.insert(id);
+                g_assert_false(seen.contains(id.value()));
+                seen.insert(id.value());
         }
 }
 
@@ -957,7 +1058,7 @@ test_ring_image_pool_retires_with_the_image(void)
 
         place_image(ring, 2, 3);
         auto const id = ring.image_map().begin()->second->get_pool_id();
-        g_assert_cmpuint(id, !=, vte::image::k_ref_pool_id_none);
+        g_assert_cmpuint(id.value(), !=, vte::image::k_ref_pool_id_none.value());
 
         /* Shrinking drops the rows the image covers, which frees it. */
         ring.resize(2);
@@ -1030,10 +1131,10 @@ test_ring_image_reset_retires_every_id(void)
         g_assert_cmpuint(ring.image_map().size(), ==, 2);
         g_assert_cmpuint(ring.image_pool().live_count(), ==, 2);
 
-        auto ids = std::vector<uint32_t>{};
+        auto ids = std::vector<pool_id_t>{};
         for (auto const& [priority, image] : ring.image_map()) {
                 auto const id = image->get_pool_id();
-                g_assert_cmpuint(id, !=, vte::image::k_ref_pool_id_none);
+                g_assert_cmpuint(id.value(), !=, vte::image::k_ref_pool_id_none.value());
                 g_assert_true(ring.image_pool().lookup(id) == image.get());
                 ids.push_back(id);
         }
@@ -1070,8 +1171,8 @@ test_ring_image_reset_returns_the_ids(void)
         /* The fixture: the image really took an id out of the pool. */
         g_assert_cmpuint(ring.image_map().size(), ==, 1);
         g_assert_cmpuint(ring.image_pool().live_count(), ==, 1);
-        g_assert_cmpuint(ring.image_map().begin()->second->get_pool_id(),
-                         !=, vte::image::k_ref_pool_id_none);
+        g_assert_cmpuint(ring.image_map().begin()->second->get_pool_id().value(),
+                         !=, vte::image::k_ref_pool_id_none.value());
 
         ring.reset();
         auto const available = ring.image_pool().available();
@@ -1114,7 +1215,9 @@ test_ring_image_cells_carry_the_reference(void)
          */
         ring.set_placing_image(image);
         for (auto r = 0u; r < 3u; r++)
-                ring.stamp_image_row(2 + r, 0, 1, r);
+                ring.stamp_image_row(vte::grid::coords(2 + r, 0),
+                                     1,
+                                     tile_row_t(uint32_t(r)));
         ring.set_placing_image(nullptr);
 
         /* Each stamped cell names the image AND its own place in it. */
@@ -1127,9 +1230,9 @@ test_ring_image_cells_carry_the_reference(void)
                 g_assert_true(attr.image());
 
                 auto const ref = attr.image_ref();
-                g_assert_cmpuint(ref.pool_id(), ==, id);
-                g_assert_cmpuint(ref.tile_row(), ==, r);
-                g_assert_cmpuint(ref.tile_col(), ==, 0);
+                g_assert_cmpuint(ref.pool_id().value(), ==, id.value());
+                g_assert_cmpuint(ref.tile_row().value(), ==, r);
+                g_assert_cmpuint(ref.tile_col().value(), ==, 0);
 
                 /* And the reference resolves back to the image itself. */
                 g_assert_true(ring.image_pool().lookup(ref) == image);
@@ -1160,11 +1263,11 @@ test_ring_image_sweep_sees_cell_references(void)
         append_rows(ring, 24);
 
         auto const id = ring.image_pool().allocate(nullptr);
-        g_assert_cmpuint(id, !=, vte::image::k_ref_pool_id_none);
+        g_assert_cmpuint(id.value(), !=, vte::image::k_ref_pool_id_none.value());
 
         auto* row = ring.index_writable(2);
         g_assert_cmpint(row->len, >, 0);
-        row->cells[0].attr.set_image_ref(vte::image::Ref{id, 0, 0});
+        row->cells[0].attr.set_image_ref(vte::image::Ref{id, tile_row_t{0}, tile_col_t{0}});
 
         ring.image_pool().retire(id);
         g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
@@ -1198,14 +1301,15 @@ test_ring_image_anchor_follows_the_cells(void)
 
         ring.set_placing_image(image);
         for (auto r = 0u; r < 3u; r++)
-                ring.stamp_image_row(5 + r, 0, 1, r);
+                ring.stamp_image_row(vte::grid::coords(5 + r, 0),
+                                     1,
+                                     tile_row_t(uint32_t(r)));
         ring.set_placing_image(nullptr);
 
-        auto row = Ring::row_t{};
-        auto col = Ring::column_t{};
-        g_assert_true(ring.find_image_anchor(id, &row, &col));
-        g_assert_cmpuint(row, ==, 5);
-        g_assert_cmpuint(col, ==, 0);
+        auto const placed = ring.find_image_anchor(id);
+        g_assert_true(placed.has_value());
+        g_assert_cmpint(placed->row(), ==, 5);
+        g_assert_cmpint(placed->column(), ==, 0);
 
         /* Insert a row above it: every row below shifts down by one, and the
          * anchoring cell goes with them.
@@ -1213,13 +1317,15 @@ test_ring_image_anchor_follows_the_cells(void)
         ring.insert(5, 0);
         ring.validate_images();
 
-        g_assert_true(ring.find_image_anchor(id, &row, &col));
-        g_assert_cmpuint(row, ==, 6);
+        auto const shifted = ring.find_image_anchor(id);
+        g_assert_true(shifted.has_value());
+        g_assert_cmpint(shifted->row(), ==, 6);
+        g_assert_cmpint(shifted->column(), ==, 0);
 
         /* An id nothing names has no anchor, rather than a wrong one. */
         auto const unused = ring.image_pool().allocate(nullptr);
-        g_assert_false(ring.find_image_anchor(unused, &row, &col));
-        g_assert_false(ring.find_image_anchor(vte::image::k_ref_pool_id_none, &row, &col));
+        g_assert_false(ring.find_image_anchor(unused).has_value());
+        g_assert_false(ring.find_image_anchor(vte::image::k_ref_pool_id_none).has_value());
 }
 
 /* Collect the screen positions of the cells that name @id, as tile coordinate
@@ -1227,7 +1333,7 @@ test_ring_image_anchor_follows_the_cells(void)
  */
 static std::map<std::pair<uint32_t, uint32_t>, std::pair<long, long>>
 image_cell_positions(Ring& ring,
-                     uint32_t id)
+                     pool_id_t id)
 {
         auto found = std::map<std::pair<uint32_t, uint32_t>, std::pair<long, long>>{};
 
@@ -1245,7 +1351,7 @@ image_cell_positions(Ring& ring,
                         if (ref.pool_id() != id)
                                 continue;
 
-                        found[{ref.tile_row(), ref.tile_col()}] = {r, c};
+                        found[{ref.tile_row().value(), ref.tile_col().value()}] = {r, c};
                 }
         }
 
@@ -1284,7 +1390,9 @@ test_ring_image_cells_stay_with_their_image(void)
 
         ring.set_placing_image(image);
         for (auto r = 0; r < rows_tall; r++)
-                ring.stamp_image_row(top + r, left, cols_wide, r);
+                ring.stamp_image_row(vte::grid::coords(top + r, left),
+                                     cols_wide,
+                                     tile_row_t(uint32_t(r)));
         ring.set_placing_image(nullptr);
 
         /* The fixture before the assertion it exists for: every tile of a
@@ -1347,7 +1455,7 @@ test_ring_image_reference_survives_freeze(void)
         auto const id = ring.image_pool().allocate(nullptr);
         auto* row = ring.index_writable(1);
         g_assert_cmpint(row->len, >, 0);
-        row->cells[0].attr.set_image_ref(vte::image::Ref{id, 3, 0});
+        row->cells[0].attr.set_image_ref(vte::image::Ref{id, tile_row_t{3}, tile_col_t{0}});
         g_assert_true(ring.index(1)->cells[0].attr.image());
 
         /* The id is retired, which is the state a freed image leaves its own
@@ -1372,8 +1480,8 @@ test_ring_image_reference_survives_freeze(void)
         g_assert_true(attr.image());
 
         auto const ref = attr.image_ref();
-        g_assert_cmpuint(ref.tile_row(), ==, 3);
-        g_assert_cmpuint(ref.tile_col(), ==, 0);
+        g_assert_cmpuint(ref.tile_row().value(), ==, 3);
+        g_assert_cmpuint(ref.tile_col().value(), ==, 0);
 
         /* No image was behind this id, so nothing was written down that
          * could resolve it, and it comes back naming nothing.
@@ -1386,7 +1494,7 @@ test_ring_image_reference_survives_freeze(void)
          * id is always re-resolved, and resolves to nothing when the image
          * is gone.
          */
-        g_assert_cmpuint(ref.pool_id(), ==, vte::image::k_ref_pool_id_none);
+        g_assert_cmpuint(ref.pool_id().value(), ==, vte::image::k_ref_pool_id_none.value());
         g_assert_false(ref.valid());
         g_assert_null(ring.image_pool().lookup(ref));
 
@@ -1426,7 +1534,9 @@ test_ring_image_reference_rebinds_after_thaw(void)
         auto const id_before = image->get_pool_id();
 
         ring.set_placing_image(image);
-        ring.stamp_image_row(1, 0, 1, 0);
+        ring.stamp_image_row(vte::grid::coords(1, 0),
+                             1,
+                             tile_row_t(uint32_t(0)));
         ring.set_placing_image(nullptr);
 
         g_assert_true(ring.index(1)->cells[0].attr.image());
@@ -1448,8 +1558,8 @@ test_ring_image_reference_rebinds_after_thaw(void)
         auto const ref = attr.image_ref();
 
         /* The tile coordinates place it within the image. */
-        g_assert_cmpuint(ref.tile_row(), ==, 0);
-        g_assert_cmpuint(ref.tile_col(), ==, 0);
+        g_assert_cmpuint(ref.tile_row().value(), ==, 0);
+        g_assert_cmpuint(ref.tile_col().value(), ==, 0);
 
         /* And it resolves to THE SAME image object, not to nothing and not
          * to some other image that inherited the id.
@@ -1460,7 +1570,7 @@ test_ring_image_reference_rebinds_after_thaw(void)
         /* The id is re-resolved rather than replayed: whatever it is now, it
          * is the id the image actually holds.
          */
-        g_assert_cmpuint(ref.pool_id(), ==, image->get_pool_id());
+        g_assert_cmpuint(ref.pool_id().value(), ==, image->get_pool_id().value());
         (void)id_before;
 }
 
@@ -1489,7 +1599,9 @@ test_ring_image_cells_hold_object_replacement(void)
 
         ring.set_placing_image(image);
         for (auto r = 0u; r < 2u; r++)
-                ring.stamp_image_row(2 + r, 0, 1, r);
+                ring.stamp_image_row(vte::grid::coords(2 + r, 0),
+                                     1,
+                                     tile_row_t(uint32_t(r)));
         ring.set_placing_image(nullptr);
 
         for (auto r = 0u; r < 2u; r++) {
@@ -1542,7 +1654,9 @@ test_ring_image_covers_every_cell_it_claims(void)
 
         ring.set_placing_image(image);
         for (auto r = 0; r < rows_tall; r++)
-                ring.stamp_image_row(top + r, left, cols_wide, r);
+                ring.stamp_image_row(vte::grid::coords(top + r, left),
+                                     cols_wide,
+                                     tile_row_t(uint32_t(r)));
         ring.set_placing_image(nullptr);
         ring.validate_images();
 
@@ -1616,7 +1730,9 @@ test_ring_image_partial_erase_keeps_the_rest(void)
 
         ring.set_placing_image(image);
         for (auto r = 0u; r < 3u; r++)
-                ring.stamp_image_row(2 + r, 0, 4, r);
+                ring.stamp_image_row(vte::grid::coords(2 + r, 0),
+                                     4,
+                                     tile_row_t(uint32_t(r)));
         ring.set_placing_image(nullptr);
 
         /* Erase a single cell in the middle row. */
@@ -1659,7 +1775,9 @@ test_ring_image_full_erase_frees_it(void)
 
         ring.set_placing_image(image);
         for (auto r = 0u; r < 3u; r++)
-                ring.stamp_image_row(2 + r, 0, 4, r);
+                ring.stamp_image_row(vte::grid::coords(2 + r, 0),
+                                     4,
+                                     tile_row_t(uint32_t(r)));
         ring.set_placing_image(nullptr);
 
         g_assert_cmpuint(ring.image_map().size(), ==, 1);
@@ -1708,7 +1826,9 @@ test_ring_image_pixels_survive_eviction(void)
         auto const height = image->get_height_px();
 
         ring.set_placing_image(image);
-        ring.stamp_image_row(1, 0, 4, 0);
+        ring.stamp_image_row(vte::grid::coords(1, 0),
+                             4,
+                             tile_row_t(uint32_t(0)));
         ring.set_placing_image(nullptr);
 
         /* Freeze the row, then evict the image outright - the cells still
@@ -1760,7 +1880,9 @@ test_ring_image_spill_is_reclaimed(void)
         auto* const image = ring.image_map().begin()->second.get();
 
         ring.set_placing_image(image);
-        ring.stamp_image_row(1, 0, 4, 0);
+        ring.stamp_image_row(vte::grid::coords(1, 0),
+                             4,
+                             tile_row_t(uint32_t(0)));
         ring.set_placing_image(nullptr);
 
         append_rows(ring, 40);
@@ -2010,7 +2132,9 @@ test_ring_cached_row_holds_its_image_id(void)
         place_image(ring, 1, 1);
         auto* const image = ring.image_map().begin()->second.get();
         ring.set_placing_image(image);
-        ring.stamp_image_row(1, 0, 1, 0);
+        ring.stamp_image_row(vte::grid::coords(1, 0),
+                             1,
+                             tile_row_t(uint32_t(0)));
         ring.set_placing_image(nullptr);
 
         /* Freeze it into the scrollback. */
@@ -2023,8 +2147,8 @@ test_ring_cached_row_holds_its_image_id(void)
         g_assert_true(thawed->cells[0].attr.image());
 
         auto const ref = thawed->cells[0].attr.image_ref();
-        auto const cached_id = ref.pool_id();
-        g_assert_cmpuint(cached_id, !=, vte::image::k_ref_pool_id_none);
+        auto const cached_id = ref.pool_id().value();
+        g_assert_cmpuint(cached_id, !=, vte::image::k_ref_pool_id_none.value());
         g_assert_true(ring.image_pool().lookup(ref) == image);
 
         /* Memory pressure evicts the image: the id retires, and the cached row
@@ -2043,7 +2167,7 @@ test_ring_cached_row_holds_its_image_id(void)
         /* So the next image cannot be given that id. */
         place_image(ring, 300, 1);
         auto* const newimg = ring.image_map().rbegin()->second.get();
-        g_assert_cmpuint(newimg->get_pool_id(), !=, cached_id);
+        g_assert_cmpuint(newimg->get_pool_id().value(), !=, cached_id);
 
         /* And the cached row, served again without re-thawing, still resolves
          * to nothing rather than to the new picture.
@@ -2051,7 +2175,7 @@ test_ring_cached_row_holds_its_image_id(void)
         auto const* const again = ring.index(1);
         g_assert_nonnull(again);
         g_assert_true(again->cells[0].attr.image());
-        g_assert_cmpuint(again->cells[0].attr.image_ref().pool_id(), ==, cached_id);
+        g_assert_cmpuint(again->cells[0].attr.image_ref().pool_id().value(), ==, cached_id);
         g_assert_null(ring.image_pool().lookup(again->cells[0].attr.image_ref()));
 }
 
@@ -2075,7 +2199,9 @@ test_ring_rewrap_with_images(void)
         place_image(ring, 1, 1);
         auto* const image = ring.image_map().begin()->second.get();
         ring.set_placing_image(image);
-        ring.stamp_image_row(1, 0, 4, 0);
+        ring.stamp_image_row(vte::grid::coords(1, 0),
+                             4,
+                             tile_row_t(uint32_t(0)));
         ring.set_placing_image(nullptr);
 
         /* Rows after the image, so the walk has to cross the image record. */
@@ -2115,7 +2241,7 @@ test_ring_rewrap_with_images(void)
  *
  * Returns the image's pool id.
  */
-static uint32_t
+static pool_id_t
 place_image_below_a_boundary(Ring& ring,
                              bool tear_above)
 {
@@ -2136,7 +2262,9 @@ place_image_below_a_boundary(Ring& ring,
         auto* const image = ring.image_map().rbegin()->second.get();
 
         ring.set_placing_image(image);
-        ring.stamp_image_row(2, 0, 4, 0);
+        ring.stamp_image_row(vte::grid::coords(2, 0),
+                             4,
+                             tile_row_t(uint32_t(0)));
         ring.set_placing_image(nullptr);
         ring.validate_images();
 
@@ -2265,7 +2393,9 @@ test_ring_scrollback_restore_respects_the_budget(void)
                 place_image(ring, row, 1);
                 auto* const img = ring.image_map().rbegin()->second.get();
                 ring.set_placing_image(img);
-                ring.stamp_image_row(row, 0, 4, 0);
+                ring.stamp_image_row(vte::grid::coords(row, 0),
+                                     4,
+                                     tile_row_t(uint32_t(0)));
                 ring.set_placing_image(nullptr);
 
                 row_of[img->get_priority()] = row;
@@ -2361,6 +2491,8 @@ main(int argc,
         g_test_add_func("/vte/image/ref/fields-do-not-alias", test_image_ref_fields_do_not_alias);
         g_test_add_func("/vte/image/ref/zero-is-not-an-image", test_image_ref_zero_is_not_an_image);
         g_test_add_func("/vte/image/ref/stripe-identity", test_image_ref_stripe_identity);
+        g_test_add_func("/vte/image/coordinate-spaces-are-distinct",
+                        test_image_coordinate_spaces_are_distinct);
         g_test_add_func("/vte/cell/attr/union-tagging", test_cell_attr_union_tagging);
         g_test_add_func("/vte/cell/attr/image-tag-survives-sgr-reset", test_cell_attr_image_tag_survives_sgr_reset);
         g_test_add_func("/vte/cell/sizes-unchanged", test_cell_sizes_unchanged);

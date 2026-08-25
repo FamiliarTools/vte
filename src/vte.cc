@@ -10476,8 +10476,8 @@ Terminal::draw(cairo_region_t const* region) noexcept
                                 auto const icw = double(image->get_cell_width());
                                 auto const ich = double(image->get_cell_height());
 
-                                auto const src_x = double(ref.tile_col()) * icw;
-                                auto const src_y = double(ref.tile_row()) * ich;
+                                auto const src_x = double(ref.tile_col().value()) * icw;
+                                auto const src_y = double(ref.tile_row().value()) * ich;
 
                                 auto const avail_w = double(image->get_width_px()) - src_x;
                                 auto const avail_h = double(image->get_height_px()) - src_y;

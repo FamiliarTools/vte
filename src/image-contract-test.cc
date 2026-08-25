@@ -172,7 +172,7 @@ test_combining_mark_takes_the_cell(void)
              "\x1b\\");
 
         auto const* const image = the_image(ring);
-        auto const id = image->get_pool_id();
+        auto const id = image->get_pool_id().value();
         auto const top = Ring::row_t(image->get_top());
         auto const left = Ring::column_t(image->get_left());
 
@@ -189,7 +189,7 @@ test_combining_mark_takes_the_cell(void)
         g_assert_cmpint(long(row->len), >, long(col));
 
         g_assert_true(row->cells[col].attr.image());
-        g_assert_cmpuint(row->cells[col].attr.image_ref().pool_id(), ==, id);
+        g_assert_cmpuint(row->cells[col].attr.image_ref().pool_id().value(), ==, id);
         g_assert_cmpuint(row->cells[col].c, ==, VTE_OBJECT_REPLACEMENT_CHARACTER);
 
         /* Put the cursor one column PAST the target and print a combining
@@ -228,7 +228,7 @@ test_combining_mark_takes_the_cell(void)
          * covers, not the whole image.
          */
         g_assert_cmpuint(ring.image_map().size(), ==, 1);
-        g_assert_cmpuint(the_image(ring)->get_pool_id(), ==, id);
+        g_assert_cmpuint(the_image(ring)->get_pool_id().value(), ==, id);
 }
 
 /* A rectangular copy that takes an image's cells with it.
@@ -264,7 +264,7 @@ test_copy_rect_leaves_the_image_behind(void)
              "\x1b\\");
 
         auto const* const image = the_image(ring);
-        auto const id = image->get_pool_id();
+        auto const id = image->get_pool_id().value();
         auto const top = Ring::row_t(image->get_top());
         auto const left = long(image->get_left());
         auto const width = long(image->get_width());
@@ -297,7 +297,7 @@ test_copy_rect_leaves_the_image_behind(void)
         g_assert_cmpint(long(row->len), >=, marker_col);
 
         g_assert_true(row->cells[left].attr.image());
-        g_assert_cmpuint(row->cells[left].attr.image_ref().pool_id(), ==, id);
+        g_assert_cmpuint(row->cells[left].attr.image_ref().pool_id().value(), ==, id);
         g_assert_cmpuint(row->cells[marker_col - 1].c, ==, 'X');
         g_assert_false(row->cells[marker_col - 1].attr.image());
 
@@ -342,11 +342,11 @@ test_copy_rect_leaves_the_image_behind(void)
          * where it was, whole and still anchored to its own cells.
          */
         g_assert_cmpuint(ring.image_map().size(), ==, 1);
-        g_assert_cmpuint(the_image(ring)->get_pool_id(), ==, id);
+        g_assert_cmpuint(the_image(ring)->get_pool_id().value(), ==, id);
 
         row = ring.index_writable(top);
         g_assert_true(row->cells[left].attr.image());
-        g_assert_cmpuint(row->cells[left].attr.image_ref().pool_id(), ==, id);
+        g_assert_cmpuint(row->cells[left].attr.image_ref().pool_id().value(), ==, id);
 
         g_assert_true(ring.image_cells_are_anchored());
 }

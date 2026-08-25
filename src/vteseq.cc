@@ -998,10 +998,9 @@ Terminal::erase_image_rect(vte::grid::row_t rows,
                  * their position WITHIN THE IMAGE, so they keep naming the
                  * right piece of it after the row has moved.
                  */
-                m_screen->row_data->stamp_image_row(row,
-                                                    m_screen->cursor.col,
+                m_screen->row_data->stamp_image_row(vte::grid::coords(row, m_screen->cursor.col),
                                                     columns,
-                                                    uint32_t(i));
+                                                    vte::image::tile_row_t(uint32_t(i)));
 
                 if (row > m_screen->insert_delta - 1 &&
                     row < m_screen->insert_delta + m_row_count)

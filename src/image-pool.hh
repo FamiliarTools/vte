@@ -76,13 +76,13 @@ private:
         /* Ids known to be Free, for O(1) allocation. Ids never allocated yet
          * are not in here; they come from growing m_entries.
          */
-        std::vector<uint32_t> m_free_list{};
+        std::vector<pool_id_t> m_free_list{};
 
         bool m_sweeping{false};
 
-        inline constexpr bool in_range(uint32_t id) const noexcept
+        inline constexpr bool in_range(pool_id_t id) const noexcept
         {
-                return id != k_ref_pool_id_none && id < m_entries.size();
+                return id != k_ref_pool_id_none && id.value() < m_entries.size();
         }
 
 public:
@@ -95,21 +95,21 @@ public:
         /* Allocate an id for a payload. Returns k_ref_pool_id_none if the id
          * space is exhausted; the caller must then refuse the image.
          */
-        uint32_t allocate(T* payload) noexcept
+        pool_id_t allocate(T* payload) noexcept
         {
-                uint32_t id = k_ref_pool_id_none;
+                auto id = k_ref_pool_id_none;
 
                 if (!m_free_list.empty()) {
                         id = m_free_list.back();
                         m_free_list.pop_back();
                 } else if (m_entries.size() <= k_ref_pool_id_max) {
-                        id = uint32_t(m_entries.size());
+                        id = pool_id_t{uint32_t(m_entries.size())};
                         m_entries.emplace_back();
                 } else {
                         return k_ref_pool_id_none;
                 }
 
-                auto& e = m_entries[id];
+                auto& e = m_entries[id.value()];
                 e.payload = payload;
                 e.state = State::Live;
                 e.marked = false;
@@ -117,12 +117,12 @@ public:
         }
 
         /* The payload is going away. The id is quarantined, not freed. */
-        void retire(uint32_t id) noexcept
+        void retire(pool_id_t id) noexcept
         {
                 if (!in_range(id))
                         return;
 
-                auto& e = m_entries[id];
+                auto& e = m_entries[id.value()];
                 if (e.state != State::Live)
                         return;
 
@@ -133,12 +133,12 @@ public:
         /* nullptr if the id is free or retired: a cell may legitimately
          * outlive its image.
          */
-        T* lookup(uint32_t id) const noexcept
+        T* lookup(pool_id_t id) const noexcept
         {
                 if (!in_range(id))
                         return nullptr;
 
-                auto const& e = m_entries[id];
+                auto const& e = m_entries[id.value()];
                 return e.state == State::Live ? e.payload : nullptr;
         }
 
@@ -147,9 +147,9 @@ public:
                 return lookup(ref.pool_id());
         }
 
-        State state(uint32_t id) const noexcept
+        State state(pool_id_t id) const noexcept
         {
-                return in_range(id) ? m_entries[id].state : State::Free;
+                return in_range(id) ? m_entries[id.value()].state : State::Free;
         }
 
         /* Mark and sweep. Between sweep_begin() and sweep_end() the caller
@@ -162,10 +162,10 @@ public:
                 m_sweeping = true;
         }
 
-        void mark(uint32_t id) noexcept
+        void mark(pool_id_t id) noexcept
         {
                 if (in_range(id))
-                        m_entries[id].marked = true;
+                        m_entries[id.value()].marked = true;
         }
 
         inline void mark(Ref const& ref) noexcept
@@ -184,14 +184,14 @@ public:
                 m_sweeping = false;
 
                 size_t freed = 0;
-                for (uint32_t id = 1; id < m_entries.size(); id++) {
+                for (auto id = size_t{1}; id < m_entries.size(); id++) {
                         auto& e = m_entries[id];
                         if (e.state != State::Retired || e.marked)
                                 continue;
 
                         e.state = State::Free;
                         e.payload = nullptr;
-                        m_free_list.push_back(id);
+                        m_free_list.push_back(pool_id_t{uint32_t(id)});
                         freed++;
                 }
 
