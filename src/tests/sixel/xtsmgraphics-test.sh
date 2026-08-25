@@ -26,11 +26,18 @@
 #
 # Exits 77 (meson "skipped") when Xvfb is unavailable.
 #
-# usage: xtsmgraphics-test.sh <vte-app>
+# A second argument of "geometry" runs only the cross-channel geometry
+# assertion at the bottom. That is the one answer here that moves with the
+# font, so it is the one xtsmgraphics-isolation-test.sh drives, six times over;
+# the fixed replies above it would cost that test four more terminal boots per
+# run and tell it nothing it is asking about.
+#
+# usage: xtsmgraphics-test.sh <vte-app> [geometry]
 
 set -u
 
 APP=${1:?vte app binary}
+MODE=${2:-full}
 
 command -v Xvfb >/dev/null 2>&1 || { echo "SKIP: Xvfb not available"; exit 77; }
 [ -x "$APP" ] || { echo "SKIP: $APP not executable"; exit 77; }
@@ -61,8 +68,16 @@ trap cleanup EXIT
 #
 # HOME is set rather than only passing --no-load-config because a config dir
 # feeds this beyond vteapp.ini - a user fontconfig under it decides which font
-# the default monospace resolves to, and that font is again the cell. Each of
-# the two was measured to stop the Font=Monospace 40 leak on its own.
+# the default monospace resolves to, and that font is again the cell.
+#
+# xtsmgraphics-isolation-test.sh probes the two one at a time and goes red for
+# either alone. Measured on gtk3 by deleting each from this file on its own:
+#
+#   - without this block, a fonts.conf in $XDG_CONFIG_HOME reaches the app and
+#     the run reports 2048x1152 against CSI 14t's 3280x1152.
+#   - without the --no-load-config below, a vteapp.ini in a home the app was
+#     given past this block reaches it, and the run reports 2048x1584 against
+#     CSI 14t's 2640x1584.
 export HOME="$WORK/home"
 export XDG_CONFIG_HOME="$HOME/.config"
 mkdir -p "$XDG_CONFIG_HOME"
@@ -136,18 +151,20 @@ ask() {
         cat "$WORK/out"
 }
 
-for c in "${CASES[@]}"; do
-        q=${c%%|*}
-        want=${c##*|}
+if [ "$MODE" != geometry ]; then
+        for c in "${CASES[@]}"; do
+                q=${c%%|*}
+                want=${c##*|}
 
-        got=$(ask "$q" 18)
-        if [ "$got" = "$want" ]; then
-                echo "ok   ${q} -> $got"
-        else
-                echo "FAIL ${q} -> '$got' (want '$want')"
-                fail=1
-        fi
-done
+                got=$(ask "$q" 18)
+                if [ "$got" = "$want" ]; then
+                        echo "ok   ${q} -> $got"
+                else
+                        echo "FAIL ${q} -> '$got' (want '$want')"
+                        fail=1
+                fi
+        done
+fi
 
 # The cross-channel invariant. XTSMGRAPHICS current geometry (width, height)
 # must be the same window CSI 14t reports (height, width) - note the opposite

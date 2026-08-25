@@ -239,6 +239,25 @@ if get_option('sixel')
       timeout: 120,
     )
 
+    # The one reply above that is not a constant - the geometry, and its
+    # agreement with CSI 14t - is computed in the font's cell, so it answers
+    # whatever is in the config dir the test is run from. That test keeps the
+    # developer's out with a scratch home and --no-load-config, and this one
+    # probes each SEPARATELY, so deleting either alone turns it red: a user
+    # fontconfig for the scratch home, a vteapp.ini forced back onto the app's
+    # own config path for the flag. Each probe is preceded by a run showing
+    # the file it plants is not inert.
+    test(
+      'sixel-xtsmgraphics-isolation-' + arm[0],
+      files(sixel_test_dir / 'xtsmgraphics-isolation-test.sh'),
+      args: [
+        arm[1].full_path(),
+        sixel_test_dir,
+      ],
+      depends: [arm[1]],
+      timeout: 420,
+    )
+
     # The render cases above are only worth their runtime if their verdict
     # tells a right frame from a wrong one. This one damages the captured frame
     # in each of the ways it can be wrong - one pixel, every pixel, one column
