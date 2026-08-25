@@ -1901,7 +1901,7 @@ static void
 test_ring_scrollback_restore_respects_the_budget(void)
 {
         /* Scrolling back through history that held images must not blow the
-         * memory budget.
+         * memory budget, and must still show the pictures.
          *
          * Faulting an image in from the scrollback ADDS to the accounting, so
          * it has to be collected against like any other addition. It was not:
@@ -1909,31 +1909,99 @@ test_ring_scrollback_restore_respects_the_budget(void)
          * image back into RAM and nothing evicted them. Measured at 8.3 times
          * the configured budget before the fix.
          */
+        auto const image_count = 12;
+
         auto ring = Ring{1024, true};
         ring.set_visible_rows(24);
-        append_rows(ring, 4);
+
+        /* Enough rows for every image to have one to itself. A row that does
+         * not exist yet cannot be widened and cannot be stamped, so a ring too
+         * short here leaves most of the images anchored to nothing.
+         */
+        append_rows(ring, 2 + image_count + 2);
 
         /* One image per row, on distinct rows so they coexist. */
-        for (auto i = 0; i < 12; i++) {
-                widen_row(ring, 2 + i, 4);
-                place_image(ring, 2 + i, 1);
+        auto row_of = std::map<size_t, long>{};
+        for (auto i = 0; i < image_count; i++) {
+                auto const row = long(2 + i);
+
+                widen_row(ring, row, 4);
+                place_image(ring, row, 1);
                 auto* const img = ring.image_map().rbegin()->second.get();
                 ring.set_placing_image(img);
-                ring.stamp_image_row(2 + i, 0, 4, 0);
+                ring.stamp_image_row(row, 0, 4, 0);
                 ring.set_placing_image(nullptr);
+
+                row_of[img->get_priority()] = row;
         }
+
+        /* All of them resident at once, which is what a row each buys. Stacked
+         * on one row they would replace each other, only ever one would be
+         * resident, and a budget nothing approaches bounds nothing.
+         */
+        g_assert_cmpuint(ring.image_map().size(), ==, size_t(image_count));
 
         /* Freeze them all, then set a budget that only a couple can fit. */
         append_rows(ring, 300);
+        g_assert_cmpint(long(ring.writable_start_for_test()), >, long(2 + image_count));
+
         auto const budget = size_t{9600};
         ring.set_image_memory_max(budget);
         ring.validate_images();
         g_assert_cmpuint(ring.image_memory_used(), <=, budget);
 
-        /* Now scroll back over them, read only. */
-        for (auto i = 0; i < 12; i++)
-                (void)ring.index(2 + i);
+        /* Most of them have left RAM for the spill, so the rows read below
+         * really are rows whose picture is no longer in memory.
+         */
+        auto evicted = std::set<size_t>{};
+        for (auto const& [priority, row] : row_of) {
+                if (ring.image_map().find(priority) == ring.image_map().end())
+                        evicted.insert(priority);
+        }
+        g_assert_cmpuint(ring.image_map().size(), >, 0);
+        g_assert_cmpuint(evicted.size(), >, 0);
+        g_assert_cmpuint(ring.image_spill_count_for_test(), ==, evicted.size());
 
+        /* One of them on its own first. Reading the row it covers has to put
+         * the image back in the map and back on the accounting: a bound on the
+         * memory says nothing by itself, since faulting nothing in at all
+         * satisfies any bound.
+         */
+        auto const target = *evicted.begin();
+        g_assert_nonnull(ring.index(row_of[target]));
+
+        auto const restored = ring.image_map().find(target);
+        g_assert_true(restored != ring.image_map().end());
+        g_assert_cmpuint(ring.image_memory_used(), >=, restored->second->resource_size());
+
+        /* Now scroll back over all of them, read only. */
+        auto faulted_in = std::set<size_t>{};
+        for (auto const& [priority, row] : row_of) {
+                auto const* const data = ring.index(row);
+                g_assert_nonnull(data);
+                g_assert_cmpint(data->len, >, 0);
+
+                /* The row still has its picture, and it is its own: the cell
+                 * names an image, and that image is here to be drawn.
+                 */
+                auto const& cell = data->cells[0];
+                g_assert_true(cell.attr.image());
+
+                auto const* const image = ring.image_pool().lookup(cell.attr.image_ref());
+                g_assert_nonnull(image);
+                g_assert_cmpuint(image->get_priority(), ==, priority);
+
+                if (evicted.count(priority))
+                        faulted_in.insert(priority);
+
+                /* And the addition is collected against as it is made, not at
+                 * some later placement that may never come.
+                 */
+                g_assert_cmpuint(ring.image_memory_used(), <=, budget);
+        }
+
+        /* Every one that had been evicted came back. */
+        g_assert_cmpuint(faulted_in.size(), ==, evicted.size());
         g_assert_cmpuint(ring.image_memory_used(), <=, budget);
 
         /* And the accounting still matches what is actually resident, so the
