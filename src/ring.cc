@@ -72,6 +72,10 @@ Ring::validate() const
 #endif
 }
 
+#else
+#define validate(...) do { } while(0)
+#endif
+
 #if WITH_SIXEL
 
 void
@@ -127,10 +131,6 @@ Ring::validate_images() const
 }
 
 #endif /* WITH_SIXEL */
-
-#else
-#define validate(...) do { } while(0)
-#endif
 
 Ring::Ring(row_t max_rows,
            bool has_streams)
