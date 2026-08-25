@@ -224,6 +224,12 @@ codebase knows where an image is except the cells it covers.
   accessibility and clipboard text paths both mark an image with U+FFFC, and
   a real drag-select in `vte-2.91` under Xvfb, read back from the X PRIMARY
   selection with `xclip`, shows the marker at exactly the image's columns.
+- `perf/scale-render/` measures the drawn size of an image against the cell it
+  is drawn into, on both toolkits: the image scales by the device scale times
+  the font zoom, and by nothing else. The fractional case is measured where it
+  exists - a headless Wayland output at scale 1.5, since X11 has no fractional
+  scale to offer - and a 96 pixel image measures 143 device pixels there
+  against an exact 144.
 
 ## What is not done
 
@@ -244,6 +250,16 @@ codebase knows where an image is except the cells it covers.
 meson setup _b
 ninja -C _b
 meson test -C _b
+```
+
+The two toolkits are separate build directories, and the draw path is the one
+part of this that differs between them - a cairo surface against a
+`GdkTexture` - so a change to it is not proven until both have run:
+
+```sh
+meson setup _b4 -Dgtk4=true -Dgtk3=false -Dsixel=true
+ninja -C _b4
+meson test -C _b4
 ```
 
 To use it from GNOME Console, see the companion fork

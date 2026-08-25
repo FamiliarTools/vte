@@ -197,6 +197,7 @@ public:
         int verbosity{0};
         double cell_height_scale{1.0};
         double cell_width_scale{1.0};
+        double font_scale{1.0};
         VteCursorBlinkMode cursor_blink_mode{VTE_CURSOR_BLINK_SYSTEM};
         VteCursorShape cursor_shape{VTE_CURSOR_SHAPE_BLOCK};
         VteTextBlinkMode text_blink_mode{VTE_TEXT_BLINK_ALWAYS};
@@ -785,6 +786,7 @@ private:
 
                 load_double_option("CellHeightScale", &cell_height_scale);
                 load_double_option("CellWidthScale", &cell_width_scale);
+                load_double_option("FontScale", &font_scale);
 
                 auto load_enum_option = [&](char const* key,
                                             GType enum_type,
@@ -994,6 +996,7 @@ private:
 
                 save_double_option("CellHeightScale" , cell_height_scale, defopt.cell_height_scale);
                 save_double_option("CellWidthScale" , cell_width_scale, defopt.cell_width_scale);
+                save_double_option("FontScale" , font_scale, defopt.font_scale);
 
                 auto save_enum_option = [&](char const* key,
                                             GType enum_type,
@@ -1404,6 +1407,8 @@ public:
                           "Feed input to the terminal", nullptr },
                         { "font", 'f', 0, G_OPTION_ARG_STRING, &font_string,
                           "Specify a font to use", nullptr },
+                        { "font-scale", 0, 0, G_OPTION_ARG_DOUBLE, &font_scale,
+                          "Set the initial font scale, as the zoom keys would", "SCALE" },
                         { "foreground-color", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_fg_color,
                           "Set default foreground color", "COLOR" },
                         { "geometry", 'g', 0, G_OPTION_ARG_STRING, &geometry,
@@ -4245,6 +4250,7 @@ vteapp_window_constructed(GObject *object)
         vte_terminal_set_enable_sixel(window->terminal, options.sixel);
         vte_terminal_set_enable_fallback_scrolling(window->terminal, options.fallback_scrolling);
         vte_terminal_set_enable_legacy_osc777(window->terminal, options.legacy_osc777);
+        vte_terminal_set_font_scale(window->terminal, options.font_scale);
         vte_terminal_set_mouse_autohide(window->terminal, true);
         vte_terminal_set_rewrap_on_resize(window->terminal, options.rewrap);
         vte_terminal_set_scroll_on_insert(window->terminal, options.scroll_on_insert);
