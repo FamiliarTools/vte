@@ -1189,6 +1189,7 @@ test_scripts_with_arg = [
   ['vte-urlencode-cwd', 'test-vte-urlencode-cwd.sh', vte_urlencode_cwd],
 ]
 
+
 foreach test: test_scripts_with_arg
   test(
     test[0],

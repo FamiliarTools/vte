@@ -161,3 +161,37 @@ if get_option('gtk4')
     pointing_to: '..' / 'applications' / app_gtk4_desktop_name,
   )
 endif
+
+# SIXEL golden-frame render tests.
+#
+# These assert on PIXELS, which is the only place most image properties are
+# observable: that an image is drawn at all, at the right size and place, with
+# the right colours, clipped where it should be. The GTK4 draw arm was absent
+# for two years and no unit test noticed, because no unit test can.
+#
+# The runner exits 77 (skip) when Xvfb or ImageMagick are absent, so a
+# sandboxed build without a display reports "skipped" rather than a failure it
+# could not tell apart from a real one.
+if get_option('sixel') and get_option('gtk4')
+  sixel_render_cases = [
+    'bands',
+    # Same image with a DECGCH spliced in. A command a VT340 does not
+    # implement must not displace the rest of the image, so this shares
+    # bands' golden BY DESIGN: the two must be pixel-identical.
+    'bands-gch',
+  ]
+
+  foreach case: sixel_render_cases
+    test(
+      'sixel-render-' + case,
+      files(meson.project_source_root() / 'src' / 'tests' / 'sixel' / 'render-test.sh'),
+      args: [
+        app_gtk4.full_path(),
+        meson.project_source_root() / 'src' / 'tests' / 'sixel',
+        case,
+      ],
+      depends: [app_gtk4],
+      timeout: 120,
+    )
+  endforeach
+endif

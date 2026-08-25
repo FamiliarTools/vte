@@ -456,11 +456,26 @@ private:
                  * References: vt340test/j4james/xor_and_home.sh
                  */
 
-                /* This is not compatible with the way we store the scanlines,
-                 * so we can't really support this. But let's at least do a
-                 * DECGNL instead of just a NOP.
+                /* This is not compatible with the way we store the
+                 * scanlines, so we cannot support it. The question is only
+                 * what to do INSTEAD, and doing a DECGNL is the worse of the
+                 * two options available.
+                 *
+                 * DEC STD 070 8.1 says a command that is not supported is
+                 * parsed and ignored. Substituting a graphics newline is not
+                 * ignoring it: it moves the active position down a scanline,
+                 * so every sixel after this point lands one row lower than
+                 * the sender placed it. A single stray byte silently
+                 * displaces the rest of the image.
+                 *
+                 * The failure modes are not symmetric. Ignoring a command
+                 * that a VT340 does not implement either draws the image the
+                 * sender intended - because a sender targeting a VT340 would
+                 * not emit it - or omits one positioning step. Honouring it as
+                 * something else corrupts everything downstream of it. So:
+                 * ignore.
                  */
-                DECGNL(seq);
+                SIXEL_NOP(seq);
         }
 
         void
