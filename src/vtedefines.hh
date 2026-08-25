@@ -135,6 +135,24 @@
 
 #define VTE_SIXEL_ENABLED_DEFAULT false
 
+/* The SMALLEST cell an image may be laid out against.
+ *
+ * Images are laid out against the font's cell - see
+ * Terminal::image_cell_size(), which is where this floor is applied and the
+ * only place an image layout cell is produced.
+ *
+ * This is the real invariant behind vte::image::Ref's 9-bit tile fields:
+ * ceil(VTE_SIXEL_MAX_WIDTH / 4) == 512 and ceil(VTE_SIXEL_MAX_HEIGHT / 8) ==
+ * 257, both inside 9 bits. A floor of 4x8 is therefore exactly what makes a
+ * legal image addressable, whatever font is in use - and the widget clamps
+ * its font cell only to 1x2 pixels, so the case is reachable.
+ *
+ * It is ENFORCED rather than merely asserted: a minimum that is applied
+ * nowhere is no invariant at all.
+ */
+#define VTE_SIXEL_CELL_MIN_WIDTH (4)
+#define VTE_SIXEL_CELL_MIN_HEIGHT (8)
+
 #define VTE_SIXEL_MAX_WIDTH (2048)
 #define VTE_SIXEL_MAX_HEIGHT (2052)
 #define VTE_SIXEL_NUM_COLOR_REGISTERS (1024)

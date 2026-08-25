@@ -3754,16 +3754,22 @@ Terminal::insert_image(ProcessingContext& context,
 
         auto const left = m_screen->cursor.col;
         auto const top = m_screen->cursor.row;
-        auto const width = (image_width_px + m_cell_width_unscaled - 1) / m_cell_width_unscaled;
-        auto const height = (image_height_px + m_cell_height_unscaled - 1) / m_cell_height_unscaled;
+
+        /* The cell image geometry is expressed in: the font's, unscaled and
+         * floored. See Terminal::image_cell_size().
+         */
+        auto const [image_cell_w, image_cell_h] = image_cell_size();
+
+        auto const width = (image_width_px + image_cell_w - 1) / image_cell_w;
+        auto const height = (image_height_px + image_cell_h - 1) / image_cell_h;
 
         m_screen->row_data->append_image(std::move(image_surface),
                                          image_width_px,
                                          image_height_px,
                                          left,
                                          top,
-                                         m_cell_width_unscaled,
-                                         m_cell_height_unscaled);
+                                         image_cell_w,
+                                         image_cell_h);
 
         /* Erase characters under the image. Since this inserts content, we need
          * to update the processing context's bbox.

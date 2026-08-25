@@ -1600,6 +1600,52 @@ public:
         std::optional<std::vector<char32_t>> process_word_char_exceptions(std::string_view str) const noexcept;
 
         long get_cell_height() { ensure_font(); return m_cell_height; }
+
+#if WITH_SIXEL
+        /* The cell that image geometry is expressed in.
+         *
+         * THE ONLY PRODUCER of an image layout cell. Every footprint, every
+         * tile coordinate and every draw-time source rectangle is derived from
+         * this pair, so the floor below is a real runtime guarantee rather
+         * than a comment.
+         *
+         * It is the FONT's cell, unscaled and floored, read afresh every time:
+         *
+         *  - The FONT's, because that is the cell an image renders against.
+         *    Laying out against some other notion of a pixel makes the same
+         *    file cover a different fraction of the screen for every user.
+         *
+         *  - UNSCALED, which is the value CSI 14t, TIOCGWINSZ and
+         *    XTSMGRAPHICS all report, so an image sized from any of those
+         *    replies occupies the cells its sender expected. It is also what
+         *    keeps GNOME/vte#253 closed: the zoom does not move the unscaled
+         *    cell, so the same file emitted before and after a zoom step gets
+         *    the same footprint, and the zoom re-enters only at draw time,
+         *    where it scales every image on screen alike.
+         *
+         *  - AFRESH, because nothing already placed reads this. An image
+         *    carries the cell it was laid out against and its cells carry
+         *    their tile coordinates, so a later answer here cannot rescale
+         *    anything already on the grid. Answering from a cached first call
+         *    would only make the XTSMGRAPHICS reply drift from CSI 14t's
+         *    after a font change, which is the disagreement that reply exists
+         *    to end.
+         *
+         * The cost, plainly: an image placed after the user changes font need
+         * not cover the same cells as an identical image placed before it. It
+         * covers the cells the terminal was reporting when it arrived, which
+         * is the only figure its sender could have acted on.
+         */
+        std::pair<int, int> image_cell_size()
+        {
+                ensure_font();
+
+                return {int(std::max(long(VTE_SIXEL_CELL_MIN_WIDTH),
+                                     m_cell_width_unscaled)),
+                        int(std::max(long(VTE_SIXEL_CELL_MIN_HEIGHT),
+                                     m_cell_height_unscaled))};
+        }
+#endif /* WITH_SIXEL */
         long get_cell_width()  { ensure_font(); return m_cell_width;  }
 
         vte::color::rgb const* get_color(int entry) const;

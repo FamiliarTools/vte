@@ -26,51 +26,37 @@
 namespace vte::image {
 
 /*
- * Ref: what an image cell stores in VteCellAttr::m_link.
+ * Ref: what a cell covered by an image stores in VteCellAttr::m_link.
  *
- * Exactly 32 bits, because that is the whole budget: see the discriminated
- * union in cell.hh for why the field cannot grow and why VteCell cannot
- * either.
- *
- * Layout, most significant first:
+ * Exactly 32 bits wide; see the union in cell.hh for why the field cannot
+ * grow. Layout, most significant first:
  *
  *      pool_id  : 14   which image, an index into the image pool
  *      tile_row :  9   which cell row of that image this cell is
  *      tile_col :  9   which cell column of that image this cell is
  *
- * The coordinates are per-image, not per-screen, so a cell knows which piece
- * of the image it carries no matter where the row has since been moved to.
- * That is what lets rewrap re-anchor an image for free: rewrap rebuilds
- * row_stream alone, so the cells keep their coordinates and the image simply
- * follows the cells that survived.
+ * The tile coordinates are relative to the image, not to the screen, so a
+ * cell keeps naming the same piece of the image wherever its row is moved
+ * to. Rewrap therefore re-anchors an image for free: it rebuilds row_stream
+ * only, and the image follows the cells that survived.
  *
- * The coordinate widths are sized against the LARGEST image the parser will
- * admit, divided by the SMALLEST cell it could be laid out in, so that a
- * legal image can never overflow its own coordinates:
+ * The coordinate widths cover the largest image the parser admits, divided
+ * by the smallest cell it may be laid out against:
  *
- *      cols = ceil(VTE_SIXEL_MAX_WIDTH  / min_cell_width)
- *      rows = ceil(VTE_SIXEL_MAX_HEIGHT / min_cell_height)
+ *      cols = ceil(VTE_SIXEL_MAX_WIDTH  / VTE_SIXEL_CELL_MIN_WIDTH)
+ *      rows = ceil(VTE_SIXEL_MAX_HEIGHT / VTE_SIXEL_CELL_MIN_HEIGHT)
  *
- * At the upstream caps of 2048x2052 and a 4x8 cell that is 512 columns and
- * 257 rows, hence 9 bits each. Those are checked below, so RAISING the caps
- * is a build error.
+ * which at 2048x2052 over the 4x8 minimum is 512 columns and 257 rows, both
+ * within 9 bits. Images are laid out against the font's cell, which is
+ * normally larger, so this is the worst case rather than the usual one.
  *
- * BUT THAT CHECK IS NOT SUFFICIENT ON ITS OWN, and it is important not to
- * read it as more than it is. k_min_cell_width/height are an ASSUMPTION, not
- * an enforced floor: the widget clamps cell metrics only to 1x2 and inits
- * them to 1x1, so a real layout can be finer than the assumed minimum and a
- * legal image can genuinely need more tile columns than the field holds.
+ * The minimum has to be enforced: the widget clamps its font cell only to
+ * 1x2 pixels, and at that size a legal image would need 11 bits of column.
+ * Terminal::image_cell_size() applies the minimum and is the only producer
+ * of an image layout cell.
  *
- * The packing is therefore TOTAL: out-of-range values are masked into their
- * own field and cannot carry into a neighbour. Silently truncating a tile
- * coordinate draws the wrong part of the right image; letting it carry into
- * pool_id draws part of a DIFFERENT image, so masking is strictly the less
- * bad of the two failures. Callers that can refuse a placement must ask
- * fits() first, and refuse, rather than relying on either.
- *
- * 14 bits of pool id is 16383 concurrently live images (0 is reserved as the
- * "no image" id so that a zeroed Ref is invalid rather than a reference to
- * image 0).
+ * 14 bits of pool id is 16383 concurrently live images; id 0 is reserved for
+ * "no image", so that a zeroed Ref names nothing.
  */
 
 inline constexpr unsigned k_ref_pool_id_bits = 14;
@@ -91,20 +77,23 @@ inline constexpr uint32_t k_ref_tile_col_max = (1u << k_ref_tile_col_bits) - 1u;
 /* The pool id reserved to mean "not an image". */
 inline constexpr uint32_t k_ref_pool_id_none = 0u;
 
-/* The smallest cell the widget will lay out in. A cell smaller than this
- * would let a max-size image need more tile coordinates than a Ref can hold.
+/* The worst-case tile footprint of a legal image, in cells. Derived from the
+ * caps and the smallest layout cell, so that the assertions below hold for
+ * any font.
  */
-inline constexpr int k_min_cell_width = 4;
-inline constexpr int k_min_cell_height = 8;
+inline constexpr int k_max_image_tile_cols =
+        (VTE_SIXEL_MAX_WIDTH + VTE_SIXEL_CELL_MIN_WIDTH - 1) / VTE_SIXEL_CELL_MIN_WIDTH;
+inline constexpr int k_max_image_tile_rows =
+        (VTE_SIXEL_MAX_HEIGHT + VTE_SIXEL_CELL_MIN_HEIGHT - 1) / VTE_SIXEL_CELL_MIN_HEIGHT;
 
-static_assert((VTE_SIXEL_MAX_WIDTH + k_min_cell_width - 1) / k_min_cell_width
-              <= int(k_ref_tile_col_max) + 1,
-              "VTE_SIXEL_MAX_WIDTH admits more cell columns than a Ref can address; "
-              "widen k_ref_tile_col_bits or lower the cap");
-static_assert((VTE_SIXEL_MAX_HEIGHT + k_min_cell_height - 1) / k_min_cell_height
-              <= int(k_ref_tile_row_max) + 1,
-              "VTE_SIXEL_MAX_HEIGHT admits more cell rows than a Ref can address; "
-              "widen k_ref_tile_row_bits or lower the cap");
+static_assert(k_max_image_tile_cols <= int(k_ref_tile_col_max) + 1,
+              "a legal image admits more tile columns than a Ref can address; "
+              "widen k_ref_tile_col_bits, lower VTE_SIXEL_MAX_WIDTH, or raise "
+              "VTE_SIXEL_CELL_MIN_WIDTH");
+static_assert(k_max_image_tile_rows <= int(k_ref_tile_row_max) + 1,
+              "a legal image admits more tile rows than a Ref can address; "
+              "widen k_ref_tile_row_bits, lower VTE_SIXEL_MAX_HEIGHT, or raise "
+              "VTE_SIXEL_CELL_MIN_HEIGHT");
 
 class Ref {
 private:
