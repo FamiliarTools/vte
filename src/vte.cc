@@ -6969,8 +6969,17 @@ Terminal::get_text(vte::grid::row_t start_row,
 					attr.strikethrough = pcell->attr.strikethrough();
                                         attr.columns = pcell->attr.columns();
 
-					/* Store the cell string */
-					if (pcell->c == 0) {
+                                        /* Store the cell string.
+                                         *
+                                         * A cell an image covers holds U+FFFC OBJECT REPLACEMENT
+                                         * CHARACTER, which is what marks the position of an
+                                         * embedded object in text (vte#253 note_968299,
+                                         * note_973835, restated in vte#309). That is the cell's
+                                         * own content, so it needs no case of its own here: every
+                                         * text path marks the image's position, and marks it the
+                                         * same way. It also counts as non-empty, so an image at
+                                         * the end of a line survives the trimming below. */
+                                        if (pcell->c == 0) {
                                                 /* Empty cells of nondefault background color are
                                                  * stored as NUL characters. Treat them as spaces
                                                  * unless 'preserve_empty' is set,

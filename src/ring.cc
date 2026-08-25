@@ -389,7 +389,8 @@ Ring::stamp_image_row(row_t position,
                 /* The cell is the image's now, so it holds the object
                  * replacement character rather than whatever text the erase
                  * left behind. It is never drawn as a glyph - the image is
-                 * drawn instead - and text extraction reports it as blank.
+                 * drawn instead - and it is what text extraction emits to
+                 * mark the image's position.
                  */
                 row->cells[col].c = VTE_OBJECT_REPLACEMENT_CHARACTER;
         }
