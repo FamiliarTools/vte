@@ -1708,6 +1708,36 @@ test_context_param_overflow_drops_command(void)
         }
 }
 
+
+static void
+test_context_empty_scanlines_do_not_overflow(void)
+{
+        /* A heap write overflow reachable from any program that can print to
+         * the terminal.
+         *
+         * m_height only rises when a scanline stores a set bit, but DECGNL
+         * advances the scanline regardless. Repeating "advance the column far
+         * to the right, then newline" therefore walks the write pointer past a
+         * buffer that was sized for height zero. ASan called it a
+         * heap-buffer-overflow WRITE; a plain build segfaults.
+         *
+         * The payload below is the reported reproducer: a wide zero-sixel run
+         * followed by a graphics newline, repeated, then one real sixel.
+         */
+        auto context = TestContext{};
+
+        std::string payload;
+        for (auto i = 0; i < 64; i++)
+                payload += "!2048?-";
+        payload += "~";
+
+        /* Must not crash, and must not decode to something absurd. */
+        parse_pixels(context, std::string_view{payload});
+
+        g_assert_cmpuint(context.image_width(), <=, unsigned(VTE_SIXEL_MAX_WIDTH));
+        g_assert_cmpuint(context.image_height(), <=, unsigned(VTE_SIXEL_MAX_HEIGHT));
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1728,6 +1758,7 @@ main(int argc,
         g_test_add_func("/vte/sixel/parser/controls/c1", test_parser_controls_c1);
         g_test_add_func("/vte/sixel/context/color/hls", test_context_color_hls);
         g_test_add_func("/vte/sixel/context/raster-attributes", test_context_raster_attributes);
+        g_test_add_func("/vte/sixel/context/empty-scanlines-no-overflow", test_context_empty_scanlines_do_not_overflow);
         g_test_add_func("/vte/sixel/context/repeat", test_context_repeat);
         g_test_add_func("/vte/sixel/context/repeat-cancelled-by-command", test_context_repeat_cancelled_by_command);
         g_test_add_func("/vte/sixel/context/param-overflow-drops-command", test_context_param_overflow_drops_command);

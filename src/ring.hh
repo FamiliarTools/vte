@@ -160,6 +160,39 @@ private:
          * than failing. Anything added to the record's variable tail goes
          * here and nowhere else.
          */
+        /* The record's trailer is the 2-byte hyperlink length, and it must stay
+         * LAST, because thaw_row's truncating pass walks the stream BACKWARDS
+         * and reads it at (offset - 2) to find where the record began.
+         *
+         * That is why the image reference cannot simply be appended after it:
+         * the last two bytes would be the tail of the image reference, the
+         * backwards walk would decode a garbage length, and every frozen row
+         * would silently lose its attributes.
+         *
+         * So the trailer carries the flag itself. Hyperlink lengths are bounded
+         * far below 0x8000 by VTE_HYPERLINK_TOTAL_LENGTH_MAX, so the high bit
+         * is free and the trailer can say whether an image reference precedes
+         * it. This keeps the record self-describing in both directions.
+         */
+        static constexpr guint16 k_attr_trailer_image_flag = 0x8000u;
+
+        static inline constexpr guint16 attr_trailer(gsize hyperlink_length,
+                                                     bool has_image) noexcept
+        {
+                return guint16(hyperlink_length) |
+                        (has_image ? k_attr_trailer_image_flag : 0u);
+        }
+
+        static inline constexpr gsize trailer_length(guint16 trailer) noexcept
+        {
+                return trailer & ~k_attr_trailer_image_flag;
+        }
+
+        static inline constexpr bool trailer_has_image(guint16 trailer) noexcept
+        {
+                return (trailer & k_attr_trailer_image_flag) != 0;
+        }
+
         static inline constexpr gsize attr_record_stride(gsize hyperlink_length,
                                                         bool has_image = false) noexcept
         {
@@ -362,7 +395,7 @@ private:
          * mutation drains it to repaint. */
         bool m_images_changed{false};
 
-        void image_gc() noexcept;
+        void image_gc(vte::image::Image const* exempt = nullptr) noexcept;
         void sweep_image_pool() noexcept;
         void image_gc_region() noexcept;
         void unlink_image_from_top_map(vte::image::Image const* image) noexcept;
@@ -395,6 +428,7 @@ private:
         };
         std::map<size_t /* priority */, ImageSpill> m_image_spill{};
 
+        void append_stream_image_ref() noexcept;
         void spill_image(vte::image::Image const* image) noexcept;
         vte::image::Image* restore_image(size_t priority) /* throws */;
         void reclaim_image_spill(row_t before_row) noexcept;
@@ -451,6 +485,13 @@ public:
         }
 
         auto image_spill_count_for_test() const noexcept { return m_image_spill.size(); }
+
+        /* For tests: drive the reflow a horizontal resize performs. */
+        void rewrap_for_test(column_t columns)
+        {
+                VteVisualPosition* markers[1] = { nullptr };
+                rewrap(columns, markers);
+        }
 
         /* The bytes the resident images are charged for, i.e. what the image GC
          * spends its budget against. It has to be the sum over exactly the images
