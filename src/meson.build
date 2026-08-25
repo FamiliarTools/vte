@@ -1159,6 +1159,61 @@ if get_option('gtk3')
   test_units += [test_vtetypes,]
 endif
 
+# Image lifetime contract, asserted on cells through the real terminal.
+#
+# Linked against the library's OBJECTS rather than the shared library: the test
+# reads the ring's cells, and nothing that can reach them - the impl accessor,
+# Ring, the cell attributes - is an exported symbol. Nothing is compiled twice
+# for it either; the objects are the ones the library itself is built from.
+#
+# Not in test_units, because it has to realize a widget and so needs a display;
+# the runner supplies a throwaway one and reports "skipped" when it cannot.
+#
+# Built WITHOUT release_args, like every other test here: those carry
+# -DG_DISABLE_ASSERT, which turns g_assert() into nothing, and a test whose
+# assertions are compiled away passes no matter what the code does.
+if get_option('sixel')
+  image_contract_tests = []
+
+  if get_option('gtk3')
+    test_image_contract_gtk3 = executable(
+      'test-image-contract-gtk3',
+      sources: files('image-contract-test.cc'),
+      objects: libvte_gtk3.extract_all_objects(recursive: false),
+      dependencies: libvte_gtk3_deps,
+      cpp_args: libvte_common_cppflags + gtk3_version_cppflags + ['-DVTE_GTK=3',],
+      include_directories: incs,
+      install: false,
+    )
+
+    image_contract_tests += [['gtk3', test_image_contract_gtk3,],]
+  endif
+
+  if get_option('gtk4')
+    test_image_contract_gtk4 = executable(
+      'test-image-contract-gtk4',
+      sources: files('image-contract-test.cc'),
+      objects: libvte_gtk4.extract_all_objects(recursive: false),
+      dependencies: libvte_gtk4_deps,
+      cpp_args: libvte_common_cppflags + gtk4_version_cppflags + ['-DVTE_GTK=4',],
+      include_directories: incs,
+      install: false,
+    )
+
+    image_contract_tests += [['gtk4', test_image_contract_gtk4,],]
+  endif
+
+  foreach arm: image_contract_tests
+    test(
+      'image-contract-' + arm[0],
+      files(meson.project_source_root() / 'src' / 'tests' / 'sixel' / 'image-contract-test.sh'),
+      args: [arm[1].full_path()],
+      depends: [arm[1]],
+      timeout: 120,
+    )
+  endforeach
+endif
+
 # Run unit tests
 
 test_env = [
