@@ -1216,6 +1216,51 @@ test_ring_image_reference_rebinds_after_thaw(void)
         (void)id_before;
 }
 
+
+static void
+test_ring_image_cells_hold_object_replacement(void)
+{
+        /* A cell an image covers must not keep the text that was there, and
+         * must not be left empty either.
+         *
+         * chpe's answer to whether a cell may hold both text and an image is
+         * that placing an image erases its area and makes the cells contain
+         * U+FFFC, not drawn as a character (vte#253). Empty would be wrong in
+         * a way that matters: an empty cell is indistinguishable from one the
+         * image never covered.
+         */
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        /* append_rows() puts real text in every cell. */
+        g_assert_cmpuint(ring.index(2)->cells[0].c, ==, 'x');
+
+        place_image(ring, 2, 2);
+        auto* image = ring.image_map().begin()->second.get();
+
+        ring.set_placing_image(image);
+        for (auto r = 0u; r < 2u; r++)
+                ring.stamp_image_row(2 + r, 0, 1, r);
+        ring.set_placing_image(nullptr);
+
+        for (auto r = 0u; r < 2u; r++) {
+                auto const& cell = ring.index(2 + r)->cells[0];
+
+                g_assert_true(cell.attr.image());
+                g_assert_cmpuint(cell.c, ==, VTE_OBJECT_REPLACEMENT_CHARACTER);
+
+                /* Not empty: the ring must be able to tell "image here" from
+                 * "nothing here".
+                 */
+                g_assert_cmpuint(cell.c, !=, 0);
+        }
+
+        /* An untouched neighbouring row still holds its text. */
+        g_assert_cmpuint(ring.index(5)->cells[0].c, ==, 'x');
+        g_assert_false(ring.index(5)->cells[0].attr.image());
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1251,6 +1296,7 @@ main(int argc,
         g_test_add_func("/vte/ring/image-pool/retires-with-the-image", test_ring_image_pool_retires_with_the_image);
         g_test_add_func("/vte/ring/image-pool/sweep-reclaims", test_ring_image_pool_sweep_reclaims);
 
+        g_test_add_func("/vte/ring/image-pool/cells-hold-object-replacement", test_ring_image_cells_hold_object_replacement);
         g_test_add_func("/vte/ring/image-pool/cells-carry-the-reference", test_ring_image_cells_carry_the_reference);
         g_test_add_func("/vte/ring/image-pool/sweep-sees-cell-references", test_ring_image_sweep_sees_cell_references);
 

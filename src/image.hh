@@ -103,6 +103,18 @@ public:
         inline constexpr auto get_height() const noexcept { return (m_height_pixels + m_cell_height - 1) / m_cell_height; }
         inline auto get_bottom() const noexcept { return m_top_cells + get_height() - 1; }
 
+        /* The cell this image was laid out against, which is fixed at
+         * placement and travels with the image. The draw must use THIS and
+         * not the terminal's current value: it addresses the image in ITS own
+         * pixel grid, and an image restored from the scrollback has to keep
+         * the scale it was placed at.
+         */
+        inline constexpr auto get_cell_width() const noexcept { return m_cell_width; }
+        inline constexpr auto get_cell_height() const noexcept { return m_cell_height; }
+
+        inline constexpr auto get_width_px() const noexcept { return m_width_pixels; }
+        inline constexpr auto get_height_px() const noexcept { return m_height_pixels; }
+
         /* The image's display size at the given current cell dimensions. The
          * image is stretched so that it keeps covering the same cells as when
          * it was created; m_cell_width/m_cell_height are the cell dimensions

@@ -242,6 +242,36 @@ public:
                                 double width,
                                 double height) const = 0;
 
+        /* Draw one axis-aligned REGION of a raster image into a destination
+         * rectangle.
+         *
+         * Images are drawn a stripe-run at a time rather than whole, because
+         * a cell can stop belonging to its image at any moment - overwritten,
+         * scrolled off, erased - and only the cells that still name it may be
+         * painted. Blitting the whole image would paint over cells that the
+         * image no longer owns.
+         *
+         * The source rectangle is in the image's own pixel coordinates; the
+         * destination is in widget coordinates, and the two need not have the
+         * same size, because the source grid is the cell the image was laid
+         * out against while the destination grid is the cell the widget is
+         * drawing now - the zoom, or a font change since, is the difference.
+         */
+        virtual void draw_image_region(
+#if VTE_GTK == 3
+                                       cairo_surface_t* surface,
+#elif VTE_GTK == 4
+                                       GdkTexture* texture,
+#endif
+                                       double src_x,
+                                       double src_y,
+                                       double src_width,
+                                       double src_height,
+                                       double dst_x,
+                                       double dst_y,
+                                       double dst_width,
+                                       double dst_height) const = 0;
+
         void draw_undercurl(int x,
                             double y,
                             double line_width,

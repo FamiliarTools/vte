@@ -135,6 +135,19 @@
 
 #define VTE_SIXEL_ENABLED_DEFAULT false
 
+/* What a cell covered by an image contains.
+ *
+ * chpe's own answer to "should a cell be allowed to both have text and an
+ * image": creating an image erases the cells in its area and makes them
+ * contain U+FFFC OBJECT REPLACEMENT CHARACTER, which is not drawn as a
+ * character (vte#253, the "few fundamental questions" note).
+ *
+ * The cell is therefore never empty, which matters: an empty cell is
+ * indistinguishable from one the image never covered, and the ring uses
+ * cell contents to decide what a row still holds.
+ */
+#define VTE_OBJECT_REPLACEMENT_CHARACTER (0xfffcu)
+
 /* The SMALLEST cell an image may be laid out against.
  *
  * Images are laid out against the font's cell - see

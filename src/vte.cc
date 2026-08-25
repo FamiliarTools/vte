@@ -9837,6 +9837,12 @@ Terminal::draw_rows(VteScreen *screen_,
                         nhilite = (nhyperlink && cell->attr.hyperlink_idx_or_none() == m_hyperlink_hover_idx) ||
                                   (!nhyperlink && regex_match_has_current() && m_match_span.contains(row, lcol));
                         if (cell->c == 0 ||
+                            /* A cell the image owns draws the image, never a
+                             * glyph. Skipping it here rather than relying on
+                             * the font lacking U+FFFC is what makes that true
+                             * for every font.
+                             */
+                            cell->attr.image() ||
                             ((cell->c == ' ' || cell->c == '\t') &&  // FIXME '\t' is newly added now, double check
                              cell->attr.has_none(VTE_ATTR_UNDERLINE_MASK |
                                                  VTE_ATTR_STRIKETHROUGH_MASK |
@@ -10367,64 +10373,95 @@ Terminal::draw(cairo_region_t const* region) noexcept
                 auto const top_row = first_displayed_row();
                 auto const bottom_row = last_displayed_row();
 
-                for (auto const& [priority, image] : ring->image_map()) {
-                        if (image->get_bottom() < top_row ||
-                            image->get_top() > bottom_row)
+                for (auto row = top_row; row <= bottom_row; row++) {
+                        auto const* row_data = find_row_data(row);
+                        if (row_data == nullptr)
                                 continue;
 
-                        /* Note that the position must be computed the same way
-                         * draw_rows() computes it, or the image drifts against
-                         * the text it was drawn between while smooth scrolling.
-                         */
-                        /* Position from the CELLS that name this image, not
-                         * from the coordinates the image was placed at.
-                         *
-                         * The cells are moved by everything that moves text -
-                         * scrolling, insertion, deletion, rewrap - so taking
-                         * the position from them is what stops the image and
-                         * the text it was drawn between from drifting apart,
-                         * without any of those operations knowing that images
-                         * exist.
-                         *
-                         * The stored coordinates remain the fallback: an
-                         * image whose anchoring cell has been overwritten,
-                         * or which is no longer in the writable rows, still
-                         * has to be drawn somewhere sensible.
-                         */
-                        auto anchor_row = vte::base::Ring::row_t{};
-                        auto anchor_col = vte::base::Ring::column_t{};
-                        auto const anchored =
-                                ring->find_image_anchor(image->get_pool_id(),
-                                                        &anchor_row,
-                                                        &anchor_col);
+                        auto const y = double(row_to_pixel(row));
 
-                        auto const left_cells = anchored ? long(anchor_col)
-                                                        : long(image->get_left());
-                        auto const image_top = anchored ? long(anchor_row)
-                                                        : long(image->get_top());
+                        for (auto col = 0; col < row_data->len; ) {
+                                auto const& cell = row_data->cells[col];
+                                if (!cell.attr.image()) {
+                                        col++;
+                                        continue;
+                                }
 
-                        auto const x = int(left_cells * m_cell_width);
-                        auto const y = int(row_to_pixel(image_top));
-                        auto const width = image->get_width_pixels(m_cell_width);
-                        auto const height = image->get_height_pixels(m_cell_height);
+                                auto const ref = cell.attr.image_ref();
+                                auto* image = ring->image_pool().lookup(ref);
+                                if (image == nullptr) {
+                                        /* A cell that outlived its image. Normal,
+                                         * not an error: it draws as background.
+                                         */
+                                        col++;
+                                        continue;
+                                }
+
+                                /* Extend the run over cells of the SAME stripe whose
+                                 * tile columns are still consecutive. A gap means a
+                                 * cell in the middle was overwritten and no longer
+                                 * belongs to the image, so the run has to stop and
+                                 * that cell must not be painted.
+                                 */
+                                auto run = 1;
+                                while (col + run < row_data->len) {
+                                        auto const& next = row_data->cells[col + run];
+                                        if (!next.attr.image())
+                                                break;
+
+                                        auto const nref = next.attr.image_ref();
+                                        if (!nref.same_stripe(ref) ||
+                                            nref.tile_col() != ref.tile_col() + unsigned(run))
+                                                break;
+
+                                        run++;
+                                }
+
+                                /* Source rectangle, in the image's own pixels,
+                                 * so it is addressed against the image's OWN
+                                 * layout cell and not m_cell_*: an image
+                                 * restored from the scrollback keeps the scale
+                                 * it was placed at.
+                                 */
+                                auto const icw = double(image->get_cell_width());
+                                auto const ich = double(image->get_cell_height());
+
+                                auto const src_x = double(ref.tile_col()) * icw;
+                                auto const src_y = double(ref.tile_row()) * ich;
+
+                                auto const avail_w = double(image->get_width_px()) - src_x;
+                                auto const avail_h = double(image->get_height_px()) - src_y;
+                                if (avail_w <= 0 || avail_h <= 0) {
+                                        col += run;
+                                        continue;
+                                }
+
+                                /* The last stripe of an image is usually partial: it
+                                 * holds fewer pixels than a whole cell row. Clamp the
+                                 * source and shrink the destination by the same
+                                 * factor, so the image keeps its scale instead of
+                                 * being stretched to fill the cell.
+                                 */
+                                auto const src_w = std::min(double(run) * icw, avail_w);
+                                auto const src_h = std::min(ich, avail_h);
+
+                                auto const dst_x = double(col) * m_cell_width;
+                                auto const dst_w = src_w * double(m_cell_width) / icw;
+                                auto const dst_h = src_h * double(m_cell_height) / ich;
 
 #if VTE_GTK == 3
-                        /* Clear cell extent; image may be slightly smaller */
-                        m_draw.clear(x, y,
-                                     image->get_width() * m_cell_width,
-                                     image->get_height() * m_cell_height,
-                                     get_color(ColorPaletteIndex::default_bg()),
-                                     m_background_alpha);
-
-                        m_draw.draw_image(image->get_surface(),
-                                          x, y, width, height);
+                                m_draw.draw_image_region(image->get_surface(),
+                                                         src_x, src_y, src_w, src_h,
+                                                         dst_x, y, dst_w, dst_h);
 #elif VTE_GTK == 4
-                        /* No need to clear the cell extent first: the widget
-                         * background node above already covers it.
-                         */
-                        if (auto const texture = image->get_texture())
-                                m_draw.draw_image(texture, x, y, width, height);
+                                if (auto const texture = image->get_texture())
+                                        m_draw.draw_image_region(texture,
+                                                                 src_x, src_y, src_w, src_h,
+                                                                 dst_x, y, dst_w, dst_h);
 #endif
+
+                                col += run;
+                        }
                 }
         }
 #endif /* WITH_SIXEL */
