@@ -431,6 +431,7 @@ private:
         void reclaim_image_spill(row_t before_row) noexcept;
 
         bool image_has_any_cell(vte::image::Image const* image) const noexcept;
+        void validate_image_cells() const;
         void drop_images_before(row_t row) noexcept;
         void drop_images_after(row_t row) noexcept;
         void drop_images_torn_by_rewrap(column_t columns) noexcept;
@@ -458,7 +459,8 @@ private:
         inline void sync_has_images() noexcept { m_has_images = !m_image_map.empty(); }
 
 public:
-        /* Check the image maps against the rows the ring actually holds.
+        /* Check the image maps against the rows the ring actually holds, and
+         * the cells that name an image against the image they name.
          *
          * validate() calls this, but only under VTE_DEBUG, which no shipping
          * build and no default test run enables - so gating the check itself on

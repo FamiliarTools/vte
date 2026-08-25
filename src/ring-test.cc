@@ -30,7 +30,9 @@
 
 #include "ring.hh"
 #include "vterowdata.hh"
+#include <map>
 #include <set>
+#include <utility>
 
 #include "cell.hh"
 #include "image-ref.hh"
@@ -69,6 +71,11 @@ static int const kCellHeight = 20;
  *     overcount is then paid for by evicting images that are still on screen.
  * (c) Indexing. The by-top map holds the same images as the priority map, each
  *     filed under the row it really starts at.
+ * (d) Anchoring. Every cell that names an image holds U+FFFC as one whole cell,
+ *     and sits exactly where its tile coordinate says that piece of the picture
+ *     belongs. The cells are what the draw walks and what every text-moving
+ *     operation moves; the rectangle is what every lifetime rule reads. They
+ *     have to say the same thing.
  */
 
 /* Append @n rows carrying one cell of text each, so that they are real rows
@@ -111,13 +118,19 @@ widen_row(Ring& ring,
                 _vte_row_data_append(data, &cell);
 }
 
-/* Place an image @rows_tall rows tall with its top at ring row @top, then end
- * its emission burst the way the sixel path does.
+/* Place an image @rows_tall rows tall and four cells wide, with its top left
+ * corner at ring row @top, column @left, then end its emission burst the way
+ * the sixel path does.
+ *
+ * @left has to be the column the caller then stamps at: the image's rectangle
+ * and the cells that carry it are two halves of one fact, and a fixture that
+ * puts them in different places is not a state the terminal can produce.
  */
 static void
 place_image(Ring& ring,
             long top,
-            int rows_tall)
+            int rows_tall,
+            long left = 0)
 {
         auto const width_px = 4 * kCellWidth;
         auto const height_px = rows_tall * kCellHeight;
@@ -126,7 +139,7 @@ place_image(Ring& ring,
 
         ring.append_image(std::move(surface),
                           width_px, height_px,
-                          0, top,
+                          left, top,
                           kCellWidth, kCellHeight);
         ring.set_placing_image(nullptr);
 
@@ -1096,6 +1109,111 @@ test_ring_image_anchor_follows_the_cells(void)
         g_assert_false(ring.find_image_anchor(vte::image::k_ref_pool_id_none, &row, &col));
 }
 
+/* Collect the screen positions of the cells that name @id, as tile coordinate
+ * to position, so a test can say where each piece of a picture ended up.
+ */
+static std::map<std::pair<uint32_t, uint32_t>, std::pair<long, long>>
+image_cell_positions(Ring& ring,
+                     uint32_t id)
+{
+        auto found = std::map<std::pair<uint32_t, uint32_t>, std::pair<long, long>>{};
+
+        for (auto r = long(ring.delta()); r < long(ring.next()); r++) {
+                auto const* const row = ring.index(r);
+                if (row == nullptr)
+                        continue;
+
+                for (auto c = 0; c < row->len; c++) {
+                        auto const& attr = row->cells[c].attr;
+                        if (!attr.image())
+                                continue;
+
+                        auto const ref = attr.image_ref();
+                        if (ref.pool_id() != id)
+                                continue;
+
+                        found[{ref.tile_row(), ref.tile_col()}] = {r, c};
+                }
+        }
+
+        return found;
+}
+
+static void
+test_ring_image_cells_stay_with_their_image(void)
+{
+        /* The other half of anchoring: the cells and the image's rectangle
+         * have to keep saying the same thing.
+         *
+         * find_image_anchor() asks the cells where the picture is, while every
+         * lifetime rule - which images an erase reaches, which the scrollback
+         * has taken, which a reflow tears apart - asks the rectangle. Let the
+         * two drift apart and a picture is drawn in one place and reasoned
+         * about in another: it survives an erase that covered it, and dies of
+         * one that did not. Ring::validate_images() is where that is stated;
+         * this is the state that gives the statement something to say.
+         */
+        auto const top = long{5};
+        auto const left = long{2};
+        auto const rows_tall = 3;
+        auto const cols_wide = 4;    /* place_image() makes the image this wide. */
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        for (auto r = top; r < top + rows_tall; r++)
+                widen_row(ring, r, left + cols_wide);
+
+        place_image(ring, top, rows_tall, left);
+        auto* const image = ring.image_map().begin()->second.get();
+        auto const id = image->get_pool_id();
+
+        ring.set_placing_image(image);
+        for (auto r = 0; r < rows_tall; r++)
+                ring.stamp_image_row(top + r, left, cols_wide, r);
+        ring.set_placing_image(nullptr);
+
+        /* The fixture before the assertion it exists for: every tile of a
+         * footprint several rows tall and several columns wide is really
+         * carried by a cell, and the picture starts at a column that is NOT
+         * zero - at column zero a rectangle with the wrong left still agrees
+         * with a cell whose tile column is zero, and the check would pass
+         * without ever comparing anything.
+         */
+        auto const expect_footprint = [&](auto const& found,
+                                          long first_row) {
+                g_assert_cmpuint(found.size(), ==, rows_tall * cols_wide);
+
+                for (auto r = 0; r < rows_tall; r++) {
+                        for (auto c = 0; c < cols_wide; c++) {
+                                auto const it = found.find({uint32_t(r), uint32_t(c)});
+                                g_assert_true(it != found.end());
+                                g_assert_cmpint(it->second.first, ==, first_row + r);
+                                g_assert_cmpint(it->second.second, ==, left + c);
+                        }
+                }
+        };
+
+        expect_footprint(image_cell_positions(ring, id), top);
+        g_assert_cmpint(image->get_top(), ==, top);
+        g_assert_cmpint(image->get_left(), ==, left);
+
+        ring.validate_images();
+
+        /* Now push a row in above it. Ring::insert() knows nothing about
+         * images: it moves rows, the cells go with them, and the image has to
+         * end up describing where they went.
+         */
+        ring.insert(top, 0);
+
+        expect_footprint(image_cell_positions(ring, id), top + 1);
+
+        ring.validate_images();
+        g_assert_cmpint(image->get_top(), ==, top + 1);
+        g_assert_cmpint(image->get_left(), ==, left);
+}
+
 
 static void
 test_ring_image_reference_survives_freeze(void)
@@ -1298,13 +1416,14 @@ test_ring_image_covers_every_cell_it_claims(void)
         for (auto r = top; r < top + rows_tall; r++)
                 widen_row(ring, r, width);
 
-        place_image(ring, top, rows_tall);
+        place_image(ring, top, rows_tall, left);
         auto* image = ring.image_map().begin()->second.get();
 
         ring.set_placing_image(image);
         for (auto r = 0; r < rows_tall; r++)
                 ring.stamp_image_row(top + r, left, cols_wide, r);
         ring.set_placing_image(nullptr);
+        ring.validate_images();
 
         /* The fixture before the assertion it is there to support: the stamped
          * footprint really does span several distinct rows and several distinct
@@ -1869,6 +1988,7 @@ main(int argc,
         g_test_add_func("/vte/ring/image-pool/sweep-sees-cell-references", test_ring_image_sweep_sees_cell_references);
 
         g_test_add_func("/vte/ring/image-pool/anchor-follows-the-cells", test_ring_image_anchor_follows_the_cells);
+        g_test_add_func("/vte/ring/image-pool/cells-stay-with-their-image", test_ring_image_cells_stay_with_their_image);
 
         g_test_add_func("/vte/ring/image-pool/reference-survives-freeze", test_ring_image_reference_survives_freeze);
         g_test_add_func("/vte/ring/image-pool/reference-rebinds-after-thaw", test_ring_image_reference_rebinds_after_thaw);
