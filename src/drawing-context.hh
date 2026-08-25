@@ -226,6 +226,22 @@ public:
                                                   int height,
                                                   vte::color::rgb const* color) const = 0;
 
+        /* Draw a raster image, scaled to fill the given rectangle. Unlike the
+         * rest of the drawing primitives the extent is fractional, because the
+         * image's display size is derived from a cell-size ratio and snapping
+         * it to whole pixels would leave a gap at the right/bottom edge.
+         */
+        virtual void draw_image(
+#if VTE_GTK == 3
+                                cairo_surface_t* surface,
+#elif VTE_GTK == 4
+                                GdkTexture* texture,
+#endif
+                                int x,
+                                int y,
+                                double width,
+                                double height) const = 0;
+
         void draw_undercurl(int x,
                             double y,
                             double line_width,

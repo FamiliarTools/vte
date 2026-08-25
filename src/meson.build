@@ -937,17 +937,20 @@ if get_option('sixel')
 
   test_sixel_sources = config_sources + debug_sources + glib_glue_sources + sixel_parser_sources + sixel_context_sources + files(
     'cairo-glue.hh',
+    'image.hh',
     'sixel-test.cc',
     'vtedefines.hh',
   )
 
   test_sixel_deps = [
+    cairo_dep,
     fmt_dep,
     glib_dep,
   ]
 
   test_sixel = executable(
     'test-sixel',
+    cpp_args: ['-DVTE_GTK=0'],
     sources: test_sixel_sources,
     dependencies: test_sixel_deps,
     include_directories: top_inc,

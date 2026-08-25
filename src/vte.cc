@@ -10147,6 +10147,9 @@ Terminal::draw(cairo_region_t const* region) noexcept
         int allocated_width, allocated_height;
         int extra_area_for_cursor;
         bool text_blink_enabled_now;
+#if WITH_SIXEL
+        auto const ring = m_screen->row_data;
+#endif
         auto now_ms = int64_t{0};
 
         allocated_width = get_allocated_width();
@@ -10189,6 +10192,54 @@ Terminal::draw(cairo_region_t const* region) noexcept
                                                     allocated_height - m_border.top - m_border.bottom};
         m_draw.clip_border(&vert_clip);
 
+#if WITH_SIXEL
+        /* Draw images.
+         *
+         * The images go above the widget background cleared above, and below
+         * the cell backgrounds and the text that draw_rows() paints further
+         * down: insert_image() erased the cells the image covers, and
+         * draw_rows() does not paint a background for cells that have the
+         * default background colour, so the image shows through them. Cells
+         * given an explicit background (SGR, selection) do overdraw it.
+         */
+        if (m_images_enabled) {
+                auto const top_row = first_displayed_row();
+                auto const bottom_row = last_displayed_row();
+
+                for (auto const& [priority, image] : ring->image_map()) {
+                        if (image->get_bottom() < top_row ||
+                            image->get_top() > bottom_row)
+                                continue;
+
+                        /* Note that the position must be computed the same way
+                         * draw_rows() computes it, or the image drifts against
+                         * the text it was drawn between while smooth scrolling.
+                         */
+                        auto const x = int(image->get_left() * m_cell_width);
+                        auto const y = int(row_to_pixel(image->get_top()));
+                        auto const width = image->get_width_pixels(m_cell_width);
+                        auto const height = image->get_height_pixels(m_cell_height);
+
+#if VTE_GTK == 3
+                        /* Clear cell extent; image may be slightly smaller */
+                        m_draw.clear(x, y,
+                                     image->get_width() * m_cell_width,
+                                     image->get_height() * m_cell_height,
+                                     get_color(ColorPaletteIndex::default_bg()),
+                                     m_background_alpha);
+
+                        m_draw.draw_image(image->get_surface(),
+                                          x, y, width, height);
+#elif VTE_GTK == 4
+                        /* No need to clear the cell extent first: the widget
+                         * background node above already covers it.
+                         */
+                        if (auto const texture = image->get_texture())
+                                m_draw.draw_image(texture, x, y, width, height);
+#endif
+                }
+        }
+#endif /* WITH_SIXEL */
 
         /* Whether blinking text should be visible now */
         m_text_blink_state = true;

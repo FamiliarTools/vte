@@ -28,6 +28,7 @@
 
 #include <glib.h>
 
+#include "image.hh"
 #include "sixel-parser.hh"
 #include "sixel-context.hh"
 
@@ -1572,6 +1573,69 @@ test_context_image_compositing(void)
         g_assert_cmpuint(size_t(data - pixels.get()), <=, size);
 }
 
+// Image geometry tests
+
+static auto
+make_image(int width_pixels,
+           int height_pixels,
+           int cell_width,
+           int cell_height)
+{
+        /* The geometry is independent of the pixels, so no surface is needed. */
+        return vte::image::Image{vte::Freeable<cairo_surface_t>{},
+                                 0 /* priority */,
+                                 width_pixels,
+                                 height_pixels,
+                                 0 /* col */,
+                                 0 /* row */,
+                                 cell_width,
+                                 cell_height};
+}
+
+static void
+test_image_cell_extent(void)
+{
+        /* The cell footprint is rounded up: a partially covered cell still
+         * belongs to the image. */
+        auto const exact = make_image(100, 40, 10, 20);
+        g_assert_cmpint(exact.get_width(), ==, 10);
+        g_assert_cmpint(exact.get_height(), ==, 2);
+        g_assert_cmpint(exact.get_bottom(), ==, 1);
+
+        auto const partial = make_image(101, 41, 10, 20);
+        g_assert_cmpint(partial.get_width(), ==, 11);
+        g_assert_cmpint(partial.get_height(), ==, 3);
+        g_assert_cmpint(partial.get_bottom(), ==, 2);
+}
+
+static void
+test_image_display_size(void)
+{
+        auto const epsilon = 1e-9;
+        auto const image = make_image(100, 40, 10, 20);
+
+        /* At the cell size the image was created with, it is displayed at its
+         * native pixel size. */
+        g_assert_cmpfloat_with_epsilon(image.get_width_pixels(10), 100., epsilon);
+        g_assert_cmpfloat_with_epsilon(image.get_height_pixels(20), 40., epsilon);
+
+        /* When the cells grow, the image grows with them, so that it keeps
+         * covering the same cells. */
+        g_assert_cmpfloat_with_epsilon(image.get_width_pixels(20), 200., epsilon);
+        g_assert_cmpfloat_with_epsilon(image.get_height_pixels(60), 120., epsilon);
+
+        /* Non-integral ratios are not rounded. */
+        g_assert_cmpfloat_with_epsilon(image.get_width_pixels(15), 150., epsilon);
+        g_assert_cmpfloat_with_epsilon(image.get_height_pixels(21), 42., epsilon);
+
+        /* Only the cell size the image was created with matters, not the
+         * number of cells it covers, so a partially covered cell does not
+         * stretch the image. */
+        auto const partial = make_image(101, 41, 10, 20);
+        g_assert_cmpfloat_with_epsilon(partial.get_width_pixels(10), 101., epsilon);
+        g_assert_cmpfloat_with_epsilon(partial.get_height_pixels(20), 41., epsilon);
+}
+
 // Main
 
 int
@@ -1602,6 +1666,8 @@ main(int argc,
         g_test_add_func("/vte/sixel/context/image/stride", test_context_image_stride);
         g_test_add_func("/vte/sixel/context/image/palette", test_context_image_palette);
         g_test_add_func("/vte/sixel/context/image/compositing", test_context_image_compositing);
+        g_test_add_func("/vte/sixel/image/cell-extent", test_image_cell_extent);
+        g_test_add_func("/vte/sixel/image/display-size", test_image_display_size);
 
         return g_test_run();
 }
