@@ -303,8 +303,7 @@ Context::prepare(int id,
                  unsigned bg_green,
                  unsigned bg_blue,
                  bool bg_transparent,
-                 bool private_color_registers,
-                 double pixel_aspect) noexcept
+                 bool private_color_registers) noexcept
 {
         m_id = id;
         m_introducer = introducer;
@@ -314,6 +313,8 @@ Context::prepare(int id,
 
         if (private_color_registers)
                 reset_colors();
+
+        m_bg_transparent = bg_transparent;
 
         if (bg_transparent)
                 m_colors[0] = 0u; /* fully transparent */

@@ -126,6 +126,37 @@ def cursor_right(s, enable):
     return ('\x1b[?8452' + ('h' if enable else 'l')) + s + 'M' + '\x1b[23;1H'
 
 
+def oversized_raster(transparent):
+    """A few rows of data under a hugely oversized DECGRA raster.
+
+    P2=1 makes colour 0 transparent, so the declared 600x600 raster is
+    never painted; the image should occupy only the rows its DATA needs.
+    P2=0 fills that area with the background, so the raster is real and
+    must be honoured.
+
+    The trailing marker shows where the cursor ended up, which is how the
+    occupied height is visible in a still frame.
+    """
+    p2 = 1 if transparent else 0
+    # An explicit SGR background is required for the opaque case to BE
+    # opaque: VTE degrades P2=0/2 to transparent whenever the SGR background
+    # is the default one, deliberately, so that a background image shows
+    # through. With the default background both cases would be transparent
+    # and this pair could not tell them apart.
+    out = [] if transparent else ['\x1b[41m']
+    out.append('\x1bP0;%d;0q' % p2)
+    out.append('#1;2;80;20;20')
+    out.append('"1;1;600;600')          # DECGRA: absurd raster
+    for row in range(2):                # two sixel rows = 12 px of data
+        out.append('#1' + chr(63 + 0b111111) * 60)
+        if row == 0:
+            out.append('-')
+    out.append('\x1b\\')
+    out.append('M')
+    out.append('\x1b[23;1H')
+    return ''.join(out)
+
+
 if __name__ == '__main__':
     b = bands_six()
     open('bands.six', 'w').write(b)
@@ -135,4 +166,6 @@ if __name__ == '__main__':
     open('bands-truncated.six', 'w').write(truncated(b))
     open('cursor-right-on.six', 'w').write(cursor_right(b, True))
     open('cursor-right-off.six', 'w').write(cursor_right(b, False))
+    open('raster-transparent.six', 'w').write(oversized_raster(True))
+    open('raster-opaque.six', 'w').write(oversized_raster(False))
     print('wrote bands.six (%d bytes), bands-gch.six, bands-margin.six' % len(b))

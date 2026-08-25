@@ -89,20 +89,39 @@ private:
         unsigned m_width{0};
         unsigned m_height{0};
 
+        /* Whether colour 0 is fully transparent, i.e. P2=1. */
+        bool m_bg_transparent{false};
+
 public:
 
         constexpr auto max_width()  const noexcept { return k_max_width;  }
         constexpr auto max_height() const noexcept { return k_max_height; }
         constexpr auto num_colors() const noexcept { return k_num_colors;  }
 
+        /* The image's extent.
+         *
+         * DECGRA's raster dimensions declare an area to be FILLED with colour
+         * 0. When colour 0 is opaque that area is real - it is painted, and
+         * the image genuinely occupies it, so a raster larger than the data
+         * wins.
+         *
+         * When P2=1 makes colour 0 fully transparent, nothing is painted
+         * there. Honouring the raster then makes an image that declares
+         * "1;1;1000;1000" and sends twenty rows of data occupy a thousand
+         * pixels of rows - erasing the cells under them and pushing the
+         * cursor far down the screen - to display nothing at all. So the
+         * extent is the extent of the DATA.
+         *
+         * DEC STD 070 7.2 / 8.1.2; foot trims the same case.
+         */
         constexpr auto image_width() const noexcept
         {
-                return std::max(m_width, m_raster_width);
+                return m_bg_transparent ? m_width : std::max(m_width, m_raster_width);
         }
 
         constexpr auto image_height() const noexcept
         {
-                return std::max(m_height, m_raster_height);
+                return m_bg_transparent ? m_height : std::max(m_height, m_raster_height);
         }
 
 private:
@@ -557,12 +576,22 @@ private:
                     m_scanlines_offsets[1] != m_scanlines_offsets[0])
                         return;
 
-                #if 0
-                /* VTE doesn't currently use the pixel aspect ratio */
-                auto const aspect_num = seq.param(0, 1, 1, 1 << 15 /* 32Ki */);
-                auto const aspect_den = seq.param(1, 1, 1, 1 << 15 /* 32Ki */);
-                auto const pixel_aspect = std::clamp(double(aspect_num) / double(aspect_den), 0.1, 10.0);
-                #endif
+                /* args[0] and args[1] are the pixel aspect ratio numerator
+                 * and denominator (Pan and Pad). VTE does not implement a
+                 * non-square pixel aspect: an image is drawn at the aspect
+                 * its pixels imply.
+                 *
+                 * Implementing it means scaling the decoded image vertically
+                 * by Pan/Pad, clamped to something sane, AND honouring the P1
+                 * parameter of the DECSIXEL introducer, which selects an
+                 * aspect from the table in DEC STD 070 7.1 and which DECGRA
+                 * overrides. Doing only one of the two is worse than doing
+                 * neither, because senders pick whichever they think is
+                 * supported.
+                 *
+                 * Until then the parameters are read and ignored, which is
+                 * what an unimplemented raster attribute should do.
+                 */
 
                 m_raster_width = seq.param(2, 0, 0, k_max_width);
                 m_raster_height = seq.param(3, 0, 0, k_max_height);
@@ -694,8 +723,7 @@ public:
                      unsigned bg_green,
                      unsigned bg_blue,
                      bool bg_transparent,
-                     bool private_color_registers,
-                     double pixel_aspect = 1.0) noexcept;
+                     bool private_color_registers) noexcept;
 
         void reset_colors() noexcept;
 

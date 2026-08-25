@@ -61,11 +61,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# A display number nobody else in a parallel test run is using.
-DISP=$((90 + (RANDOM % 60)))
-Xvfb ":$DISP" -screen 0 800x600x24 -nolisten tcp >/dev/null 2>&1 &
+# Let X pick a free display and TELL us which, rather than guessing a number.
+#
+# Guessing collides: meson runs these tests in parallel, so two of them can
+# choose the same display, one Xvfb then fails to start, and both capture the
+# same root window - which shows up as an intermittent golden mismatch in
+# whichever test lost the race. That is exactly how this first went flaky.
+Xvfb -displayfd 3 -screen 0 800x600x24 -nolisten tcp 3>"$WORK/display" >/dev/null 2>&1 &
 XPID=$!
-sleep 2
+
+for _ in $(seq 1 100); do
+        [ -s "$WORK/display" ] && break
+        sleep 0.1
+done
+DISP=$(cat "$WORK/display" 2>/dev/null)
+[ -n "$DISP" ] || { echo "SKIP: Xvfb did not report a display"; exit 77; }
 
 export DISPLAY=":$DISP"
 export GDK_BACKEND=x11
