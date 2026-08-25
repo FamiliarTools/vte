@@ -1821,26 +1821,22 @@ Ring::thaw_row(row_t position,
                                 _attrcpy(&attr, &attr_change.attr);
 
                                 if (G_UNLIKELY (has_image)) {
-                                        /* The pool id is deliberately DROPPED.
+                                        /* The pool id that was WRITTEN is
+                                         * deliberately dropped: it named an
+                                         * entry in an in-memory pool whose
+                                         * quarantine only tracks cells in the
+                                         * writable rows, so by the time this
+                                         * row is thawed that id may already
+                                         * have been reclaimed and handed to a
+                                         * different image - exactly the
+                                         * aliasing the pool exists to prevent.
                                          *
-                                         * It named an entry in an in-memory
-                                         * pool whose quarantine only tracks
-                                         * cells in the writable rows, so by
-                                         * the time this row is thawed that id
-                                         * may already have been reclaimed and
-                                         * handed to a different image -
-                                         * exactly the aliasing the pool exists
-                                         * to prevent. Keeping the tile
-                                         * coordinates and dropping the id
-                                         * gives a cell that still knows it is
-                                         * part of an image, and which resolves
-                                         * to no image rather than to the wrong
-                                         * one.
-                                         *
-                                         * Restoring the picture itself needs
-                                         * the pixels in the stream too, and a
-                                         * fresh id allocated here; that does
-                                         * not exist yet.
+                                         * The id used instead is the one the
+                                         * priority resolved to just above, or
+                                         * none when the picture is gone for
+                                         * good. Either way the cell keeps its
+                                         * tile coordinates, so it still knows
+                                         * which piece of an image it is.
                                          */
                                         attr.set_image_ref(vte::image::Ref{
                                                 stream_image_pool_id,
