@@ -222,6 +222,23 @@ if get_option('sixel')
       timeout: 120,
     )
 
+    # The render cases above are only worth their runtime if they can fail.
+    # This one breaks the comparison they read their verdict from and requires
+    # the runner to report that, rather than reading a comparison that did not
+    # run as a frame that matched.
+    test(
+      'sixel-render-gate-' + arm[0],
+      files(sixel_test_dir / 'render-gate-test.sh'),
+      args: [
+        arm[1].full_path(),
+        sixel_test_dir,
+        sixel_render_cases[0],
+        arm[0],
+      ],
+      depends: [arm[1]],
+      timeout: 120,
+    )
+
     foreach case: sixel_render_cases
       test(
         'sixel-render-' + case + '-' + arm[0],

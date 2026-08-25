@@ -70,6 +70,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A comparison that could not be MADE is a failure of this test, and is
+# reported apart from a frame that genuinely differs: one says the machine is
+# broken, the other says the renderer is. What neither may do is agree with
+# the golden by default. This test used to read any ImageMagick failure as an
+# empty difference and print PASS, so every bug it exists to catch was
+# invisible on a host where ImageMagick could not run at all.
+#
+# Not a skip: the tools were all found on PATH at the top of the run, so
+# failing here means one of them broke on real input, which is a result.
+broken_comparison() {
+        echo "FAIL: $CASE could not be compared: $1"
+        [ -s "$WORK/im.log" ] && sed 's/^/  /' "$WORK/im.log"
+        exit 1
+}
+
 # Let X pick a free display and TELL us which, rather than guessing a number.
 #
 # Guessing collides: meson runs these tests in parallel, so two of them can
@@ -138,7 +153,12 @@ if [ -r "$SRCDIR/$CASE.crop" ]; then
 else
         CROP=${VTE_TEST_CROP:-320x130+0+0}
 fi
-convert "$WORK/shot.png" -crop "$CROP" +repage "$WORK/crop.png" 2>/dev/null
+# Every ImageMagick step from here on reports its own failure and stops.
+# A step that did not run has produced no evidence about the rendering, and
+# the one thing it must never do is let the run continue to a verdict; see
+# broken_comparison below.
+convert "$WORK/shot.png" -crop "$CROP" +repage "$WORK/crop.png" 2>"$WORK/im.log" ||
+        broken_comparison "could not crop $CROP out of the captured frame"
 
 if [ "$UPDATE" = "--update-golden" ]; then
         cp "$WORK/crop.png" "$GOLDEN"
@@ -150,24 +170,48 @@ fi
 
 # Normalise both through the same pixel format before comparing, so a PNG
 # encoder difference cannot masquerade as a rendering difference.
-convert "$GOLDEN" -depth 8 -colorspace sRGB "$WORK/a.ppm"
-convert "$WORK/crop.png" -depth 8 -colorspace sRGB "$WORK/b.ppm"
+convert "$GOLDEN" -depth 8 -colorspace sRGB "$WORK/a.ppm" 2>"$WORK/im.log" ||
+        broken_comparison "could not read the golden $GOLDEN"
+convert "$WORK/crop.png" -depth 8 -colorspace sRGB "$WORK/b.ppm" 2>"$WORK/im.log" ||
+        broken_comparison "could not read the captured frame"
 
-DIFF=$(compare -metric AE "$WORK/a.ppm" "$WORK/b.ppm" null: 2>&1 | tr -d '\n')
+# Establish that the two frames are the same shape before believing anything
+# said about their contents. The difference composite below only covers the
+# overlap of the two, so a golden and a crop of different sizes come out of it
+# looking identical.
+SIZE_A=$(convert "$WORK/a.ppm" -format '%wx%h' info: 2>"$WORK/im.log") ||
+        broken_comparison "could not measure the golden"
+SIZE_B=$(convert "$WORK/b.ppm" -format '%wx%h' info: 2>"$WORK/im.log") ||
+        broken_comparison "could not measure the captured frame"
+# Nothing failed here, so do not quote ImageMagick's last words at it.
+: >"$WORK/im.log"
+[ "$SIZE_A" = "$SIZE_B" ] ||
+        broken_comparison "the frame is $SIZE_B where the golden is $SIZE_A"
+
+# ImageMagick prints the bounding box of the pixels that differ as WxH+X+Y,
+# and 0x0 when none do. It does NOT print an empty string for a match - only
+# for a run that failed - so a bbox that is not well formed is a comparison
+# that did not happen, never a frame that agrees with the golden.
 BBOX=$(convert "$WORK/a.ppm" "$WORK/b.ppm" -compose difference -composite \
-        -threshold 0 -format '%@' info: 2>/dev/null)
+        -threshold 0 -format '%@' info: 2>"$WORK/im.log") ||
+        broken_comparison "the difference of the two frames could not be taken"
 
-# An empty difference bounding box is ImageMagick's way of saying "no pixel
-# differs". Trust the bbox rather than the AE scalar, which is scaled oddly
-# for palette PNGs.
 case "$BBOX" in
-        ""|"0x0+0+0"|*"+"[0-9]*"+"[0-9]*)
-                if [ "${BBOX%%x*}" = "0" ] || [ -z "$BBOX" ]; then
-                        echo "PASS: $CASE renders identically to the golden"
-                        exit 0
-                fi
+        [0-9]*x[0-9]*+[0-9]*+[0-9]*) ;;
+        *) broken_comparison "the difference bounding box came back as '$BBOX'" ;;
+esac
+
+case "$BBOX" in
+        0x0+*)
+                echo "PASS: $CASE renders identically to the golden"
+                exit 0
                 ;;
 esac
+
+# Only a diagnostic for the report, so its own failure is not fatal here: the
+# bbox has already decided the verdict. AE is scaled oddly for palette PNGs,
+# which is why it is not what is trusted.
+DIFF=$(compare -metric AE "$WORK/a.ppm" "$WORK/b.ppm" null: 2>&1 | tr -d '\n')
 
 echo "FAIL: $CASE differs from the golden (AE=$DIFF bbox=$BBOX)"
 cp "$WORK/crop.png" "${GOLDEN%.png}.actual.png" 2>/dev/null
