@@ -169,15 +169,21 @@ endif
 # the right colours, clipped where it should be. The GTK4 draw arm was absent
 # for two years and no unit test noticed, because no unit test can.
 #
+# Run on every enabled arm, not just GTK4: the two draw the image through
+# different backends - a cairo surface against a GdkTexture - so a build with
+# only GTK3 enabled was the one running no draw-path test at all. The goldens
+# are per arm, since the toolkits offset the terminal differently inside the
+# captured window; see render-test.sh.
+#
 # The runner exits 77 (skip) when Xvfb or ImageMagick are absent, so a
 # sandboxed build without a display reports "skipped" rather than a failure it
 # could not tell apart from a real one.
-if get_option('sixel') and get_option('gtk4')
+if get_option('sixel')
   sixel_render_cases = [
     'bands',
     # Same image with a DECGCH spliced in. A command a VT340 does not
-    # implement must not displace the rest of the image, so this shares
-    # bands' golden BY DESIGN: the two must be pixel-identical.
+    # implement must not displace the rest of the image, so its golden is
+    # byte-identical to bands' BY DESIGN.
     'bands-gch',
     # Emitted so it overhangs the right margin. DEC STD 070 11.2.2: sixels
     # past the right margin are not printed.
@@ -195,25 +201,40 @@ if get_option('sixel') and get_option('gtk4')
     'raster-opaque',
   ]
 
-  test(
-    'sixel-xtsmgraphics',
-    files(meson.project_source_root() / 'src' / 'tests' / 'sixel' / 'xtsmgraphics-test.sh'),
-    args: [app_gtk4.full_path()],
-    depends: [app_gtk4],
-    timeout: 120,
-  )
+  sixel_test_apps = []
 
-  foreach case: sixel_render_cases
+  if get_option('gtk3')
+    sixel_test_apps += [['gtk3', app_gtk3,],]
+  endif # gtk3
+
+  if get_option('gtk4')
+    sixel_test_apps += [['gtk4', app_gtk4,],]
+  endif # gtk4
+
+  sixel_test_dir = meson.project_source_root() / 'src' / 'tests' / 'sixel'
+
+  foreach arm: sixel_test_apps
     test(
-      'sixel-render-' + case,
-      files(meson.project_source_root() / 'src' / 'tests' / 'sixel' / 'render-test.sh'),
-      args: [
-        app_gtk4.full_path(),
-        meson.project_source_root() / 'src' / 'tests' / 'sixel',
-        case,
-      ],
-      depends: [app_gtk4],
+      'sixel-xtsmgraphics-' + arm[0],
+      files(sixel_test_dir / 'xtsmgraphics-test.sh'),
+      args: [arm[1].full_path()],
+      depends: [arm[1]],
       timeout: 120,
     )
+
+    foreach case: sixel_render_cases
+      test(
+        'sixel-render-' + case + '-' + arm[0],
+        files(sixel_test_dir / 'render-test.sh'),
+        args: [
+          arm[1].full_path(),
+          sixel_test_dir,
+          case,
+          arm[0],
+        ],
+        depends: [arm[1]],
+        timeout: 120,
+      )
+    endforeach
   endforeach
 endif

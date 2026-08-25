@@ -196,7 +196,10 @@ codebase knows where an image is except the cells it covers.
 
 - `test-ring` and `test-sixel` under `meson test`, including a headless
   golden-frame render harness (`src/tests/sixel/`) whose fixtures are generated
-  by a checked-in script rather than being magic bytes.
+  by a checked-in script rather than being magic bytes. The harness runs on
+  every GTK arm the build enables, against a golden per arm: the same fixture
+  renders to the same pixels either way, but GTK4's client-side border offsets
+  the terminal inside the captured window and GTK3's does not.
 - Caveat on the render tests: a golden is a *pixel* comparison, and while the
   cells an image occupies are font-independent, the pixels are not. The harness
   pins `Monospace 12`, but fontconfig still resolves that to whatever your
