@@ -68,8 +68,21 @@ def splice_gch(s):
     return '-'.join(parts)
 
 
+def at_right_margin(s):
+    """bands.six emitted so that it overhangs the right margin.
+
+    DEC STD 070 11.2.2: "Sixels defined to be printed past the right margin
+    are not printed." The image is 96 px wide, which is several columns on
+    any cell the terminal can have, so starting it at column 76 of an 80
+    column screen leaves it overhanging: the part past the margin must be
+    discarded - not wrapped, not scaled to fit, not drawn over the edge.
+    """
+    return '\x1b[1;76H' + s
+
+
 if __name__ == '__main__':
     b = bands_six()
     open('bands.six', 'w').write(b)
     open('bands-gch.six', 'w').write(splice_gch(b))
-    print('wrote bands.six (%d bytes) and bands-gch.six' % len(b))
+    open('bands-margin.six', 'w').write(at_right_margin(b))
+    print('wrote bands.six (%d bytes), bands-gch.six, bands-margin.six' % len(b))

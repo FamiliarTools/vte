@@ -95,7 +95,16 @@ import -window root "$WORK/shot.png" 2>/dev/null || {
 # bleeds colour into neighbouring cells is still "drawn correctly" by any
 # measure taken inside its own rectangle. So compare a region about three
 # times the image's width and include the rows below it.
-CROP=${VTE_TEST_CROP:-320x130+0+0}
+# A case may need a different region - one testing the right margin has to
+# look at the right margin. It lives in <case>.crop next to the fixture, so
+# the golden and the region that produced it travel together; a crop passed
+# only through the environment silently mismatches whatever regenerated the
+# golden, which is exactly how this first failed.
+if [ -r "$SRCDIR/$CASE.crop" ]; then
+        CROP=$(cat "$SRCDIR/$CASE.crop")
+else
+        CROP=${VTE_TEST_CROP:-320x130+0+0}
+fi
 convert "$WORK/shot.png" -crop "$CROP" +repage "$WORK/crop.png" 2>/dev/null
 
 if [ "$UPDATE" = "--update-golden" ]; then

@@ -3760,11 +3760,55 @@ Terminal::insert_image(ProcessingContext& context,
          */
         auto const [image_cell_w, image_cell_h] = image_cell_size();
 
-        auto const width = (image_width_px + image_cell_w - 1) / image_cell_w;
+        /* DEC STD 070 11.2.2: "Sixels defined to be printed past the right
+         * margin are not printed."
+         *
+         * Discard the overhanging pixels HERE, rather than clipping at draw
+         * time, so that the surface, the cell footprint and the run of cells
+         * erased underneath all describe the same rectangle. They are
+         * consulted independently - by the draw, by the lifetime rules and by
+         * erase_image_rect - and an image whose extent disagrees with its
+         * cells is an image the two halves of the code will treat
+         * differently.
+         *
+         * It is also a precondition for cell-anchored storage: a tile column
+         * past the right margin has no cell to live in.
+         */
+        auto const clipped_width_px =
+                vte::image::clipped_width_px(image_width_px,
+                                             long(left),
+                                             long(m_column_count),
+                                             image_cell_w);
+        if (clipped_width_px <= 0)
+                return;
+
+        if (clipped_width_px < image_width_px) {
+                /* Copy out the part that fits. Squeezing the whole surface
+                 * into a narrower box would scale the image instead of
+                 * truncating it, which is a different picture, not a clipped
+                 * one.
+                 */
+                auto cropped = vte::take_freeable
+                        (cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+                                                    int(clipped_width_px),
+                                                    image_height_px));
+                if (cairo_surface_status(cropped.get()) != CAIRO_STATUS_SUCCESS)
+                        return;
+
+                auto cr = vte::take_freeable(cairo_create(cropped.get()));
+                cairo_set_operator(cr.get(), CAIRO_OPERATOR_SOURCE);
+                cairo_set_source_surface(cr.get(), image_surface.get(), 0, 0);
+                cairo_paint(cr.get());
+                cairo_surface_flush(cropped.get());
+
+                image_surface = std::move(cropped);
+        }
+
+        auto const width = (clipped_width_px + image_cell_w - 1) / image_cell_w;
         auto const height = (image_height_px + image_cell_h - 1) / image_cell_h;
 
         m_screen->row_data->append_image(std::move(image_surface),
-                                         image_width_px,
+                                         clipped_width_px,
                                          image_height_px,
                                          left,
                                          top,
