@@ -1,0 +1,306 @@
+╔═════════════════════╗
+║ VTE images (SIXEL)  ║
+╚═════════════════════╝
+
+This describes how an image received via SIXEL is stored, moved, drawn and
+freed. Only the model is here; the SIXEL parser itself is in sixel-parser.hh
+and sixel-context.cc and is not discussed.
+
+Every statement below is meant to be checkable against the code or against a
+test in src/ring-test.cc, src/image-contract-test.cc or src/tests/sixel/. Where
+a test names the behaviour, its name is given.
+
+
+The cell is the image
+═════════════════════
+
+An image is not an object floating over the grid at a pixel position. It is a
+rectangle of CELLS, and each of those cells carries, in its own attributes, the
+name of the piece of the picture it holds.
+
+Three things make up that name, and they are packed into exactly 32 bits, which
+is the width of VteCellAttr::m_link:
+
+	pool_id  : 14	which image
+	tile_row :  9	which cell row OF THAT IMAGE this cell is
+	tile_col :  9	which cell column OF THAT IMAGE this cell is
+
+See vte::image::Ref in src/image-ref.hh. The tile coordinates are relative to
+the image and never to the screen, so a cell keeps naming the same piece of the
+picture wherever its row is moved to. pool_id 0 is reserved for "no image", so
+a zeroed reference names nothing (/vte/image/ref/zero-is-not-an-image).
+
+The widths are not arbitrary. They cover the largest image the parser will
+admit, laid out against the smallest cell it may be laid out against:
+
+	cols = ceil(VTE_SIXEL_MAX_WIDTH  / VTE_SIXEL_CELL_MIN_WIDTH)
+	rows = ceil(VTE_SIXEL_MAX_HEIGHT / VTE_SIXEL_CELL_MIN_HEIGHT)
+
+which at 2048x2052 over a 4x8 minimum cell is 512 columns and 257 rows, both
+inside 9 bits. static_asserts in image-ref.hh hold this, and
+/vte/image/ref/covers-max-legal-image exercises it.
+
+m_link is a discriminated union: the same 32 bits are either a hyperlink index
+or an image reference. VTE_ATTR_IMAGE (src/attr.hh) is the tag. It is a real
+attribute bit, so it is persisted with the rest of the attributes when a row is
+frozen, and the reader can tell which member is live without any out-of-band
+state. It sits deliberately OUTSIDE VTE_ATTR_ALL_SGR_MASK so that
+reset_sgr_attributes() cannot strip the tag off a cell whose m_link still holds
+an image reference, which would reinterpret those bits as a hyperlink index
+(/vte/cell/attr/image-tag-survives-sgr-reset). The union is reached only
+through accessors that assert on the tag - hyperlink_idx() asserts !image(),
+image_ref_raw() asserts image() - so a caller that has not decided which one it
+is holding does not compile into a silent misread.
+
+The cell's character is U+FFFC OBJECT REPLACEMENT CHARACTER. Placing an image
+erases the cells in its area and writes U+FFFC into them
+(/vte/ring/image-pool/cells-hold-object-replacement). Two consequences follow
+from that one choice. The cell is never EMPTY, which matters because an empty
+cell is indistinguishable from one the image never covered, and the ring uses
+cell contents to decide what a row still holds. And clipboard, selection and
+the screen reader are correct by construction: they read the character, and
+U+FFFC is the character the Unicode standard has for "an object is here".
+
+The converse is enforced in the other direction too. cell_for_copy() in
+vteseq.cc drops both the reference and the U+FFFC when a cell is copied, so a
+copy never claims a tile of an image whose pixels are somewhere else.
+
+
+The stripe
+══════════
+
+A STRIPE is one tile row of one image: same pool_id, same tile_row. Ref has
+same_stripe() for it (/vte/image/ref/stripe-identity).
+
+The stripe is the unit of a RUN, in two places:
+
+  - VteCellAttr::same_for_stream() (src/cell.hh) treats two image cells as
+    sharing an attribute record when they are in the same stripe. The tile
+    COLUMN is deliberately not part of that test: a stripe is contiguous, so
+    the column is recovered on thaw by counting from the run's first cell, and
+    including it would encode what the reader can derive.
+
+  - the GTK4 draw (src/vte.cc) extends a draw run over cells of the same stripe
+    whose tile columns are still consecutive, and stops at a gap, because a gap
+    means a cell in the middle was overwritten and must not be painted.
+
+The stripe is NOT the unit of lifetime. Lifetime is per IMAGE: m_image_map,
+image_gc() and drop_images_before() all work on whole Images. Nothing in the
+tree frees one tile row of an image and keeps another.
+
+
+Where the bytes live
+════════════════════
+
+The ring already has three streams for scrollback - text, attr and row - and
+the image model adds to both of those layers rather than inventing a cache
+directory.
+
+The image REFERENCE goes into the ATTR stream. An attribute record is a
+CellAttrChange, then the hyperlink data, then two bytes repeating the hyperlink
+length so the record can be walked backwards. That trailing length has to stay
+last, because thaw_row()'s truncating pass walks the stream backwards and reads
+it at (offset - 2). So the image reference cannot simply be appended after it.
+Instead the trailer carries the flag: hyperlink lengths are bounded far below
+0x8000 by VTE_HYPERLINK_TOTAL_LENGTH_MAX, so the high bit is free and says
+whether a StreamImageRef (src/ring.hh) precedes the trailer. The record stays
+self-describing in both directions, and attr_record_stride() is the one place
+the stride is computed, because eight sites walk these records and a stride
+that disagrees between any two of them corrupts the scrollback silently.
+
+The StreamImageRef identifies the image by its PRIORITY, not by its pool id. A
+pool id is an index into an in-memory table and is reused once a sweep reclaims
+it, so a frozen row holding one could come back pointing at a different image.
+The priority comes from a monotonically increasing counter and is never reused
+(/vte/ring/image-pool/reference-rebinds-after-thaw).
+
+The PIXELS get a fourth stream, m_image_stream. When an image is evicted for
+memory while rows that name it can still be thawed back, its pixels are written
+there rather than thrown away, and read back when the user scrolls to them
+(/vte/ring/image/pixels-survive-eviction). It is a VteStream like the other
+three, so this costs one more fd and no new on-disk layout.
+
+
+Why an Image keeps a rectangle
+══════════════════════════════
+
+Every pixel decision reads the cells and only the cells. The draw walks the
+cells of the rows on screen and places each run from its tile coordinate and
+its visual column; a write takes cells back from an image one at a time.
+Nothing on that path consults Image::get_top() / get_left(), and it must not,
+or a reordered or partially overwritten run gets painted where the cells are
+not.
+
+The rectangle an Image stores is a different thing: it is the ring's index of
+WHICH ROWS an image occupies. It exists because the ring's rows are not all
+cells - at m_writable they stop being memory and become bytes in the text and
+attr streams. drop_images_before(), image_is_recoverable() and the spill all
+have to answer for exactly those rows, and no cell in memory can answer for
+them. find_image_anchor(), which does derive the position from the cells, finds
+nothing at all for an image whose rows have all frozen, so an image derived
+that way would be freed while the user could still scroll back to it.
+/vte/ring/image/rectangle-answers-for-frozen-rows holds the ring in that state.
+
+Deriving it by reading the frozen rows back IS possible, and that is what the
+rectangle buys off: drop_images_before() runs once per line the terminal
+scrolls, and a scan-based version would thaw rows out of the streams on every
+one of those lines. What is checked in is the floor, not a speedup figure:
+/vte/ring/image/dropping-a-frozen-image-reads-no-row scrolls an image whose
+every row is frozen all the way out and asserts the ring thawed no row doing
+it. There is no benchmark in the tree and no timings are quoted here.
+
+The rectangle index is also the only ORDERED structure over images:
+m_image_by_top_map is keyed by top row, and drop_images_before() stops at the
+first entry keyed at or after the row it is dropping.
+
+The two representations are kept from drifting by two things. Only whole-row
+moves update the rectangle, and reanchor_image() is the only mover, so the
+rectangle and the key it is filed under cannot be updated one without the
+other. And image_invariant_violation() checks the agreement in both directions:
+every cell naming an image sits where that image's rectangle puts it, and every
+image the writable rows can answer for still has a cell.
+
+
+Rewrap
+══════
+
+Ring::rewrap() rebuilds the ROW stream only. The text and attr streams are not
+rewritten, so the image reference and the U+FFFC that a cell carries survive
+reflow without rewrap knowing anything about them: the reference is in the attr
+stream, the tile coordinates are relative to the image, and the cell comes back
+out of the same bytes it went in as. That much is free.
+
+The ring's own index is not free, and rewrap does three explicit things for it
+(all under WITH_SIXEL in Ring::rewrap):
+
+  - drop_images_torn_by_rewrap() runs FIRST, before anything is re-anchored, so
+    the walk that follows only ever sees survivors. An image is a rectangle of
+    physical rows and a reflow is precisely the operation that changes how many
+    physical rows a paragraph occupies. re-anchoring moves an image's top row
+    and leaves its height alone, which is right only when every covered row
+    comes through the reflow the same way the top does - that is, when it is a
+    hard-wrapped paragraph of its own that is no wider than the new width. The
+    row ABOVE the top is held to the same rule, since a paragraph continuing
+    into the image's first row rewrites that row too. Anything else, the image
+    is deleted. Keeping it would mean keeping an image that no longer lines up
+    with the text it was emitted next to, and text is painted over images, so
+    that reads as corruption.
+
+  - rewrap_images_in_range() re-anchors each surviving image's top to its new
+    row as the paragraphs are rebuilt.
+
+  - rebuild_image_top_map() then re-keys m_image_by_top_map, and only after
+    that can drop_images_before(m_start) run, because it walks the map in key
+    order and the keys are the new row numbers only once the map is rebuilt.
+
+/vte/ring/rewrap-with-images covers this.
+
+
+Pixels and textures
+═══════════════════
+
+An Image owns one cairo image surface in CAIRO_FORMAT_ARGB32, which is what
+sixel-context.cc produces. It is device-independent: the Image also stores the
+cell width and height it was LAID OUT against, fixed at placement, and the draw
+addresses the image in that grid rather than in the terminal's current one, so
+an image restored from the scrollback keeps the scale it was placed at
+(/vte/image/geometry-follows-layout-cell). Display size is computed from the
+current cell separately, so the image goes on covering the same cells
+(/vte/sixel/image/display-size).
+
+The Images themselves are owned by the Ring, in m_image_map keyed by priority,
+with ids handed out by a Ring-owned pool (src/image-pool.hh). An id outlives
+the image it named until a sweep confirms no cell still refers to it, which is
+what stops a freed image's id from being handed to a new image while a
+scrollback cell still points at it (/vte/image/pool/no-reuse-before-sweep,
+/vte/ring/image-pool/sweep-sees-cell-references).
+
+On GTK4 a GdkTexture is created lazily from that surface and cached on the
+Image, sharing the surface's pixel buffer rather than copying it, so
+resource_size() stays truthful and the ring's image GC remains the only
+eviction mechanism needed. There is no separate texture cache and no
+scale-keyed variant: the texture is one per Image, and scaling to the display
+size is the drawing context's job.
+
+
+═══════════
+The prices
+═══════════
+
+These are real, they are visible to users, and they are not worked around
+anywhere in the tree.
+
+
+Sideways movement deletes the image
+───────────────────────────────────
+
+Nothing in the ring can express "these cells and this bitmap move together".
+The rectangle index is updated only by whole-row moves. So every operation that
+moves cells WITHIN a row erases the image over the affected region instead of
+following it:
+
+	ICH, DCH		via scroll_text_right() / scroll_text_left()
+	SL, SR			via the same
+	insert mode		via scroll_text_right()
+	partial-width region scroll	scroll_text_up() / _down(), else branch
+
+Each of those calls erase_images_in_rect() over the region before it memmoves
+the cells; see src/vte.cc. This is why the image position has a set_top() and
+no set_left(): the column is fixed at placement and never moves.
+
+A full-width row scroll is fine, and a whole-row insert or remove is fine.
+Running `ls` in a pane and having something ICH into the row an image sits on
+is not.
+
+
+image_gc has a count cap the public API does not mention
+────────────────────────────────────────────────────────
+
+image_gc() (src/ring.cc) evicts while EITHER
+
+	m_image_fast_memory_used > m_image_memory_max
+
+or
+
+	m_image_map.size() > IMAGE_FAST_COUNT_MAX
+
+IMAGE_FAST_COUNT_MAX is 4096 and is a #define in ring.cc. The public API -
+vte_terminal_set_image_limit(), the "image-limit" property - is documented
+purely in bytes and says nothing about a count. An embedder that sets a large
+byte limit and sends many small images will still see eviction at 4097 images,
+with nothing in the API to tell it why.
+
+
+An image evicted before it reaches the scrollback loses its pixels
+─────────────────────────────────────────────────────────────────
+
+image_is_recoverable() is true only when the image's bottom row is below
+m_writable, that is, when every row naming it has frozen. thaw_row() is the one
+caller of restore_image(), so an image can be read back exactly when every row
+that names it is frozen; a row still in the writable window is never thawed and
+its cells are drawn straight out of the array.
+
+image_gc() therefore prefers a recoverable victim, and takes an unrecoverable
+one only when nothing recoverable is left - otherwise a screenful of images
+would raise the limit to whatever it happened to need
+(/vte/ring/image/limit-spares-the-unrecoverable). When it does take one, that
+image's pixels are gone for good, and gone for the scrollback too: the
+reference the row freezes later resolves through the pool to an image that is
+no longer in it, and the cells draw as background.
+
+vte_terminal_set_image_limit()'s documentation does state this.
+
+
+DECSDM is unimplemented
+───────────────────────
+
+Nothing reads sixel display mode - images always scroll. The mode therefore
+answers 4, permanently reset, rather than 2, settable. Answering "settable"
+would tell a sender it may set a rule we then do not follow. Held by
+src/tests/sixel/xtsmgraphics-test.sh, which asserts the reply to
+
+	CSI ? 80 $ p
+
+is
+
+	CSI ? 80 ; 4 $ y
