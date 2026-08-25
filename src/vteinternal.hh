@@ -1753,6 +1753,55 @@ public:
         void erase_image_rect(vte::grid::row_t rows,
                               vte::grid::column_t columns);
 
+#if WITH_SIXEL
+        void erase_images_in_rect_slow(vte::grid::row_t top,
+                                       vte::grid::row_t bottom,
+                                       vte::grid::column_t left,
+                                       vte::grid::column_t right);
+#endif
+
+        /* Repaint after the ring's own rules have moved or deleted an image
+         * behind the caller's back. Repainting everything is the right trade
+         * here: an image deleted for straddling the edge of a scrolled region
+         * reaches outside the rows the caller is about to invalidate, and this
+         * only ever happens on an event that is measurably rare in ordinary use
+         * (no real workload moves an image at all), so the alternative of
+         * tracking the damage precisely buys nothing.
+         */
+        inline void maybe_repaint_moved_images()
+        {
+                if (!m_screen->row_data->take_images_changed()) [[likely]]
+                        return;
+
+                invalidate_all();
+        }
+
+        /* Delete every image that has a cell inside the given rectangle, which is
+         * inclusive and in absolute coordinates: rows as m_screen->cursor.row
+         * counts them, columns as the screen counts them.
+         *
+         * Erasing cells is the only way a producer can take an image back - there
+         * is no "delete image" sequence - so every operation that clears or
+         * overwrites cells routes through here. Whole-image delete on any
+         * intersection, see Ring::erase_images_in_rect().
+         *
+         * A terminal that holds no image is the overwhelmingly common case and it
+         * must not pay for this: the test is one predicted branch on a value the
+         * caller already has in cache, and everything else is out of line.
+         */
+        inline void erase_images_in_rect(vte::grid::row_t top,
+                                         vte::grid::row_t bottom,
+                                         vte::grid::column_t left,
+                                         vte::grid::column_t right)
+        {
+                if (!m_screen->row_data->has_images()) [[likely]]
+                        return;
+
+#if WITH_SIXEL
+                erase_images_in_rect_slow(top, bottom, left, right);
+#endif
+        }
+
         inline void move_cursor_up(vte::grid::row_t rows);
         inline void move_cursor_down(vte::grid::row_t rows);
         inline void move_cursor_backward(vte::grid::column_t columns);

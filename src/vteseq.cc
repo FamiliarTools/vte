@@ -180,6 +180,11 @@ Terminal::clear_current_line()
 
         maybe_retreat_cursor();
 
+        erase_images_in_rect(m_screen->cursor.row,
+                             m_screen->cursor.row,
+                             0,
+                             m_column_count - 1);
+
         /* If the cursor's row is covered by the ring, clear data in the row
 	 * which corresponds to the cursor. */
         if (long(m_screen->row_data->next()) > m_screen->cursor.row) {
@@ -204,6 +209,11 @@ Terminal::clear_current_line()
 void
 Terminal::clear_above_current()
 {
+        erase_images_in_rect(m_screen->insert_delta,
+                             m_screen->cursor.row - 1,
+                             0,
+                             m_column_count - 1);
+
         /* Make the line just above the writable area hard wrapped. */
         if (m_screen->insert_delta > long(m_screen->row_data->delta())) {
                 set_hard_wrapped(m_screen->insert_delta - 1);
@@ -661,6 +671,11 @@ Terminal::clear_to_bol()
 {
         maybe_retreat_cursor();
 
+        erase_images_in_rect(m_screen->cursor.row,
+                             m_screen->cursor.row,
+                             0,
+                             m_screen->cursor.col);
+
 	/* Get the data for the row which the cursor points to. */
 	auto rowdata = ensure_row();
         /* Clean up Tab/CJK fragments. */
@@ -691,6 +706,18 @@ void
 Terminal::clear_below_current()
 {
         maybe_retreat_cursor();
+
+        /* Two rectangles, not one bounding box: on the cursor's own row only the
+         * part from the cursor rightwards is erased, and an image sitting to the
+         * left of the cursor on that row has to survive. */
+        erase_images_in_rect(m_screen->cursor.row,
+                             m_screen->cursor.row,
+                             m_screen->cursor.col,
+                             m_column_count - 1);
+        erase_images_in_rect(m_screen->cursor.row + 1,
+                             m_screen->insert_delta + m_row_count - 1,
+                             0,
+                             m_column_count - 1);
 
 	/* If the cursor is actually on the screen, clear the rest of the
 	 * row the cursor is on and all of the rows below the cursor. */
@@ -755,6 +782,11 @@ Terminal::clear_to_eol()
 	 * getting painted with the active background color (except for a possible flicker).
 	 */
         /* maybe_retreat_cursor(); */
+
+        erase_images_in_rect(m_screen->cursor.row,
+                             m_screen->cursor.row,
+                             m_screen->cursor.col,
+                             m_column_count - 1);
 
 	/* Get the data for the row which the cursor points to. */
         auto rowdata = ensure_cursor();
@@ -888,6 +920,11 @@ Terminal::erase_characters(long count,
 
         count = CLAMP(count, 1, m_column_count - m_screen->cursor.col);
 
+        erase_images_in_rect(m_screen->cursor.row,
+                             m_screen->cursor.row,
+                             m_screen->cursor.col,
+                             m_screen->cursor.col + count - 1);
+
 	/* Clear out the given number of characters. */
 	auto rowdata = ensure_row();
         if (long(m_screen->row_data->next()) > m_screen->cursor.row) {
@@ -924,6 +961,16 @@ Terminal::erase_image_rect(vte::grid::row_t rows,
                            vte::grid::column_t columns)
 {
         auto const top = m_screen->cursor.row;
+
+        /* Set the boundary above the image to hard wrapped, the same way every other
+         * site that tears the contents apart in place does (see scroll_text_up()).
+         * Each covered row gets its own lower boundary torn apart in the loop below,
+         * but without this one the image's first row stays glued to the paragraph
+         * above it, and a rewrap then reflows that paragraph's text into the cells the
+         * image sits on. Since draw_rows() paints text over the images, the image ends
+         * up with text on top of it.
+         */
+        set_hard_wrapped(top - 1);
 
         /* FIXMEchpe: simplify! */
         for (auto i = 0; i < rows; ++i) {
@@ -984,6 +1031,13 @@ try
 
                 adjust_adjustments();
         }
+
+        /* Only the destination is written; the source is read, so the images
+         * over it stay. */
+        erase_images_in_rect(m_screen->insert_delta + dest_rect.top(),
+                             m_screen->insert_delta + dest_rect.bottom(),
+                             dest_rect.left(),
+                             dest_rect.right());
 
         // Buffer to simplify copying when source and dest overlap
         auto vec = std::vector<VteCell>{};
@@ -1143,6 +1197,11 @@ try
                 adjust_adjustments();
         }
 
+        erase_images_in_rect(m_screen->insert_delta + rect.top(),
+                             m_screen->insert_delta + rect.bottom(),
+                             rect.left(),
+                             rect.right());
+
         // Now copy the cells into the ring
 
         for (auto row = m_screen->insert_delta + rect.top();
@@ -1268,13 +1327,38 @@ try
                 }
         };
 
+        /* A pen that only rewrites visual attributes (DECCARA, DECRARA) changes
+         * no character content, so it is not an erase and must not take an image
+         * down with it. A pen that writes characters (DECERA, DECSERA) is one,
+         * over exactly the cells it visits. */
         if (as_rectangle || rect.top() == rect.bottom()) { // as rectangle
+                if (!only_attrs)
+                        erase_images_in_rect(m_screen->insert_delta + rect.top(),
+                                             m_screen->insert_delta + rect.bottom(),
+                                             rect.left(),
+                                             rect.right());
+
                 for (auto row = m_screen->insert_delta + rect.top();
                      row <= m_screen->insert_delta + rect.bottom();
                      ++row) {
                         visit_row(row, rect.left(), rect.right() + 1);
                 }
         } else { // as stream (see DECSACE)
+                if (!only_attrs) {
+                        erase_images_in_rect(m_screen->insert_delta + rect.top(),
+                                             m_screen->insert_delta + rect.top(),
+                                             rect.left(),
+                                             m_column_count - 1);
+                        erase_images_in_rect(m_screen->insert_delta + rect.top() + 1,
+                                             m_screen->insert_delta + rect.bottom() - 1,
+                                             0,
+                                             m_column_count - 1);
+                        erase_images_in_rect(m_screen->insert_delta + rect.bottom(),
+                                             m_screen->insert_delta + rect.bottom(),
+                                             0,
+                                             rect.right());
+                }
+
                 auto row = m_screen->insert_delta + rect.top();
                 visit_row(row++, rect.left(), m_column_count);
                 for (;

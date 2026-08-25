@@ -264,17 +264,86 @@ private:
         using image_by_top_map_type = std::multimap<row_t, vte::image::Image*>;
         image_by_top_map_type m_image_by_top_map{};
 
+        /* The image whose own emission burst is currently running, or nullptr.
+         * Placing an image erases the cells it is about to cover, and moves the
+         * cursor down over them; both of those are delete verbs for every other
+         * image, so the one being placed has to be held out of the rules or it
+         * would delete itself before it ever renders. Never dereferenced, only
+         * compared, and cleared whenever the image it names is freed.
+         */
+        vte::image::Image* m_placing_image{nullptr};
+
+        /* Mirrors !m_image_map.empty(). Reading the map instead costs a cache line
+         * nothing else on the per-character path wants - the image maps sit past
+         * m_hyperlink_buf, two kilobytes further into the object - which measures
+         * as a 3 to 6 percent throughput loss on text that goes through
+         * insert_char() one character at a time.
+         *
+         * It is declared HERE, among the image fields, and deliberately not up
+         * beside m_start/m_end where the hot scalars live. Putting it there
+         * displaces m_writable/m_mask/m_array and costs the BULK path - the run
+         * writer that handles ordinary ASCII - about 8 percent, which is a worse
+         * trade on the commoner workload. Confirmed by measuring the two
+         * placements against each other and against an inert-padding build.
+         *
+         * Kept in step by sync_has_images(), which recomputes from the map rather
+         * than reasoning about what the caller just did, so the mirror can never
+         * claim something the map does not.
+         */
+        bool m_has_images{false};
+
+        /* Set when a rule moved or deleted an image; the caller of the ring
+         * mutation drains it to repaint. */
+        bool m_images_changed{false};
+
         void image_gc() noexcept;
         void image_gc_region() noexcept;
         void unlink_image_from_top_map(vte::image::Image const* image) noexcept;
         void rebuild_image_top_map() /* throws */;
-        bool rewrap_images_in_range(image_by_top_map_type::iterator& it,
+        image_by_top_map_type::iterator erase_image(image_by_top_map_type::iterator it) noexcept;
+        void drop_images_before(row_t row) noexcept;
+        void drop_images_after(row_t row) noexcept;
+        void rewrap_images_in_range(image_by_top_map_type::iterator& it,
                                     size_t text_start_ofs,
                                     size_t text_end_ofs,
                                     row_t new_row_index) noexcept;
+        void shift_images_for_insert(row_t position) noexcept;
+        void shift_images_for_remove(row_t position) noexcept;
+
+        inline void note_image_freed(vte::image::Image const* image) noexcept {
+                if (m_placing_image == image)
+                        m_placing_image = nullptr;
+        }
+
+        /* Recompute m_has_images from the map rather than reasoning about what
+         * the caller just did, so the mirror cannot say something the map does
+         * not. Called wherever m_image_map changes. */
+        inline void sync_has_images() noexcept { m_has_images = !m_image_map.empty(); }
 
 public:
         auto const& image_map() const noexcept { return m_image_map; }
+
+        /* Whether any image is resident. This is the guard the callers put in
+         * front of every image rule, so that a ring holding no image - which is
+         * very nearly always - pays one predicted branch on a cache line it is
+         * already using. See m_has_images for why it is not read from the map.
+         */
+        inline bool has_images() const noexcept { return m_has_images; }
+
+        inline void set_placing_image(vte::image::Image* image) noexcept { m_placing_image = image; }
+
+        inline bool take_images_changed() noexcept {
+                auto const changed = m_images_changed;
+                m_images_changed = false;
+                return changed;
+        }
+
+        bool erase_images_in_rect(long top,
+                                  long bottom,
+                                  long left,
+                                  long right,
+                                  long* damage_top,
+                                  long* damage_bottom) noexcept;
 
         void append_image(vte::Freeable<cairo_surface_t> surface,
                           int pixelwidth,
@@ -284,6 +353,14 @@ public:
                           long cell_width,
                           long cell_height) /* throws */;
 
+#else /* !WITH_SIXEL */
+
+public:
+        /* Without image support there is nothing to keep alive, so every image
+         * rule folds away at compile time rather than behind a preprocessor
+         * conditional at each of its call sites. */
+        static constexpr bool has_images() noexcept { return false; }
+        static constexpr bool take_images_changed() noexcept { return false; }
 
 #endif /* WITH_SIXEL */
 };

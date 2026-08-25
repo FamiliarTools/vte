@@ -2872,6 +2872,10 @@ Terminal::scroll_text_up(scrolling_region const& scrolling_region,
         } else {
                 /* Scroll up partial rows. The line endings and the BiDi flags don't scroll. */
 
+                /* The cells move without the rows moving, so an image over the
+                 * region cannot follow its cells; it is erased along with them. */
+                erase_images_in_rect(top, bottom, left, right);
+
                 /* Make sure the area we're about to scroll is present in memory. */
                 long row = top;
                 for (row = top; row <= bottom; row++) {
@@ -2899,6 +2903,8 @@ Terminal::scroll_text_up(scrolling_region const& scrolling_region,
                 /* We've modified the display. Make a note of it. */
                 m_text_deleted_flag = TRUE;
         }
+
+        maybe_repaint_moved_images();
 }
 
 /* Terminal::scroll_text_down:
@@ -2951,6 +2957,9 @@ Terminal::scroll_text_down(scrolling_region const& scrolling_region,
         } else {
                 /* Scroll down partial rows. The line endings and the BiDi flags don't scroll. */
 
+                /* As in scroll_text_up(): the cells move, the rows don't. */
+                erase_images_in_rect(top, bottom, left, right);
+
                 /* Make sure the area we're about to scroll is present in memory. */
                 long row = top;
                 for (row = top; row <= bottom; row++) {
@@ -2978,6 +2987,8 @@ Terminal::scroll_text_down(scrolling_region const& scrolling_region,
                 /* We've modified the display. Make a note of it. */
                 m_text_deleted_flag = TRUE;
         }
+
+        maybe_repaint_moved_images();
 }
 
 /* Terminal::scroll_text_left:
@@ -3006,6 +3017,10 @@ Terminal::scroll_text_left(scrolling_region const& scrolling_region,
                 ring_append(false /* no fill */);
 
         const VteCell *cell = fill ? &m_color_defaults : &basic_cell;
+
+        /* DCH, SL and friends move cells sideways within their rows; an image
+         * has no way to follow them, so it goes. */
+        erase_images_in_rect(top, bottom, left, right);
 
         /* Scroll left in each row separately. */
         for (auto row = top; row <= bottom; row++) {
@@ -3055,6 +3070,9 @@ Terminal::scroll_text_right(scrolling_region const& scrolling_region,
                 ring_append(false /* no fill */);
 
         const VteCell *cell = fill ? &m_color_defaults : &basic_cell;
+
+        /* As in scroll_text_left(): ICH, SR and insert mode move cells sideways. */
+        erase_images_in_rect(top, bottom, left, right);
 
         /* Scroll right in each row separately. */
         for (auto row = top; row <= bottom; row++) {
@@ -3495,6 +3513,17 @@ Terminal::insert_char(gunichar c,
                 m_last_graphic_character = c_unmapped;
 	}
 
+        /* Text written over an image is a delete verb too, and it is the one
+         * the ring cannot see: it is an in-place write to cells, not a row
+         * operation. This is where the autowrap above has settled which row is
+         * going to be written, and where the combining-mark branch that writes
+         * somewhere else has already left.
+         */
+        erase_images_in_rect(m_screen->cursor.row,
+                             m_screen->cursor.row,
+                             col,
+                             col + columns - 1);
+
 	/* Make sure we have enough rows to hold this data. */
 	row = ensure_cursor();
 	g_assert(row != NULL);
@@ -3626,6 +3655,15 @@ Terminal::insert_single_width_chars(gunichar const *p, int len)
                         g_free(utf8);
                 }
 
+                /* As in insert_char(): printing over an image deletes it. Once
+                 * per run rather than once per character, since the whole run
+                 * lands on one row and its extent is known here.
+                 */
+                erase_images_in_rect(m_screen->cursor.row,
+                                     m_screen->cursor.row,
+                                     col,
+                                     col + run - 1);
+
                 /* Make sure we have enough rows to hold this data. */
                 row = ensure_cursor();
                 g_assert(row != NULL);
@@ -3664,6 +3702,26 @@ Terminal::insert_single_width_chars(gunichar const *p, int len)
 #if WITH_SIXEL
 
 void
+Terminal::erase_images_in_rect_slow(vte::grid::row_t top,
+                                    vte::grid::row_t bottom,
+                                    vte::grid::column_t left,
+                                    vte::grid::column_t right)
+{
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+
+        if (!m_screen->row_data->erase_images_in_rect(top, bottom, left, right,
+                                                      &damage_top, &damage_bottom))
+                return;
+
+        /* The deleted images can reach outside the erased rectangle - that is the
+         * whole point of deleting them whole - so repaint the rows they occupied
+         * rather than the ones the caller is about to invalidate.
+         */
+        invalidate_rows(damage_top, damage_bottom);
+}
+
+void
 Terminal::insert_image(ProcessingContext& context,
                        vte::Freeable<cairo_surface_t> image_surface) /* throws */
 {
@@ -3690,7 +3748,18 @@ Terminal::insert_image(ProcessingContext& context,
 
         /* Erase characters under the image. Since this inserts content, we need
          * to update the processing context's bbox.
+         *
+         * append_image() has marked the new image as the one being placed, and
+         * that marker has to be dropped again once the burst below is over,
+         * however it ends: it is what holds the image out of its own erasing and
+         * scrolling, and leaving it set would exempt the image from the lifetime
+         * rules forever.
          */
+        struct PlacingGuard {
+                vte::base::Ring* ring;
+                ~PlacingGuard() { ring->set_placing_image(nullptr); }
+        } const placing_guard{m_screen->row_data};
+
         context.pre_GRAPHIC();
         erase_image_rect(height, width);
         context.post_GRAPHIC();

@@ -29,6 +29,8 @@
 
 #include "cxx-utils.hh"
 
+#include <algorithm>
+
 /* We should be able to hold a single fullscreen 4K image at most.
  * 35MiB equals 3840 * 2160 * 4 plus a little extra. */
 #define IMAGE_FAST_MEMORY_USED_MAX (35 * 1024 * 1024)
@@ -228,6 +230,7 @@ Ring::image_gc_region() noexcept
 
                         /* Apparently this is the cleanest way to erase() with a reverse iterator... */
                         /* Unlink the image from m_image_by_top_map, then erase it from m_image_map */
+                        note_image_freed(image.get());
                         unlink_image_from_top_map(image.get());
                         rit = image_map_type::reverse_iterator{m_image_map.erase(std::next(rit).base())};
                         continue;
@@ -238,6 +241,8 @@ Ring::image_gc_region() noexcept
         }
 
         cairo_region_destroy(region);
+
+        sync_has_images();
 }
 
 void
@@ -252,8 +257,267 @@ Ring::image_gc() noexcept
 
                 auto& image = m_image_map.begin()->second;
                 m_image_fast_memory_used -= image->resource_size();
+                note_image_freed(image.get());
                 unlink_image_from_top_map(image.get());
                 m_image_map.erase(m_image_map.begin());
+        }
+
+        sync_has_images();
+}
+
+Ring::image_by_top_map_type::iterator
+Ring::erase_image(Ring::image_by_top_map_type::iterator it) noexcept
+{
+        /* Free the image @it refers to and return an iterator to the next one.
+         *
+         * The priority has to be taken before unlinking, since erasing from
+         * m_image_map destroys the Image that m_image_by_top_map only points to.
+         */
+        auto const image = it->second;
+        auto const priority = image->get_priority();
+
+        m_image_fast_memory_used -= image->resource_size();
+        note_image_freed(image);
+        auto const next = m_image_by_top_map.erase(it);
+        m_image_map.erase(priority);
+        sync_has_images();
+
+        return next;
+}
+
+void
+Ring::drop_images_before(row_t row) noexcept
+{
+        /* Free every image that now lies entirely before @row, i.e. whose last row has
+         * left the ring. Without this the maps grow without bound: the row-dropping
+         * paths advance m_start and m_end and never consult m_image_map, so an image
+         * scrolled out of the scrollback stayed resident until a reset. It is also what
+         * lets the ring evict images predictably rather than only under the size cap.
+         *
+         * m_image_by_top_map is ordered by top row, so an image whose top is at or after
+         * @row cannot possibly end before it: stopping at the first such entry is exact,
+         * not an approximation. An image straddling @row is KEPT - part of it is still in
+         * the ring - and it is dropped later when its bottom follows.
+         */
+        for (auto it = m_image_by_top_map.begin();
+             it != m_image_by_top_map.end() && it->first < row; ) {
+                auto const image = it->second;
+                if (long(image->get_bottom()) >= long(row)) {
+                        ++it;
+                        continue;
+                }
+
+                it = erase_image(it);
+        }
+}
+
+void
+Ring::drop_images_after(row_t row) noexcept
+{
+        /* Free every image that has a row at or after @row, i.e. that reaches past
+         * the last row the ring holds. The counterpart of drop_images_before() for
+         * the one path that destroys rows at the bottom instead of at the front:
+         * shrink(), which pulls m_end back and never consulted the image maps, so an
+         * image below the new end kept a row number that no longer exists.
+         *
+         * Unlike the top row, the bottom row is not the map's key, so there is no
+         * early exit: an image with a small top can still be tall enough to reach
+         * past @row. Shrinking is rare enough that the full walk does not matter.
+         */
+        for (auto it = m_image_by_top_map.begin();
+             it != m_image_by_top_map.end(); ) {
+                if (long(it->second->get_bottom()) < long(row)) {
+                        ++it;
+                        continue;
+                }
+
+                it = erase_image(it);
+        }
+}
+
+/*
+ * Ring::erase_images_in_rect:
+ * @top, @bottom, @left, @right: an inclusive rectangle in ring coordinates
+ * @damage_top, @damage_bottom: out, the rows the deleted images occupied
+ *
+ * Delete, whole, every image whose cells intersect the given rectangle; the
+ * image being placed by its own emission burst is held out. Returns whether
+ * anything was deleted, in which case the out parameters bound the rows that
+ * need repainting.
+ *
+ * An image is deleted in full even when only one of its cells is touched. The
+ * alternative, splitting the image and keeping the untouched part, costs several
+ * hundred lines of geometry for a fidelity no producer needs: cell erase is the
+ * only way a producer can take its image back, and they all erase at least the
+ * whole area they drew into.
+ *
+ * All comparisons are made in signed long. An image stores its position in int,
+ * a ring row is an unsigned long, and the callers legitimately pass rows derived
+ * from a cursor position minus one; mixing those in an unsigned comparison turns
+ * an empty rectangle into an enormous one.
+ */
+bool
+Ring::erase_images_in_rect(long top,
+                           long bottom,
+                           long left,
+                           long right,
+                           long* damage_top,
+                           long* damage_bottom) noexcept
+{
+        if (top > bottom || left > right)
+                return false;
+
+        auto deleted = false;
+
+        for (auto it = m_image_by_top_map.begin();
+             it != m_image_by_top_map.end(); ) {
+                auto const image = it->second;
+
+                /* The keys are the images' top rows, so once past @bottom no
+                 * image left can begin inside the rectangle either. There is no
+                 * such shortcut at the front: an image with a small top row can
+                 * be tall enough to reach into it.
+                 */
+                if (long(image->get_top()) > bottom)
+                        break;
+
+                if (image == m_placing_image ||
+                    long(image->get_bottom()) < top ||
+                    long(image->get_left()) > right ||
+                    long(image->get_left()) + long(image->get_width()) - 1 < left) {
+                        ++it;
+                        continue;
+                }
+
+                if (!deleted) {
+                        *damage_top = long(image->get_top());
+                        *damage_bottom = long(image->get_bottom());
+                        deleted = true;
+                } else {
+                        *damage_top = std::min(*damage_top, long(image->get_top()));
+                        *damage_bottom = std::max(*damage_bottom, long(image->get_bottom()));
+                }
+
+                it = erase_image(it);
+        }
+
+        return deleted;
+}
+
+/*
+ * Ring::shift_images_for_insert:
+ * @position: the row about to be inserted at
+ *
+ * A row is being pushed in at @position, so every row from there down moves
+ * one further down. An image entirely below the seam moves with its rows; an
+ * image the seam runs through is destroyed, because its rows are no longer
+ * contiguous and there is no position it could keep that would still describe
+ * where its pixels are. Composed over the rows of a region scroll, this is the
+ * "an image inside the scrolled region moves, an image straddling its edge
+ * dies" rule that the region scroll needs.
+ *
+ * Inserting at the end of the ring is exempt. An image is anchored at the
+ * cursor before the rows it covers are created, so during its own emission it
+ * genuinely straddles the end; without this every sixel emitted at the bottom
+ * of the screen would classify itself as straddling and delete itself. Nothing
+ * else lives at or past the end, so the exemption cannot spare anything real.
+ *
+ * The keys of m_image_by_top_map are the images' top rows, and no image can be
+ * above row 0: the rules only ever move an image between existing rows, and
+ * the rewrap drops any image whose row left the ring. So the keys order the
+ * same way the rows do, and the walks below can stop on a key comparison.
+ */
+void
+Ring::shift_images_for_insert(row_t position) noexcept
+{
+        if (position == m_end)
+                return;
+
+        /* Destroyed: top strictly above the seam, bottom at or below it. */
+        for (auto it = m_image_by_top_map.begin();
+             it != m_image_by_top_map.end() && it->first < position; ) {
+                auto const image = it->second;
+                if (image == m_placing_image ||
+                    long(image->get_bottom()) < long(position)) {
+                        ++it;
+                        continue;
+                }
+
+                it = erase_image(it);
+                m_images_changed = true;
+        }
+
+        /* Moved: top at or below the seam. Walked backwards, so that a re-keyed
+         * entry (which always lands after every entry not yet visited, its key
+         * having just grown by one) cannot be visited twice.
+         */
+        auto it = m_image_by_top_map.end();
+        while (it != m_image_by_top_map.begin()) {
+                auto const cur = std::prev(it);
+                if (cur->first < position)
+                        break;
+
+                auto const at_begin = (cur == m_image_by_top_map.begin());
+                auto const before = at_begin ? cur : std::prev(cur);
+                auto const image = cur->second;
+
+                if (image != m_placing_image) {
+                        auto node = m_image_by_top_map.extract(cur);
+                        image->set_top(image->get_top() + 1);
+                        node.key() = row_t(image->get_top());
+                        m_image_by_top_map.insert(std::move(node));
+                        m_images_changed = true;
+                }
+
+                if (at_begin)
+                        break;
+
+                it = std::next(before);
+        }
+}
+
+/*
+ * Ring::shift_images_for_remove:
+ * @position: the row about to be removed
+ *
+ * The counterpart of shift_images_for_insert(): everything below @position
+ * moves one row up, an image containing @position loses one of its rows and is
+ * destroyed. There is no end-of-ring exemption to make here, since a row that
+ * is being removed exists by definition.
+ */
+void
+Ring::shift_images_for_remove(row_t position) noexcept
+{
+        /* Walked forwards, so that a re-keyed entry (whose key has just shrunk
+         * by one) always lands before every entry not yet visited.
+         */
+        for (auto it = m_image_by_top_map.begin();
+             it != m_image_by_top_map.end(); ) {
+                auto const image = it->second;
+                if (image == m_placing_image) {
+                        ++it;
+                        continue;
+                }
+
+                auto const top = long(image->get_top());
+                if (top > long(position)) {
+                        auto const next = std::next(it);
+                        auto node = m_image_by_top_map.extract(it);
+                        image->set_top(int(top - 1));
+                        node.key() = row_t(top - 1);
+                        m_image_by_top_map.insert(std::move(node));
+                        m_images_changed = true;
+                        it = next;
+                        continue;
+                }
+
+                if (long(image->get_bottom()) >= long(position)) {
+                        it = erase_image(it);
+                        m_images_changed = true;
+                        continue;
+                }
+
+                ++it;
         }
 }
 
@@ -286,30 +550,72 @@ Ring::rebuild_image_top_map() /* throws */
         }
 }
 
-bool
+/* Re-anchor the images that belong to the old rows whose text now makes up the
+ * single new row @new_row_index, spanning [@text_start_ofs, @text_end_ofs) of the
+ * text stream. @it is the shared cursor into m_image_by_top_map, carried across
+ * the calls of one rewrap; both the map and the ranges are ordered by text
+ * offset, so one forward pass visits every image exactly once.
+ *
+ * Only the row moves. The column is left exactly as it is, because reflow simply
+ * has no opinion about it: frozen_row_column_to_text_offset() deliberately
+ * disregards an image's column (it maps column 0), and the cells under an image
+ * are blanked, so a text-offset round trip would anchor the image to whatever text
+ * reflowed into that row rather than to where the image is. The column is absolute
+ * and nothing about narrowing the window invalidates it: an image that no longer
+ * fits is merely clipped by the draw loop, and reappears intact when the window is
+ * widened again. Deleting it instead would lose a prompt-emitted image on every
+ * window retile, with nobody around to re-emit it.
+ *
+ * An image is dropped only when its position genuinely no longer exists: its row
+ * has left the ring, or its text offset cannot be mapped.
+ */
+void
 Ring::rewrap_images_in_range(Ring::image_by_top_map_type::iterator& it,
                              size_t text_start_ofs,
                              size_t text_end_ofs,
                              row_t new_row_index) noexcept
 {
-        for (auto const end = m_image_by_top_map.end();
-             it != end;
-             ++it) {
-                auto const& image = it->second;
+        while (it != m_image_by_top_map.end()) {
+                auto const image = it->second;
+                auto const top = image->get_top();
+
+                /* Rows outside the ring have no text offset to map through, and
+                 * frozen_row_column_to_text_offset() does not report that: below
+                 * m_start it clamps the position onto the first row of the ring
+                 * (which is why images below the scrollback start all used to pile
+                 * onto it), and at or past m_end it synthesises an offset past the
+                 * stream head (which used to leave the image holding a row number
+                 * in the old ring's numbering). Both fabricate a position for a row
+                 * that is gone, so the image goes with it.
+                 */
+                if (top < 0 || row_t(top) < m_start || row_t(top) >= m_end) {
+                        it = erase_image(it);
+                        continue;
+                }
+
                 auto ofs = CellTextOffset{};
+                if (!frozen_row_column_to_text_offset(top, 0, &ofs)) {
+                        it = erase_image(it);
+                        continue;
+                }
 
-                if (!frozen_row_column_to_text_offset(image->get_top(), 0, &ofs))
-                        return false;
-
+                /* Not this new row's text yet; a later call will place it. */
                 if (ofs.text_offset >= text_end_ofs)
                         break;
 
-                if (ofs.text_offset >= text_start_ofs && ofs.text_offset < text_end_ofs) {
-                        image->set_top(new_row_index);
+                /* Before the range: unreachable, as the ranges passed to the
+                 * successive calls tile the whole text stream and this pass runs in
+                 * offset order. Drop rather than skip, so that no image can survive
+                 * holding a row number from the old ring.
+                 */
+                if (ofs.text_offset < text_start_ofs) {
+                        it = erase_image(it);
+                        continue;
                 }
-        }
 
-        return true;
+                image->set_top(new_row_index);
+                ++it;
+        }
 }
 
 #endif /* WITH_SIXEL */
@@ -728,6 +1034,9 @@ Ring::reset()
         m_image_map.clear();
         m_next_image_priority = 0;
         m_image_fast_memory_used = 0;
+        m_placing_image = nullptr;
+        m_images_changed = false;
+        sync_has_images();
 #endif
 
         return m_end;
@@ -911,6 +1220,9 @@ void
 Ring::discard_one_row()
 {
 	m_start++;
+#if WITH_SIXEL
+        drop_images_before(m_start);
+#endif
 	if (G_UNLIKELY(m_start == m_writable)) {
 		reset_streams(m_writable);
 	} else if (m_start < m_writable) {
@@ -1034,6 +1346,13 @@ Ring::shrink(row_t max_len)
 
 	/* TODO May want to shrink down m_array */
 
+#if WITH_SIXEL
+        /* The rows past the new end are gone; an image anchored to one of them
+         * would keep being drawn at a row number the ring no longer has. */
+        if (has_images())
+                drop_images_after(m_end);
+#endif
+
 	validate();
 }
 
@@ -1063,6 +1382,13 @@ Ring::insert(row_t position, guint8 bidi_flags)
 
 	vte_assert_cmpuint (position, >=, m_writable);
 	vte_assert_cmpuint (position, <=, m_end);
+
+#if WITH_SIXEL
+        /* After maybe_discard_one_row(), so that the maps are already pruned of
+         * whatever left the front of the ring. */
+        if (has_images())
+                shift_images_for_insert(position);
+#endif
 
         //FIXMEchpe WTF use better data structures!
 	tmp = *get_writable_index(m_end);
@@ -1101,6 +1427,11 @@ Ring::remove(row_t position)
 		return;
 
 	ensure_writable(position);
+
+#if WITH_SIXEL
+        if (has_images())
+                shift_images_for_remove(position);
+#endif
 
         //FIXMEchpe WTF as above
 	tmp = *get_writable_index(position);
@@ -1144,6 +1475,9 @@ Ring::drop_scrollback(row_t position)
         ensure_writable(position);
 
         m_start = m_writable = position;
+#if WITH_SIXEL
+        drop_images_before(m_start);
+#endif
         reset_streams(position);
 }
 
@@ -1518,11 +1852,10 @@ Ring::rewrap(column_t columns,
 						}
 
 #if WITH_SIXEL
-						if (!rewrap_images_in_range(image_it,
-                                                                            new_record.text_start_offset,
-                                                                            text_offset,
-                                                                            new_row_index))
-							goto err;
+						rewrap_images_in_range(image_it,
+                                                                       new_record.text_start_offset,
+                                                                       text_offset,
+                                                                       new_row_index);
 #endif
 
 						new_row_index++;
@@ -1578,11 +1911,10 @@ Ring::rewrap(column_t columns,
 		}
 
 #if WITH_SIXEL
-		if (!rewrap_images_in_range(image_it,
-                                            new_record.text_start_offset,
-                                            paragraph_end_text_offset,
-                                            new_row_index))
-			goto err;
+		rewrap_images_in_range(image_it,
+                                       new_record.text_start_offset,
+                                       paragraph_end_text_offset,
+                                       new_row_index);
 #endif
 
 		new_row_index++;
@@ -1629,6 +1961,14 @@ Ring::rewrap(column_t columns,
         } catch (...) {
                 vte::log_exception();
         }
+
+        /* Reflow can make the content longer than the ring holds, in which case the
+         * update above has just moved m_start forward and dropped rows off the front.
+         * This has to run after rebuild_image_top_map(), since drop_images_before()
+         * walks m_image_by_top_map in key order and the keys are only the new row
+         * numbers once the map has been rebuilt.
+         */
+        drop_images_before(m_start);
 #endif
 
 	_vte_debug_print(vte::debug::category::RING, "Ring after rewrapping:");
@@ -1781,6 +2121,15 @@ Ring::append_image(vte::Freeable<cairo_surface_t> surface,
                                    std::forward_as_tuple(image.get()));
 
         m_image_fast_memory_used += image->resource_size ();
+
+        /* From here until the caller says otherwise, this image is the one being
+         * placed, and the lifetime rules leave it alone. It has to be marked
+         * before the collectors run, because they can free it right back and
+         * note_image_freed() is what keeps the marker from dangling.
+         */
+        m_placing_image = image.get();
+
+        sync_has_images();
 
         image_gc_region();
         image_gc();
