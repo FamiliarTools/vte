@@ -29,6 +29,12 @@
 
 namespace vte {
 
+namespace base {
+
+class Ring;
+
+} // namespace base
+
 namespace image {
 
 class Image {
@@ -66,6 +72,15 @@ private:
         mutable vte::glib::RefPtr<GdkTexture> m_texture{};
 #endif
 
+        /* Only the ring may move an image, and only between rows. Public would
+         * mean a caller could move the rectangle without re-keying the ring's
+         * by-top index, leaving the image filed under a row it no longer starts
+         * at. Ring::reanchor_image() does both at once.
+         */
+        friend class vte::base::Ring;
+
+        inline void set_top(int row) noexcept { m_top_cells = row; }
+
 public:
         Image(vte::Freeable<cairo_surface_t> surface,
               size_t priority,
@@ -96,9 +111,15 @@ public:
         inline constexpr auto get_priority() const noexcept { return m_priority; }
         inline constexpr auto get_pool_id() const noexcept { return m_pool_id; }
         inline void set_pool_id(pool_id_t id) noexcept { m_pool_id = id; }
+        /* Where the image sits, in cells. This is the ring's row index for the
+         * image and not what the draw reads: see the note on the image maps in
+         * ring.hh. The row is the ring's to move, through
+         * Ring::reanchor_image(), which re-keys the by-top map with it; the
+         * column never moves, since every operation that shifts cells sideways
+         * deletes the image instead of following it.
+         */
         inline constexpr auto get_left() const noexcept { return m_left_cells; }
         inline auto get_top() const noexcept { return m_top_cells; }
-        inline void set_top(int row) noexcept { m_top_cells = row; }
         inline constexpr auto get_width() const noexcept { return (m_width_pixels + m_cell_width - 1) / m_cell_width; }
         inline constexpr auto get_height() const noexcept { return (m_height_pixels + m_cell_height - 1) / m_cell_height; }
         inline auto get_bottom() const noexcept { return m_top_cells + get_height() - 1; }

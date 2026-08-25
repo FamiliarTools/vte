@@ -345,6 +345,48 @@ private:
         size_t m_image_fast_memory_used{0};
         size_t m_image_memory_max{VTE_IMAGE_MEMORY_MAX_DEFAULT};
 
+        /* Why an image keeps a rectangle when the cells already carry one.
+         *
+         * The cells are the picture. Every pixel decision reads them and only
+         * them: the draw walks the cells of the rows on screen and places each
+         * run from its tile coordinate and its VISUAL column, and a write takes
+         * cells back from an image one at a time. Nothing on that path consults
+         * an Image's get_top()/get_left(), and it must not, or a reordered or
+         * partially overwritten run is painted somewhere the cells are not.
+         *
+         * The rectangle is not a second copy of that. It is the ring's index of
+         * WHICH ROWS an image occupies, and it exists because the ring's rows
+         * are not all cells: at m_writable the rows stop being memory and become
+         * bytes in the text and attr streams. drop_images_before(), which
+         * decides when an image's last row has left the ring,
+         * image_is_recoverable() and the spill all have to answer for exactly
+         * those rows, and no cell in memory can answer for them.
+         * find_image_anchor() is the cell-derived answer, and it returns nothing
+         * precisely for the images the index is needed for. Deriving instead of
+         * storing is therefore not a slower option, it is not an available one.
+         * The test /vte/ring/image/rectangle-answers-for-frozen-rows holds the
+         * ring in exactly that state and asks both sides.
+         *
+         * It is also the only ordered structure over images: drop_images_before()
+         * runs once per row the ring discards, i.e. once per line scrolled, and
+         * stops at the first entry keyed at or after the row it is dropping. A
+         * cell-derived answer would walk the whole writable window per call.
+         *
+         * What keeps the two from drifting is that only WHOLE-ROW moves update
+         * the rectangle. Every operation that moves cells within a row - ICH,
+         * DCH, SL, SR, insert mode, a partial-width region scroll - deletes the
+         * image instead of following it, which is why the position has a
+         * set_top() and no set_left(): the column is fixed at placement.
+         * reanchor_image() is the only mover, so the rectangle and the key it is
+         * filed under cannot be updated one without the other.
+         *
+         * And the agreement is not assumed. image_invariant_violation() checks
+         * it in both directions - every cell naming an image sits exactly where
+         * that image's rectangle puts it, and every image the writable rows can
+         * answer for still has a cell - which is the guarantee this trade is
+         * made against.
+         */
+
         /* m_image_priority_map stores the Image. key is the priority of the image. */
         using image_map_type = std::map<size_t, std::unique_ptr<vte::image::Image>>;
         image_map_type m_image_map{};
@@ -399,6 +441,8 @@ private:
         void image_gc_region() noexcept;
         void unlink_image_from_top_map(vte::image::Image const* image) noexcept;
         void rebuild_image_top_map() /* throws */;
+        image_by_top_map_type::iterator reanchor_image(image_by_top_map_type::iterator it,
+                                                       row_t new_top) noexcept;
         image_by_top_map_type::iterator erase_image(image_by_top_map_type::iterator it) noexcept;
         /* One spilled image: a fixed header, then the pixel data. */
         typedef struct _VTE_GNUC_PACKED _ImageSpillRecord {

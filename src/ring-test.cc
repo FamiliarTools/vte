@@ -339,6 +339,88 @@ test_ring_image_drop_scrollback(void)
         g_assert_cmpuint(ring.image_map().size(), ==, 0);
 }
 
+/* Why an Image carries a rectangle when the cells already say where the picture
+ * is.
+ *
+ * The rectangle is not a second opinion about the cells. It is the ring's index
+ * of which ROWS an image occupies, and it cannot be derived from the cells
+ * because the ring's rows are not all cells: at m_writable a row stops being
+ * memory and becomes bytes in the streams. The rules that decide when an
+ * image's last row has left the ring have to be exact for exactly those rows.
+ *
+ * So freeze every row an image covers and ask both sides. find_image_anchor(),
+ * which is the cell-derived position, has nothing left to answer with, while
+ * the rectangle still has to place the image to the row - and does, one row
+ * either side of the drop.
+ */
+static void
+test_ring_image_rectangle_answers_for_frozen_rows(void)
+{
+        auto ring = Ring{40, true};     /* with streams: freezing is the point */
+        ring.set_visible_rows(24);
+        append_rows(ring, 4);
+
+        place_image(ring, 1, 3);
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+
+        auto const* const image = ring.image_map().begin()->second.get();
+        auto const id = image->get_pool_id();
+        auto const bottom = long(image->get_bottom());
+        g_assert_cmpint(long(image->get_top()), ==, 1);
+        g_assert_cmpint(bottom, ==, 3);
+
+        /* The fixture: fill the ring, so that the image's rows are frozen and
+         * every cell naming it is in the streams rather than in memory. The
+         * ring is not full yet, so no row has been dropped.
+         */
+        append_rows(ring, 36);
+        g_assert_cmpuint(ring.delta(), ==, 0);
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_cmpint(long(ring.writable_start_for_test()), >, bottom);
+
+        /* Which is the state the whole question turns on: the cells can no
+         * longer say where the image is. Both halves of the cell-side
+         * invariant hold vacuously here, so neither of them is what keeps the
+         * image placed.
+         */
+        g_assert_false(ring.find_image_anchor(id).has_value());
+        g_assert_true(ring.image_cells_are_anchored());
+        g_assert_null(ring.image_invariant_violation());
+
+        /* And the rows are real rows the user can still scroll back to, each
+         * naming the image, so this is a picture that has to be kept and not a
+         * leak that has to be collected.
+         */
+        for (auto r = 1; r <= 3; r++) {
+                auto const* const frozen = ring.index(Ring::row_t(r));
+                g_assert_nonnull(frozen);
+                g_assert_cmpint(frozen->len, >, 0);
+                g_assert_true(frozen->cells[0].attr.image());
+                g_assert_true(ring.image_pool().lookup(frozen->cells[0].attr.image_ref()) == image);
+        }
+
+        /* The behaviour: the rectangle decides, and it decides to the row. The
+         * ring is full now, so each further append drops one row off the front.
+         * While the image's LAST row is still in the ring, the image stays.
+         */
+        while (long(ring.delta()) < bottom) {
+                append_rows(ring, 1);
+                ring.validate_images();
+                g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        }
+        g_assert_cmpuint(ring.delta(), ==, Ring::row_t(bottom));
+
+        /* One more row leaves, taking the last row the image covers, and the
+         * image goes with it, budget included.
+         */
+        append_rows(ring, 1);
+        g_assert_cmpuint(ring.delta(), ==, Ring::row_t(bottom + 1));
+
+        ring.validate_images();
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+        g_assert_cmpuint(ring.image_memory_used(), ==, 0);
+}
+
 #endif /* WITH_SIXEL */
 
 
@@ -2551,6 +2633,8 @@ main(int argc,
         g_test_add_func("/vte/ring/image/shrink-drops-below", test_ring_image_shrink_drops_below);
         g_test_add_func("/vte/ring/image/discard-drops", test_ring_image_discard_drops);
         g_test_add_func("/vte/ring/image/drop-scrollback", test_ring_image_drop_scrollback);
+        g_test_add_func("/vte/ring/image/rectangle-answers-for-frozen-rows",
+                        test_ring_image_rectangle_answers_for_frozen_rows);
 #endif
 
         return g_test_run();

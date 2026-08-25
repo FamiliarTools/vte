@@ -517,17 +517,6 @@ Ring::image_gc_region() noexcept
         sync_has_images();
 }
 
-/*
- * Mark and sweep the image id space.
- *
- * Marks every id still named by a cell in the writable rows, then releases
- * the retired ids nothing marked. Rows already frozen into the stream are
- * deliberately NOT walked: the same restriction hyperlink_gc() operates
- * under, and it is sound for the same reason only once frozen rows carry
- * their image reference in the stream rather than in the pool. Until that
- * exists, this is conservative in the safe direction - it can only fail to
- * reclaim an id, never reclaim one too early.
- */
 std::optional<vte::grid::coords>
 Ring::find_image_anchor(vte::image::pool_id_t pool_id) const noexcept
 {
@@ -602,6 +591,17 @@ Ring::stamp_image_row(vte::grid::coords const& position,
         }
 }
 
+/*
+ * Mark and sweep the image id space.
+ *
+ * Marks every id still named by a cell in the writable rows, then releases
+ * the retired ids nothing marked. Rows already frozen into the stream are
+ * deliberately NOT walked: the same restriction hyperlink_gc() operates
+ * under, and it is sound for the same reason only once frozen rows carry
+ * their image reference in the stream rather than in the pool. Until that
+ * exists, this is conservative in the safe direction - it can only fail to
+ * reclaim an id, never reclaim one too early.
+ */
 void
 Ring::sweep_image_pool() noexcept
 {
@@ -643,14 +643,6 @@ Ring::sweep_image_pool() noexcept
 }
 
 /*
- * Write an image's pixels to the image stream, so that a row naming it can
- * still be drawn after the image itself has been freed.
- *
- * Keyed by priority: it comes from a monotonically increasing counter and is
- * never reused, so unlike a pool id it still means the same image whenever it
- * is read back.
- */
-/*
  * Append the current attribute's image reference to the attr stream.
  *
  * Written BEFORE the record's 2-byte trailer, because the trailer has to stay
@@ -673,6 +665,14 @@ Ring::append_stream_image_ref() noexcept
         _vte_stream_append(m_attr_stream, (char const*)&sref, sizeof(sref));
 }
 
+/*
+ * Write an image's pixels to the image stream, so that a row naming it can
+ * still be drawn after the image itself has been freed.
+ *
+ * Keyed by priority: it comes from a monotonically increasing counter and is
+ * never reused, so unlike a pool id it still means the same image whenever it
+ * is read back.
+ */
 void
 Ring::spill_image(vte::image::Image const* image) noexcept
 {
@@ -1312,13 +1312,8 @@ Ring::shift_images_for_insert(row_t position) noexcept
                 auto const before = at_begin ? cur : std::prev(cur);
                 auto const image = cur->second;
 
-                if (image != m_placing_image) {
-                        auto node = m_image_by_top_map.extract(cur);
-                        image->set_top(image->get_top() + 1);
-                        node.key() = row_t(image->get_top());
-                        m_image_by_top_map.insert(std::move(node));
-                        m_images_changed = true;
-                }
+                if (image != m_placing_image)
+                        reanchor_image(cur, row_t(image->get_top() + 1));
 
                 if (at_begin)
                         break;
@@ -1353,11 +1348,7 @@ Ring::shift_images_for_remove(row_t position) noexcept
                 auto const top = long(image->get_top());
                 if (top > long(position)) {
                         auto const next = std::next(it);
-                        auto node = m_image_by_top_map.extract(it);
-                        image->set_top(int(top - 1));
-                        node.key() = row_t(top - 1);
-                        m_image_by_top_map.insert(std::move(node));
-                        m_images_changed = true;
+                        reanchor_image(it, row_t(top - 1));
                         it = next;
                         continue;
                 }
@@ -1370,6 +1361,32 @@ Ring::shift_images_for_remove(row_t position) noexcept
 
                 ++it;
         }
+}
+
+/*
+ * Move @it's image to top row @new_top and return an iterator to it.
+ *
+ * The only mover of an image's row, which is why Image::set_top() is not
+ * public: the rectangle and the key the image is filed under are one fact in
+ * two places, and a caller that could update either alone would be free to
+ * leave m_image_by_top_map filed under a row the image no longer starts at.
+ * The by-top map is ordered, and drop_images_before() stops on its key, so a
+ * stale key does not merely look wrong - it makes a live image invisible to
+ * the rule that is supposed to free it.
+ */
+Ring::image_by_top_map_type::iterator
+Ring::reanchor_image(Ring::image_by_top_map_type::iterator it,
+                     row_t new_top) noexcept
+{
+        auto const image = it->second;
+
+        auto node = m_image_by_top_map.extract(it);
+        image->set_top(int(new_top));
+        node.key() = new_top;
+
+        m_images_changed = true;
+
+        return m_image_by_top_map.insert(std::move(node));
 }
 
 void
@@ -1464,6 +1481,14 @@ Ring::rewrap_images_in_range(Ring::image_by_top_map_type::iterator& it,
                         continue;
                 }
 
+                /* The one move that does not go through reanchor_image(): this
+                 * is a forward pass over the very map the key belongs to, and
+                 * re-keying an entry mid-walk would move it under the cursor.
+                 * The keys are stale from here until rewrap() calls
+                 * rebuild_image_top_map(), which is why that call is not
+                 * optional and why nothing between the two may read the map's
+                 * key.
+                 */
                 image->set_top(new_row_index);
                 ++it;
         }
