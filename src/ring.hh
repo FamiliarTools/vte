@@ -586,18 +586,24 @@ public:
 
         /* For tests: evict every resident image, as memory pressure would,
          * spilling the pixels of any that can still be thawed back.
+         *
+         * Squeezes the budget to nothing and runs the REAL image_gc(), rather
+         * than walking the map here. A copy of the eviction body in this
+         * header would be the thing the tests then exercised, and image_gc()
+         * itself - the spill, the counter, the pool note, the top map, the
+         * has-images mirror, in that order - would never run in them at all.
+         * It was a copy until this replaced it.
+         *
+         * The budget is restored afterwards, so the ring a test goes on to use
+         * is the one it configured and not one that evicts every image it is
+         * given.
          */
         void evict_all_images_for_test() noexcept
         {
-                while (!m_image_map.empty()) {
-                        auto& image = m_image_map.begin()->second;
-                        spill_image(image.get());
-                        m_image_fast_memory_used -= image->resource_size();
-                        note_image_freed(image.get());
-                        unlink_image_from_top_map(image.get());
-                        m_image_map.erase(m_image_map.begin());
-                }
-                sync_has_images();
+                auto const saved_max = m_image_memory_max;
+                m_image_memory_max = 0;
+                image_gc();
+                m_image_memory_max = saved_max;
         }
 
         auto image_spill_count_for_test() const noexcept { return m_image_spill.size(); }
