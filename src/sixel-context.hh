@@ -565,6 +565,18 @@ private:
                  * References: DEC PPLV2 § 5.8
                  */
 
+                /* A command was received, so any pending repeat count is
+                 * cancelled - DEC STD 070 8.1.1: the repeat introducer applies
+                 * to the SIXEL that immediately follows it.
+                 *
+                 * This happens BEFORE the ignore check below, and deliberately.
+                 * A raster attribute arriving too late is ignored for its own
+                 * purpose, but it was still received, so it still ends the
+                 * repeat. Cancelling only on the accepted path would leave the
+                 * count applying to a sixel several commands later.
+                 */
+                m_repeat_count = 1;
+
                 /* If any SIXEL data, or positioning command (DECGCR, DECGNL) has
                  * been received prior to this command, then DECGRA should be ignored.
                  * This check only approximates that condition, but that's good enough.
