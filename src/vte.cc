@@ -6969,30 +6969,21 @@ Terminal::get_text(vte::grid::row_t start_row,
 
 					/* Store the cell string */
                                         if (pcell->attr.image() && image_placeholder) {
-                                                /* Accessibility only. An image is a thing on the
-                                                 * screen, and a reader that is told nothing about
-                                                 * it cannot tell an image from blank space. U+FFFC
+                                                /* An image is a thing on the screen, and neither a
+                                                 * reader nor a paste buffer can tell one from blank
+                                                 * space unless its position is marked. U+FFFC
                                                  * OBJECT REPLACEMENT CHARACTER is what marks the
-                                                 * position of an embedded object in text.
-                                                 *
-                                                 * Deliberately NOT done for the clipboard, which
-                                                 * takes the branch below: copying a selection that
-                                                 * merely spans an image must not interleave image
-                                                 * junk between the lines of text.
-                                                 */
+                                                 * position of an embedded object in text, and is
+                                                 * what the cells an image covers are made to hold
+                                                 * (vte#253 note_968299, note_973835, restated in
+                                                 * vte#309). It is the cell's own content, so it is
+                                                 * ordinary text here: it counts as non-empty and
+                                                 * survives the trailing-blank trimming below. */
                                                 _vte_unistr_append_to_string(VTE_OBJECT_REPLACEMENT_CHARACTER,
                                                                              string);
                                                 last_nonempty = string->len;
                                                 last_nonemptycol = lcol;
                                         } else if (pcell->c == 0 || pcell->attr.image()) {
-                                                /* A cell owned by an image contributes no
-                                                 * text. Emitting its U+FFFC would interleave
-                                                 * image junk between the lines of a selection
-                                                 * that merely spans an image - the objection
-                                                 * raised against U+FFFC in vte#253. Treating it
-                                                 * as empty also lets the trailing-blank trimming
-                                                 * below remove it, so an image at the end of a
-                                                 * line leaves no trailing spaces either. */
                                                 /* Empty cells of nondefault background color are
                                                  * stored as NUL characters. Treat them as spaces
                                                  * unless 'preserve_empty' is set,
@@ -7112,7 +7103,8 @@ Terminal::get_selected_text(GString *string,
                         m_selection_block_mode,
                         false /* preserve_empty */,
                         string,
-                        attributes);
+                        attributes,
+                        true /* image_placeholder */);
 }
 
 #if VTE_DEBUG
