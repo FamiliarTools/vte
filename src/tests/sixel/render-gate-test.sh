@@ -17,18 +17,23 @@
 #
 # Asserts that the golden-frame render test can fail.
 #
-# render-test.sh decides its verdict from what ImageMagick says about the
-# difference of two frames. It used to read a failure of that command as an
-# empty difference and print PASS, so on any host where ImageMagick broke -
-# and for any input it choked on - the whole render suite reported success
-# without having looked at a single pixel. A test that cannot fail is worse
-# than no test, because it is counted.
+# Two different things have to be true of that runner, and only one of them
+# used to be checked here:
 #
-# So break the comparison on purpose and require the runner to say so: put a
-# convert on PATH that refuses the one invocation the verdict rests on and
-# passes every other through to the real thing. The run therefore reaches the
-# comparison with a real captured frame - the marker file proves it got that
-# far - and then cannot make it.
+#   - a comparison that could not be MADE is reported as such, rather than
+#     read as an empty difference and printed as PASS;
+#   - the verdict DISCRIMINATES, so a frame that does not match the golden
+#     fails even though the comparison ran fine.
+#
+# The second is the one that matters, and leaving it unchecked is what let the
+# runner ship a verdict taken from a trim box - a number that reads 0x0 both
+# when the frames agree and when every pixel of them differs. Every render
+# case passed against a frame that was entirely wrong. So drive the runner
+# with a deliberately wrong capture and require it to say so.
+#
+# Both scenarios run the real runner end to end and corrupt one step of it
+# from PATH, so the run reaches the verdict with a real captured frame; a
+# marker file proves it got that far.
 #
 # usage: render-gate-test.sh <vte-app> <srcdir> <case> <gtk-arm>
 
@@ -44,41 +49,63 @@ RUNNER="$SRCDIR/render-test.sh"
 
 REAL_CONVERT=$(command -v convert 2>/dev/null) || REAL_CONVERT=
 [ -n "$REAL_CONVERT" ] || { echo "SKIP: convert not available"; exit 77; }
+REAL_IMPORT=$(command -v import 2>/dev/null) || REAL_IMPORT=
+[ -n "$REAL_IMPORT" ] || { echo "SKIP: import not available"; exit 77; }
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-MARKER="$WORK/reached"
-mkdir "$WORK/bin"
+# Hand the runner a scratch copy of the fixtures rather than the source tree.
+# A failing render case writes the frame it actually got next to the golden,
+# and this test exists to make it fail: pointed at the real directory it would
+# leave that artefact behind on every green run.
+FIXTURES="$WORK/fixtures"
+mkdir "$FIXTURES"
+GOLDEN="$SRCDIR/$CASE.golden-$ARM.png"
+[ -r "$SRCDIR/$CASE.six" ] || { echo "FAIL: no fixture $SRCDIR/$CASE.six"; exit 1; }
+[ -r "$GOLDEN" ] || { echo "FAIL: no golden $GOLDEN"; exit 1; }
+cp "$SRCDIR/$CASE.six" "$GOLDEN" "$FIXTURES/" || exit 1
+[ -r "$SRCDIR/$CASE.crop" ] && { cp "$SRCDIR/$CASE.crop" "$FIXTURES/" || exit 1; }
 
-cat >"$WORK/bin/convert" <<EOF
-#!/usr/bin/env bash
-# Refuse only the difference composite the verdict is read from, so
-# everything before it - the crop, the normalisation - still works and the
-# runner arrives at the comparison with a frame worth comparing.
-for arg in "\$@"; do
-        if [ "\$arg" = "-compose" ]; then
-                echo reached >"$MARKER"
-                echo "stub convert: refusing to take the difference" >&2
-                exit 1
-        fi
-done
-exec "$REAL_CONVERT" "\$@"
-EOF
-chmod +x "$WORK/bin/convert"
+# Run the real runner with $1 prepended to PATH. Leaves the runner's output in
+# $OUT and its exit status in $STATUS.
+run_runner() {
+        PATH="$1:$PATH" "$RUNNER" "$APP" "$FIXTURES" "$CASE" "$ARM" >"$WORK/out" 2>&1
+        STATUS=$?
+}
 
-PATH="$WORK/bin:$PATH" "$RUNNER" "$APP" "$SRCDIR" "$CASE" "$ARM" >"$WORK/out" 2>&1
-STATUS=$?
-
-if [ "$STATUS" = 77 ]; then
+# A skip is a skip whichever scenario hit it: the runner decides that from the
+# tools and the display, which this test cannot supply.
+skip_if_skipped() {
+        [ "$STATUS" = 77 ] || return 0
         echo "SKIP: the render test cannot run here"
         sed 's/^/  /' "$WORK/out"
         exit 77
-fi
+}
 
-# The fixture first: without this the test would pass for the wrong reason on
-# a run that never got as far as comparing anything.
-[ -r "$MARKER" ] || {
+# Scenario 1: the comparison cannot run.
+#
+# Refuse the one command the verdict is read from, so everything before it -
+# the capture, the crop, the normalisation - still works and the runner
+# arrives at the comparison with a frame worth comparing. Exit 2 is what
+# ImageMagick uses for a compare that could not run, as against 1 for one that
+# ran and found a difference.
+BROKEN="$WORK/broken-comparator"
+mkdir "$BROKEN"
+BROKEN_MARKER="$WORK/comparison-reached"
+
+cat >"$BROKEN/compare" <<EOF
+#!/usr/bin/env bash
+echo reached >"$BROKEN_MARKER"
+echo "stub compare: refusing to compare" >&2
+exit 2
+EOF
+chmod +x "$BROKEN/compare"
+
+run_runner "$BROKEN"
+skip_if_skipped
+
+[ -r "$BROKEN_MARKER" ] || {
         echo "FAIL: the run never reached the comparison, so nothing was broken"
         sed 's/^/  /' "$WORK/out"
         exit 1
@@ -101,5 +128,53 @@ case "$(cat "$WORK/out")" in
                 ;;
 esac
 
+# Scenario 2: the comparison runs, on a frame that is wrong everywhere.
+#
+# Negating the capture is the bluntest possible wrong frame - same geometry,
+# every pixel differs - so a verdict that lets this through is not measuring
+# pixels at all. It is also precisely what the trim-box verdict let through.
+WRONG="$WORK/wrong-capture"
+mkdir "$WRONG"
+WRONG_MARKER="$WORK/capture-negated"
+
+cat >"$WRONG/import" <<EOF
+#!/usr/bin/env bash
+# Capture for real, then invert what was captured. The last argument is the
+# file import was asked to write.
+set -e
+"$REAL_IMPORT" "\$@"
+for shot; do :; done
+"$REAL_CONVERT" "\$shot" -negate "\$shot"
+echo "\$shot" >"$WRONG_MARKER"
+EOF
+chmod +x "$WRONG/import"
+
+run_runner "$WRONG"
+skip_if_skipped
+
+[ -s "$WRONG_MARKER" ] || {
+        echo "FAIL: the capture was never negated, so the frame compared was not wrong"
+        sed 's/^/  /' "$WORK/out"
+        exit 1
+}
+
+[ "$STATUS" != 0 ] || {
+        echo "FAIL: the render test passed on a frame with every pixel inverted"
+        sed 's/^/  /' "$WORK/out"
+        exit 1
+}
+
+# The right reason, again: a wrong frame must be reported as a difference, not
+# as a comparison that could not be made.
+case "$(cat "$WORK/out")" in
+        *"differs from the golden"*) ;;
+        *)
+                echo "FAIL: an inverted frame was not reported as differing"
+                sed 's/^/  /' "$WORK/out"
+                exit 1
+                ;;
+esac
+
 echo "PASS: a comparison that cannot run fails the render test"
+echo "PASS: a frame with every pixel inverted fails the render test"
 exit 0

@@ -188,32 +188,47 @@ SIZE_B=$(convert "$WORK/b.ppm" -format '%wx%h' info: 2>"$WORK/im.log") ||
 [ "$SIZE_A" = "$SIZE_B" ] ||
         broken_comparison "the frame is $SIZE_B where the golden is $SIZE_A"
 
-# ImageMagick prints the bounding box of the pixels that differ as WxH+X+Y,
-# and 0x0 when none do. It does NOT print an empty string for a match - only
-# for a run that failed - so a bbox that is not well formed is a comparison
-# that did not happen, never a frame that agrees with the golden.
-BBOX=$(convert "$WORK/a.ppm" "$WORK/b.ppm" -compose difference -composite \
-        -threshold 0 -format '%@' info: 2>"$WORK/im.log") ||
-        broken_comparison "the difference of the two frames could not be taken"
+# Count the pixels that DIFFER. Nothing short of that answers the question
+# this test asks, and the near miss is instructive: the verdict used to be
+# read from the '%@' of a thresholded difference, described as the bounding
+# box of the differing pixels. It is not. '%@' is a TRIM box, computed against
+# the corner pixel, so a difference in which every pixel is set trims away to
+# nothing and reports 0x0 - byte for byte what a difference in which none of
+# them are set reports. The golden compared against its own negative passed.
+#
+# compare -metric AE writes the count to STDERR and answers again in its exit
+# status: 0 equal, 1 different, 2 and above the run itself failed. Both are
+# read, and checked against each other, because a status that disagrees with
+# the count means this no longer understands what it is being told and has no
+# business issuing a verdict. The count is not always a whole number - a Q16
+# HDRI build reports the differing CHANNELS, as a fraction of a pixel - so it
+# is only ever tested against zero, never parsed as a pixel total.
+#
+# What it does not do is notice a size mismatch: compare measures the overlap,
+# and calls a 320x130 frame equal to the same frame one column narrower. That
+# is what the size check above is for, and why it has to come first.
+compare -metric AE "$WORK/a.ppm" "$WORK/b.ppm" null: 2>"$WORK/im.log"
+CMP=$?
+AE=$(tail -n 1 "$WORK/im.log" | awk '{print $1}')
 
-case "$BBOX" in
-        [0-9]*x[0-9]*+[0-9]*+[0-9]*) ;;
-        *) broken_comparison "the difference bounding box came back as '$BBOX'" ;;
-esac
+[ "$CMP" -le 1 ] ||
+        broken_comparison "the two frames could not be compared"
 
-case "$BBOX" in
-        0x0+*)
-                echo "PASS: $CASE renders identically to the golden"
-                exit 0
-                ;;
-esac
+[[ $AE =~ ^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$ ]] ||
+        broken_comparison "the count of differing pixels came back as '$AE'"
 
-# Only a diagnostic for the report, so its own failure is not fatal here: the
-# bbox has already decided the verdict. AE is scaled oddly for palette PNGs,
-# which is why it is not what is trusted.
-DIFF=$(compare -metric AE "$WORK/a.ppm" "$WORK/b.ppm" null: 2>&1 | tr -d '\n')
+# Compared as numbers: the count arrives in whatever notation the build uses.
+if awk -v ae="$AE" 'BEGIN { exit !(ae == 0) }'; then
+        [ "$CMP" = 0 ] ||
+                broken_comparison "compare found no differing pixel yet exited $CMP"
+        echo "PASS: $CASE renders identically to the golden"
+        exit 0
+fi
 
-echo "FAIL: $CASE differs from the golden (AE=$DIFF bbox=$BBOX)"
+[ "$CMP" = 1 ] ||
+        broken_comparison "compare found $AE differing yet exited $CMP"
+
+echo "FAIL: $CASE differs from the golden (AE=$AE)"
 cp "$WORK/crop.png" "${GOLDEN%.png}.actual.png" 2>/dev/null
 echo "  actual frame written to ${GOLDEN%.png}.actual.png"
 exit 1
