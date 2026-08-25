@@ -219,7 +219,7 @@ Ring::hyperlink_gc()
         /* A few special values not to be garbage collected. */
         SET_BIT(used, m_hyperlink_current_idx);
         SET_BIT(used, m_hyperlink_hover_idx);
-        SET_BIT(used, m_last_attr.hyperlink_idx());
+        SET_BIT(used, m_last_attr.hyperlink_idx_or_none());
 
         for (i = m_writable; i < m_end; i++) {
                 row = get_writable_index(i);
@@ -899,12 +899,12 @@ Ring::freeze_row(row_t position,
 			CellAttrChange attr_change;
                         guint16 hyperlink_length;
 
-			if (memcmp(&m_last_attr, &attr, sizeof (VteCellAttr)) != 0) {
+			if (!m_last_attr.same_for_stream(attr)) {
 				m_last_attr_text_start_offset = record.text_start_offset + buffer->len;
 				memset(&attr_change, 0, sizeof (attr_change));
 				attr_change.text_end_offset = m_last_attr_text_start_offset;
                                 _attrcpy(&attr_change.attr, &m_last_attr);
-                                hyperlink = hyperlink_get(m_last_attr.hyperlink_idx());
+                                hyperlink = hyperlink_get(m_last_attr.hyperlink_idx_or_none());
                                 attr_change.attr.hyperlink_length = hyperlink->len;
 				_vte_stream_append (m_attr_stream, (char const* ) &attr_change, sizeof (attr_change));
                                 if (G_UNLIKELY (hyperlink->len != 0)) {
@@ -915,7 +915,7 @@ Ring::freeze_row(row_t position,
                                 _vte_stream_append (m_attr_stream, (char const* ) &hyperlink_length, 2);
 				if (!buffer->len)
 					/* This row doesn't use last_attr, adjust */
-                                        record.attr_start_offset += sizeof (attr_change) + hyperlink_length + 2;
+                                        record.attr_start_offset += attr_record_stride(hyperlink_length);
 				m_last_attr = attr;
 			}
 
@@ -928,7 +928,7 @@ Ring::freeze_row(row_t position,
 				memset(&attr_change, 0, sizeof (attr_change));
 				attr_change.text_end_offset = m_last_attr_text_start_offset;
                                 _attrcpy(&attr_change.attr, &m_last_attr);
-                                hyperlink = hyperlink_get(m_last_attr.hyperlink_idx());
+                                hyperlink = hyperlink_get(m_last_attr.hyperlink_idx_or_none());
                                 attr_change.attr.hyperlink_length = hyperlink->len;
 				_vte_stream_append (m_attr_stream, (char const* ) &attr_change, sizeof (attr_change));
                                 if (G_UNLIKELY (hyperlink->len != 0)) {
@@ -1019,17 +1019,17 @@ Ring::thaw_row(row_t position,
 	while (p < end) {
 		if (record.text_start_offset >= m_last_attr_text_start_offset) {
 			attr = m_last_attr;
-                        strcpy(hyperlink_readbuf, hyperlink_get(attr.hyperlink_idx())->str);
+                        strcpy(hyperlink_readbuf, hyperlink_get(attr.hyperlink_idx_or_none())->str);
 		} else {
 			if (record.text_start_offset >= attr_change.text_end_offset) {
-				if (!_vte_stream_read (m_attr_stream, record.attr_start_offset, (char *) &attr_change, sizeof (attr_change)))
+                                auto const record_start = record.attr_start_offset;
+				if (!_vte_stream_read (m_attr_stream, record_start, (char *) &attr_change, sizeof (attr_change)))
 					return;
-				record.attr_start_offset += sizeof (attr_change);
                                 vte_assert_cmpuint (attr_change.attr.hyperlink_length, <=, VTE_HYPERLINK_TOTAL_LENGTH_MAX);
-                                if (attr_change.attr.hyperlink_length && !_vte_stream_read (m_attr_stream, record.attr_start_offset, hyperlink_readbuf, attr_change.attr.hyperlink_length))
+                                if (attr_change.attr.hyperlink_length && !_vte_stream_read (m_attr_stream, record_start + sizeof (attr_change), hyperlink_readbuf, attr_change.attr.hyperlink_length))
                                         return;
                                 hyperlink_readbuf[attr_change.attr.hyperlink_length] = '\0';
-                                record.attr_start_offset += attr_change.attr.hyperlink_length + 2;
+                                record.attr_start_offset = record_start + attr_record_stride(attr_change.attr.hyperlink_length);
 
                                 _attrcpy(&attr, &attr_change.attr);
                                 attr.set_hyperlink_idx(0);
@@ -1106,10 +1106,10 @@ Ring::thaw_row(row_t position,
                         guint16 hyperlink_length;
                         if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - 2, (char *) &hyperlink_length, 2)) {
                                 vte_assert_cmpuint (hyperlink_length, <=, VTE_HYPERLINK_TOTAL_LENGTH_MAX);
-                                if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - 2 - hyperlink_length - sizeof (attr_change), (char *) &attr_change, sizeof (attr_change))) {
+                                if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - attr_record_stride(hyperlink_length), (char *) &attr_change, sizeof (attr_change))) {
                                         if (records[0].text_start_offset == attr_change.text_end_offset) {
                                                 _vte_debug_print(vte::debug::category::RING, "... at attribute change");
-                                                attr_stream_truncate_at -= sizeof (attr_change) + hyperlink_length + 2;
+                                                attr_stream_truncate_at -= attr_record_stride(hyperlink_length);
                                         }
 				}
 			}
@@ -1124,7 +1124,7 @@ Ring::thaw_row(row_t position,
                                 }
                                 if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - 2, (char *) &hyperlink_length, 2)) {
                                         vte_assert_cmpuint (hyperlink_length, <=, VTE_HYPERLINK_TOTAL_LENGTH_MAX);
-                                        if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - 2 - hyperlink_length - sizeof (attr_change), (char *) &attr_change, sizeof (attr_change))) {
+                                        if (_vte_stream_read (m_attr_stream, attr_stream_truncate_at - attr_record_stride(hyperlink_length), (char *) &attr_change, sizeof (attr_change))) {
                                                 m_last_attr_text_start_offset = attr_change.text_end_offset;
                                         } else {
                                                 m_last_attr_text_start_offset = 0;
@@ -1903,7 +1903,7 @@ Ring::rewrap(column_t columns,
 	attr_offset = old_record.attr_start_offset;
 	if (!_vte_stream_read(m_attr_stream, attr_offset, (char *) &attr_change, sizeof (attr_change))) {
                 _attrcpy(&attr_change.attr, &m_last_attr);
-                attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx())->len;
+                attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx_or_none())->len;
 		attr_change.text_end_offset = _vte_stream_head(m_text_stream);
 	}
 
@@ -1951,10 +1951,10 @@ Ring::rewrap(column_t columns,
 		/* Wrap the paragraph */
 		if (attr_change.text_end_offset <= text_offset) {
 			/* Attr change at paragraph boundary, advance to next attr. */
-                        attr_offset += sizeof (attr_change) + attr_change.attr.hyperlink_length + 2;
+                        attr_offset += attr_record_stride(attr_change.attr.hyperlink_length);
 			if (!_vte_stream_read(m_attr_stream, attr_offset, (char *) &attr_change, sizeof (attr_change))) {
                                 _attrcpy(&attr_change.attr, &m_last_attr);
-                                attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx())->len;
+                                attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx_or_none())->len;
 				attr_change.text_end_offset = _vte_stream_head(m_text_stream);
 			}
 		}
@@ -1969,10 +1969,10 @@ Ring::rewrap(column_t columns,
 			gsize runlength;  /* number of bytes we process in one run: identical attributes, within paragraph */
 			if (attr_change.text_end_offset <= text_offset) {
 				/* Attr change at line boundary, advance to next attr. */
-                                attr_offset += sizeof (attr_change) + attr_change.attr.hyperlink_length + 2;
+                                attr_offset += attr_record_stride(attr_change.attr.hyperlink_length);
 				if (!_vte_stream_read(m_attr_stream, attr_offset, (char *) &attr_change, sizeof (attr_change))) {
                                         _attrcpy(&attr_change.attr, &m_last_attr);
-                                        attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx())->len;
+                                        attr_change.attr.hyperlink_length = hyperlink_get(m_last_attr.hyperlink_idx_or_none())->len;
 					attr_change.text_end_offset = _vte_stream_head(m_text_stream);
 				}
 			}
