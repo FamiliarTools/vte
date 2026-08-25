@@ -10385,11 +10385,20 @@ Terminal::draw(cairo_region_t const* region) noexcept
                 auto const top_row = first_displayed_row();
                 auto const bottom_row = last_displayed_row();
 
+                /* The cells an image covers are subject to the same reordering
+                 * as every other cell in the row, so the image has to be placed
+                 * from the VISUAL position of its run. draw_rows() builds the
+                 * same view further down; the call is idempotent and this runs
+                 * first, so ask for it here rather than paint from a stale one.
+                 */
+                ringview_update();
+
                 for (auto row = top_row; row <= bottom_row; row++) {
                         auto const* row_data = find_row_data(row);
                         if (row_data == nullptr)
                                 continue;
 
+                        auto const* bidirow = m_ringview.get_bidirow(row);
                         auto const y = double(row_to_pixel(row));
 
                         for (auto col = 0; col < row_data->len; ) {
@@ -10457,7 +10466,23 @@ Terminal::draw(cairo_region_t const* region) noexcept
                                 auto const src_w = std::min(double(run) * icw, avail_w);
                                 auto const src_h = std::min(ich, avail_h);
 
-                                auto const dst_x = double(col) * m_cell_width;
+                                /* The run is one stripe of one image, so it
+                                 * carries a single embedding level and stays
+                                 * contiguous when reordered; only its direction
+                                 * can flip. Take the leftmost visual column of
+                                 * the two ends rather than the first logical
+                                 * one, which is the right edge on an RTL run.
+                                 *
+                                 * The image's own interior is not mirrored: the
+                                 * terminal-wg recommendation, which VTE's
+                                 * modes.py cites by name, is to treat an inline
+                                 * graphic as a U+FFFC object replacement
+                                 * character, and an object is not reversed by
+                                 * the paragraph it sits in.
+                                 */
+                                auto const vis_head = bidirow->log2vis(vte::grid::column_t(col));
+                                auto const vis_tail = bidirow->log2vis(vte::grid::column_t(col + run - 1));
+                                auto const dst_x = double(std::min(vis_head, vis_tail)) * m_cell_width;
                                 auto const dst_w = src_w * double(m_cell_width) / icw;
                                 auto const dst_h = src_h * double(m_cell_height) / ich;
 
