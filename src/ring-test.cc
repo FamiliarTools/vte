@@ -103,6 +103,23 @@ append_rows(Ring& ring,
         }
 }
 
+/* Widen @row to @n cells of text. append_rows() gives each row a single cell,
+ * which is enough to anchor an image but not to erase part of one.
+ */
+static void
+widen_row(Ring& ring,
+          long row,
+          int n)
+{
+        auto cell = VteCell{};
+        cell.c = 'x';
+        cell.attr.set_columns(1);
+
+        auto* const data = ring.index_writable(row);
+        while (data->len < n)
+                _vte_row_data_append(data, &cell);
+}
+
 /* Place an image @rows_tall rows tall with its top at ring row @top, then end
  * its emission burst the way the sixel path does.
  */
@@ -1261,6 +1278,94 @@ test_ring_image_cells_hold_object_replacement(void)
         g_assert_false(ring.index(5)->cells[0].attr.image());
 }
 
+
+static void
+test_ring_image_partial_erase_keeps_the_rest(void)
+{
+        /* Writing over PART of an image must cost only the cells written.
+         *
+         * The alternative is all-or-nothing: any write whose rectangle touches
+         * an image's bounding box deletes the whole image, which is what a
+         * whole-image blit forces, since it cannot draw an image missing some
+         * of its cells. The draw walks the cells, so it can.
+         */
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        for (auto r = 2; r <= 4; r++)
+                widen_row(ring, r, 4);
+
+        place_image(ring, 2, 3);
+        auto* image = ring.image_map().begin()->second.get();
+        auto const id = image->get_pool_id();
+
+        ring.set_placing_image(image);
+        for (auto r = 0u; r < 3u; r++)
+                ring.stamp_image_row(2 + r, 0, 4, r);
+        ring.set_placing_image(nullptr);
+
+        /* Erase a single cell in the middle row. */
+        auto damage_top = long{}, damage_bottom = long{};
+        g_assert_true(ring.erase_images_in_rect(3, 3, 1, 1,
+                                                &damage_top, &damage_bottom));
+
+        /* The image is still here. */
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_true(ring.image_pool().lookup(id) == image);
+
+        /* The erased cell no longer names it... */
+        g_assert_false(ring.index(3)->cells[1].attr.image());
+
+        /* ...and every other cell still does. */
+        g_assert_true(ring.index(3)->cells[0].attr.image());
+        g_assert_true(ring.index(3)->cells[2].attr.image());
+        g_assert_true(ring.index(2)->cells[0].attr.image());
+        g_assert_true(ring.index(4)->cells[0].attr.image());
+}
+
+static void
+test_ring_image_full_erase_frees_it(void)
+{
+        /* The other half: once NO cell names the image, it must actually be
+         * freed. Keeping it would be retention with nothing able to draw it
+         * and nothing able to erase it.
+         */
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        for (auto r = 2; r <= 4; r++)
+                widen_row(ring, r, 4);
+
+        place_image(ring, 2, 3);
+        auto* image = ring.image_map().begin()->second.get();
+        auto const id = image->get_pool_id();
+
+        ring.set_placing_image(image);
+        for (auto r = 0u; r < 3u; r++)
+                ring.stamp_image_row(2 + r, 0, 4, r);
+        ring.set_placing_image(nullptr);
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+
+        /* Erase the whole area the image covers. */
+        auto damage_top = long{}, damage_bottom = long{};
+        g_assert_true(ring.erase_images_in_rect(2, 4, 0, 79,
+                                                &damage_top, &damage_bottom));
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+
+        /* The damage covers the rows the image occupied, so the caller
+         * repaints all of them and not just the erased rectangle.
+         */
+        g_assert_cmpint(damage_top, <=, 2);
+        g_assert_cmpint(damage_bottom, >=, 4);
+
+        /* Its id resolves to nothing rather than to a recycled image. */
+        g_assert_null(ring.image_pool().lookup(id));
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1304,6 +1409,9 @@ main(int argc,
 
         g_test_add_func("/vte/ring/image-pool/reference-survives-freeze", test_ring_image_reference_survives_freeze);
         g_test_add_func("/vte/ring/image-pool/reference-rebinds-after-thaw", test_ring_image_reference_rebinds_after_thaw);
+
+        g_test_add_func("/vte/ring/image/partial-erase-keeps-the-rest", test_ring_image_partial_erase_keeps_the_rest);
+        g_test_add_func("/vte/ring/image/full-erase-frees-it", test_ring_image_full_erase_frees_it);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

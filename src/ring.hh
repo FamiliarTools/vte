@@ -356,6 +356,7 @@ private:
         void unlink_image_from_top_map(vte::image::Image const* image) noexcept;
         void rebuild_image_top_map() /* throws */;
         image_by_top_map_type::iterator erase_image(image_by_top_map_type::iterator it) noexcept;
+        bool image_has_any_cell(vte::image::Image const* image) const noexcept;
         void drop_images_before(row_t row) noexcept;
         void drop_images_after(row_t row) noexcept;
         void drop_images_torn_by_rewrap(column_t columns) noexcept;
