@@ -28,19 +28,24 @@
 # pass against an entirely wrong frame was the deliberate probe: the golden
 # compared against its own negative passed.
 #
-# So drive the real runner five times, once per way the answer can be wrong,
-# and require it to answer each one on its own terms:
+# So drive the real runner once per way the answer can be wrong, and require it
+# to answer each one on its own terms:
 #
 #   - the frame it captured itself passes;
 #   - a frame with ONE pixel changed fails;
 #   - a frame with EVERY pixel changed fails;
 #   - a frame one column narrower than the golden fails;
-#   - a comparison that could not be MADE fails, and says so rather than
-#     blaming the renderer.
+#   - a comparator that could not RUN fails, and says so rather than blaming
+#     the renderer;
+#   - a comparator that ran and answered a count of the wrong SHAPE fails, and
+#     is named apart from the one above it;
+#   - an app whose sixel default is off still renders, because the runner asks
+#     for --sixel.
 #
-# The first is not a duplicate of the render cases. The four below it all read
+# The first is not a duplicate of the render cases. The failing ones all read
 # "the runner said no", and a runner that said no to everything would satisfy
-# all four; the passing run is what makes their agreement mean anything.
+# every one of them; the passing run is what makes their agreement mean
+# anything.
 #
 # usage: render-gate-test.sh <vte-app> <srcdir> <case> <gtk-arm>
 
@@ -147,13 +152,18 @@ EOF
 shim_geometry() { awk '$1 == "geometry" { print $2 }' "$1" 2>/dev/null; }
 shim_changed() { awk '$1 == "changed" { print $2 }' "$1" 2>/dev/null; }
 
-# Run the real runner with $1 prepended to PATH. Leaves the runner's output in
-# $WORK/out and its exit status in $STATUS.
+# Run the real runner with $1 prepended to PATH, against $2 as the app when
+# given and the real one otherwise. Leaves the runner's output in $WORK/out and
+# its exit status in $STATUS.
 run_runner() {
         PATH="$1:$PATH" VTE_TEST_ARTIFACT_DIR="$WORK" \
-                "$RUNNER" "$APP" "$FIXTURES" "$CASE" "$ARM" >"$WORK/out" 2>&1
+                "$RUNNER" "${2:-$APP}" "$FIXTURES" "$CASE" "$ARM" >"$WORK/out" 2>&1
         STATUS=$?
 }
+
+# An empty directory, for the runs that damage nothing on PATH.
+NO_SHIM="$WORK/no-shim"
+mkdir "$NO_SHIM"
 
 # A skip is a skip whichever scenario hit it: the runner decides that from the
 # tools and the display, which this test cannot supply.
@@ -274,13 +284,30 @@ case "$(cat "$WORK/out")" in
         *) verdict_failed "a frame of the wrong size was not reported as one" ;;
 esac
 
-# Scenario 5: the comparison cannot run.
+# Scenarios 5 and 6: the comparison answers something that is not a verdict.
 #
-# Refuse the one command the verdict is read from, so everything before it -
-# the capture, the crop, the normalisation - still works and the runner
-# arrives at the comparison with a frame worth comparing. Exit 2 is what
-# ImageMagick uses for a compare that could not run, as against 1 for one that
-# ran and found a difference.
+# The runner reads the comparator TWICE - the exit status, and the count on
+# stderr - and refuses to rule on either alone. The two scenarios below drive
+# one of those refusals each.
+#
+# They assert the runner's exact words, not merely that it failed, because the
+# words are the whole of what these two mechanisms decide. Measured on gtk3, by
+# deleting each from the runner on its own and running this file: with the exit
+# status check gone the scenario 5 run still failed, on the count's shape; with
+# the count's shape check gone the scenario 6 run still failed, on the exit
+# status disagreeing with the count. Neither deletion produced a passing run
+# here - what it produced was the other mechanism's message, naming a different
+# thing as broken. So each scenario pins the message its own mechanism gives.
+#
+# Refusing the comparator outright still lets everything before it - the
+# capture, the crop, the normalisation - work, so the runner arrives at the
+# comparison with a frame worth comparing.
+
+# Scenario 5: the comparator exits as one that could not run.
+#
+# Exit 2 is what ImageMagick uses for a compare that could not run, as against
+# 1 for one that ran and found a difference. Nothing usable is written to
+# stderr either, which is the real shape of the failure.
 BROKEN="$WORK/broken-comparator"
 mkdir "$BROKEN"
 BROKEN_MARKER="$WORK/comparison-reached"
@@ -305,13 +332,96 @@ skip_if_skipped
 # And it has to say which of the two things went wrong. "Differs from the
 # golden" would send a reader looking for a rendering bug that is not there.
 case "$(cat "$WORK/out")" in
-        *"could not be compared"*) ;;
-        *) verdict_failed "a broken comparison was not reported as one" ;;
+        *"the two frames could not be compared"*) ;;
+        *) verdict_failed "a comparator that could not run was not reported as one" ;;
 esac
+
+# Scenario 6: the comparator succeeds and answers a count that is not a number.
+#
+# This is the failure the exit status cannot see: compare exits 0, so by that
+# channel the run went fine, and the only thing wrong is the count itself. It
+# happens whenever the last line of ImageMagick's stderr is not the metric - a
+# warning printed after it, a build that words the metric differently - and a
+# runner that carried on would be reading a verdict out of that word.
+SHAPELESS="$WORK/shapeless-count"
+mkdir "$SHAPELESS"
+SHAPELESS_MARKER="$WORK/shapeless-reached"
+
+cat >"$SHAPELESS/compare" <<EOF
+#!/usr/bin/env bash
+echo reached >"$SHAPELESS_MARKER"
+echo "stub compare: no metric here" >&2
+exit 0
+EOF
+chmod +x "$SHAPELESS/compare"
+
+run_runner "$SHAPELESS"
+skip_if_skipped
+
+[ -r "$SHAPELESS_MARKER" ] ||
+        verdict_failed "the run never reached the comparison, so no count was mangled"
+
+[ "$STATUS" != 0 ] ||
+        verdict_failed "the render test passed on a count of differing pixels that is not a number"
+
+case "$(cat "$WORK/out")" in
+        *"the count of differing pixels came back as"*) ;;
+        *) verdict_failed "a count that is not a number was not reported as one" ;;
+esac
+
+# Scenario 7: the --sixel on the runner's command line.
+#
+# The app defaults sixel on today (app.cc, gboolean sixel{true}), so the flag
+# changes nothing as things stand and no render case would notice its deletion.
+# What it is there for is the day that default flips, and that day can be
+# staged: --sixel and --no-sixel write the same gboolean through GOption, which
+# parses argv left to right, so an app wrapper that puts --no-sixel AHEAD of
+# the runner's arguments is an app whose effective default is off.
+#
+# Under that wrapper the runner's own --sixel is the only thing left that can
+# put the images back, so deleting it turns this red. The probe above it
+# establishes that the slot is live at all: the same flag rewritten to
+# --no-sixel, in the place the runner puts it, must change the frame.
+SIXEL_OFF="$WORK/app-sixel-rewritten-off"
+cat >"$SIXEL_OFF" <<EOF
+#!/usr/bin/env bash
+args=()
+for a; do
+        [ "\$a" = --sixel ] && a=--no-sixel
+        args+=("\$a")
+done
+exec "$APP" "\${args[@]}"
+EOF
+chmod +x "$SIXEL_OFF"
+
+run_runner "$NO_SHIM" "$SIXEL_OFF"
+skip_if_skipped
+
+[ "$STATUS" != 0 ] ||
+        verdict_failed "turning the runner's own sixel flag off did not change the frame, so the probe below it is vacuous"
+case "$(cat "$WORK/out")" in
+        *"differs from the golden"*) ;;
+        *) verdict_failed "a terminal with sixel turned off was not reported as differing" ;;
+esac
+
+DEFAULT_OFF="$WORK/app-sixel-default-off"
+cat >"$DEFAULT_OFF" <<EOF
+#!/usr/bin/env bash
+exec "$APP" --no-sixel "\$@"
+EOF
+chmod +x "$DEFAULT_OFF"
+
+run_runner "$NO_SHIM" "$DEFAULT_OFF"
+skip_if_skipped
+
+[ "$STATUS" = 0 ] ||
+        verdict_failed "an app whose sixel default is off rendered no image, so the runner's --sixel did not override it"
 
 echo "PASS: the frame the render test captures itself passes it"
 echo "PASS: a frame with one changed pixel fails the render test"
 echo "PASS: a frame with every pixel inverted fails the render test"
 echo "PASS: a frame one column narrower than the golden fails the render test"
-echo "PASS: a comparison that cannot run fails the render test"
+echo "PASS: a comparator that could not run fails the render test, and is named as one"
+echo "PASS: a count of differing pixels that is not a number fails the render test, and is named as one"
+echo "PASS: the runner's --sixel turns images back on for an app whose default is off"
 exit 0

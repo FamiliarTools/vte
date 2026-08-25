@@ -204,10 +204,15 @@ FONT=${VTE_TEST_FONT:-Monospace 12}
 # --sixel is asked for explicitly rather than relied on. The app defaults it
 # on (app.cc, gboolean sixel{true}), which is why the option is hidden from
 # --help-all, but that default is a thing a patch can change and this suite
-# would then be capturing a terminal with no images in it. The flag is real in
-# both directions: measured on gtk3, --no-sixel in its place takes bands from
-# PASS to FAIL AE=3456. It replaces an exported VTE_SIXEL=1 that nothing in
-# the tree ever read.
+# would then be capturing a terminal with no images in it. It replaces an
+# exported VTE_SIXEL=1 that nothing in the tree ever read.
+#
+# No render case holds it while the default is on, so render-gate-test.sh
+# stages the day it flips: it runs this runner against a wrapper that puts
+# --no-sixel AHEAD of these arguments, which - GOption parsing argv left to
+# right into the one gboolean - is an app whose effective default is off. The
+# flag below is then the only thing putting the images back, and deleting it
+# turns that scenario red.
 "$APP" --sixel "${KEEP[@]}" --no-load-config --no-decorations --geometry 80x24 --font "$FONT" \
         -- sh -c "$CHILD" >"$WORK/app.log" 2>&1 &
 APID=$!
