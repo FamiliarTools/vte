@@ -38,7 +38,19 @@ class Context {
         friend class Parser;
 
 public:
-        Context() = default;
+        /* The colour registers must be initialised HERE and not only in
+         * prepare(), which resets them only when the terminal uses PRIVATE
+         * colour registers. With shared registers - DECRST 1070 - nothing
+         * else writes them, so the first image is parsed against an all-zero
+         * palette and every colour it selects but does not define comes out
+         * fully transparent, i.e. the image is invisible.
+         *
+         * (All-zero rather than indeterminate because the Context is created
+         * with make_unique, which value-initialises. That makes this a
+         * reliably wrong picture rather than undefined behaviour - worse in
+         * one way, since it will never trip a sanitizer.)
+         */
+        Context() noexcept { reset_colors(); }
         ~Context() = default;
 
         Context(Context const&) = delete;
