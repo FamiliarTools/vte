@@ -5710,9 +5710,14 @@ try
         if (!m_sixel_context)
                 m_sixel_context = std::make_unique<vte::sixel::Context>();
 
+        /* The SGR foreground is deliberately NOT passed: DEC STD 070 11.1
+         * says the ANSI SGR selections do not affect sixels, so the initial
+         * pen comes from the palette. The background is still passed, because
+         * P2=0/2 mean "set colour 0 to the current background" and the
+         * terminal's background is what that means here.
+         */
         m_sixel_context->prepare(id,
                                  seq.introducer(),
-                                 fg.red >> 8, fg.green >> 8, fg.blue >> 8,
                                  bg.red >> 8, bg.green >> 8, bg.blue >> 8,
                                  back == VTE_DEFAULT_BG || transparent_bg,
                                  private_color_registers);

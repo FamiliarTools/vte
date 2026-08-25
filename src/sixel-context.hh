@@ -95,7 +95,12 @@ public:
 
 private:
 
-        color_t m_colors[2 + k_num_colors];
+        /* m_colors[0] is the background fill, m_colors[1] the current pen;
+         * the addressable colour registers start after them.
+         */
+        static inline constexpr unsigned k_color_register_offset = 2;
+
+        color_t m_colors[k_color_register_offset + k_num_colors];
 
         color_index_t m_current_color{0};
 
@@ -594,9 +599,25 @@ private:
                  * References: DEC PPLV2 § 5.5.1
                  */
 
+                /* No scanline at all: the height cap tripped, or a scanline
+                 * allocation failed. Both null every scanline pointer.
+                 *
+                 * This has to be checked BEFORE the arithmetic below, not
+                 * inside it: the zero-sixel branch computes
+                 * m_scanline_pos + m_repeat_count * 6, and pointer arithmetic
+                 * on a null pointer is undefined behaviour, not a harmless
+                 * null. It is reachable from untrusted input - a stream that
+                 * runs past the height cap and then emits a repeat.
+                 */
+                if (G_UNLIKELY(m_scanline_pos == nullptr)) {
+                        m_repeat_count = 1;
+                        return;
+                }
+
                 if (sixel) {
                         auto const color = m_current_color;
                         auto const scanline_end = m_scanline_end;
+                        auto const scanline_start = m_scanline_pos;
                         auto scanline_pos = m_scanline_pos;
 
                         for (auto n = m_repeat_count;
@@ -616,7 +637,16 @@ private:
                         }
 
                         m_scanline_pos = scanline_pos;
-                        m_scanline_mask |= sixel;
+
+                        /* Only record the sixel in the mask if it actually
+                         * stored something. The mask is what raises the
+                         * image's height, so OR-ing it unconditionally makes
+                         * a sixel that fell off the right-hand end of a full
+                         * scanline - storing nothing - grow the image
+                         * downwards anyway.
+                         */
+                        if (scanline_pos != scanline_start)
+                                m_scanline_mask |= sixel;
 
                 } else {
                         /* If there are no bits to set, just advance the position,
@@ -648,9 +678,6 @@ public:
 
         void prepare(int id,
                      uint32_t introducer,
-                     unsigned fg_red,
-                     unsigned fg_green,
-                     unsigned fg_blue,
                      unsigned bg_red,
                      unsigned bg_green,
                      unsigned bg_blue,
