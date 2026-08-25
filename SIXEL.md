@@ -243,6 +243,12 @@ codebase knows where an image is except the cells it covers.
   at a budget of zero so that the difference is pixels and nothing else. The
   ring's own accounting is not evidence for its own bound, and the disk that
   the RAM ceiling is bought with is reported next to it.
+- `perf/kill-switch/` asks whether turning images off reaches the terminal a
+  desktop actually launches, rather than one started by hand: it flips GNOME
+  Console's `sixel-enabled` key and reads the answer back over the pty from a
+  D-Bus activated, systemd-owned Console, checking that the service did not
+  restart in between. Both what the terminal advertises in DA1 and what it does
+  with a real image flip together.
 
 ## What is not done
 
