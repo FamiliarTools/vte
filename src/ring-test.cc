@@ -1366,6 +1366,96 @@ test_ring_image_full_erase_frees_it(void)
         g_assert_null(ring.image_pool().lookup(id));
 }
 
+
+static void
+test_ring_image_pixels_survive_eviction(void)
+{
+        /* The scrollback half of image support.
+         *
+         * Until now only the image REFERENCE survived freezing: a row could
+         * come back knowing it was part of an image, while the image itself
+         * had been evicted, so the cells resolved to nothing and drew as
+         * background. The picture silently disappeared from the scrollback.
+         *
+         * The pixels are now spilled to a fourth stream when the image is
+         * evicted, and restored when a row that names it is thawed.
+         */
+        auto ring = Ring{1024, true};   /* with streams: this is about them */
+        ring.set_visible_rows(24);
+        append_rows(ring, 4);
+        widen_row(ring, 1, 4);
+
+        place_image(ring, 1, 1);
+        auto* const image = ring.image_map().begin()->second.get();
+        auto const priority = image->get_priority();
+        auto const width = image->get_width_px();
+        auto const height = image->get_height_px();
+
+        ring.set_placing_image(image);
+        ring.stamp_image_row(1, 0, 4, 0);
+        ring.set_placing_image(nullptr);
+
+        /* Freeze the row, then evict the image outright - the cells still
+         * name it, but the pixels are gone from memory.
+         */
+        append_rows(ring, 200);
+        ring.evict_all_images_for_test();
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+
+        /* Thawing the row must bring the image back. */
+        auto const* const thawed = ring.index(1);
+        g_assert_nonnull(thawed);
+        g_assert_cmpint(thawed->len, >, 0);
+
+        auto const& attr = thawed->cells[0].attr;
+        g_assert_true(attr.image());
+
+        auto const ref = attr.image_ref();
+        g_assert_true(ref.valid());
+
+        auto* const restored = ring.image_pool().lookup(ref);
+        g_assert_nonnull(restored);
+
+        /* Same image, and the same picture: identity is the priority, and the
+         * geometry has to come back intact or it would draw at the wrong
+         * scale.
+         */
+        g_assert_cmpuint(restored->get_priority(), ==, priority);
+        g_assert_cmpint(restored->get_width_px(), ==, width);
+        g_assert_cmpint(restored->get_height_px(), ==, height);
+        g_assert_nonnull(restored->get_surface());
+}
+
+static void
+test_ring_image_spill_is_reclaimed(void)
+{
+        /* A spill is only needed while a row naming it can still be thawed.
+         * Once those rows are gone the pixels are unreachable, and keeping
+         * them would make this stream a pure leak - the very failure a fourth
+         * stream risks introducing.
+         */
+        auto ring = Ring{64, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 4);
+        widen_row(ring, 1, 4);
+
+        place_image(ring, 1, 1);
+        auto* const image = ring.image_map().begin()->second.get();
+
+        ring.set_placing_image(image);
+        ring.stamp_image_row(1, 0, 4, 0);
+        ring.set_placing_image(nullptr);
+
+        append_rows(ring, 40);
+        ring.evict_all_images_for_test();
+        g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 1);
+
+        /* Push the image's row out of the ring entirely. */
+        append_rows(ring, 4096);
+
+        g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 0);
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1412,6 +1502,9 @@ main(int argc,
 
         g_test_add_func("/vte/ring/image/partial-erase-keeps-the-rest", test_ring_image_partial_erase_keeps_the_rest);
         g_test_add_func("/vte/ring/image/full-erase-frees-it", test_ring_image_full_erase_frees_it);
+
+        g_test_add_func("/vte/ring/image/pixels-survive-eviction", test_ring_image_pixels_survive_eviction);
+        g_test_add_func("/vte/ring/image/spill-is-reclaimed", test_ring_image_spill_is_reclaimed);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

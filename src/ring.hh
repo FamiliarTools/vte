@@ -276,6 +276,17 @@ private:
          */
 	bool m_has_streams;
 	VteStream *m_attr_stream, *m_text_stream, *m_row_stream;
+
+        /* The fourth stream: the PIXELS of images that have been evicted from
+         * memory while rows that name them can still be thawed back.
+         *
+         * Without it only the image REFERENCE survives the scrollback, so an
+         * image dropped under memory pressure - or simply scrolled far enough
+         * back - resolves to nothing and its cells draw as background. The
+         * reference is rebound by priority, which is monotonic and never
+         * reused, so it is also the right key here.
+         */
+        VteStream* m_image_stream{nullptr};
 	size_t m_last_attr_text_start_offset{0};
 	VteCellAttr m_last_attr;
 	GString *m_utf8_buffer;
@@ -356,6 +367,37 @@ private:
         void unlink_image_from_top_map(vte::image::Image const* image) noexcept;
         void rebuild_image_top_map() /* throws */;
         image_by_top_map_type::iterator erase_image(image_by_top_map_type::iterator it) noexcept;
+        /* One spilled image: a fixed header, then the pixel data. */
+        typedef struct _VTE_GNUC_PACKED _ImageSpillRecord {
+                uint64_t priority;
+                int32_t width_px;
+                int32_t height_px;
+                int32_t left_cells;
+                int32_t top_cells;
+                int32_t cell_width;
+                int32_t cell_height;
+                uint32_t data_len;
+        } ImageSpillRecord;
+
+        /* Where each spilled image lives in m_image_stream, plus the rows it
+         * covered.
+         *
+         * The rows are kept here rather than read back from the record because
+         * they have to be answerable AFTER the Image object is gone: they are
+         * what decides when a spill can never be needed again, and therefore
+         * when the stream's tail may advance past it.
+         */
+        struct ImageSpill {
+                gsize offset;
+                long top;
+                long bottom;
+        };
+        std::map<size_t /* priority */, ImageSpill> m_image_spill{};
+
+        void spill_image(vte::image::Image const* image) noexcept;
+        vte::image::Image* restore_image(size_t priority) /* throws */;
+        void reclaim_image_spill(row_t before_row) noexcept;
+
         bool image_has_any_cell(vte::image::Image const* image) const noexcept;
         void drop_images_before(row_t row) noexcept;
         void drop_images_after(row_t row) noexcept;
@@ -390,6 +432,24 @@ public:
         auto const& image_pool() const noexcept { return m_image_pool; }
         auto& image_pool() noexcept { return m_image_pool; }
         void sweep_image_pool_for_test() noexcept { sweep_image_pool(); }
+
+        /* For tests: evict every resident image, as memory pressure would,
+         * spilling the pixels of any that can still be thawed back.
+         */
+        void evict_all_images_for_test() noexcept
+        {
+                while (!m_image_map.empty()) {
+                        auto& image = m_image_map.begin()->second;
+                        spill_image(image.get());
+                        m_image_fast_memory_used -= image->resource_size();
+                        note_image_freed(image.get());
+                        unlink_image_from_top_map(image.get());
+                        m_image_map.erase(m_image_map.begin());
+                }
+                sync_has_images();
+        }
+
+        auto image_spill_count_for_test() const noexcept { return m_image_spill.size(); }
 
         /* The bytes the resident images are charged for, i.e. what the image GC
          * spends its budget against. It has to be the sum over exactly the images

@@ -150,8 +150,10 @@ Ring::Ring(row_t max_rows,
 		m_attr_stream = _vte_file_stream_new ();
 		m_text_stream = _vte_file_stream_new ();
 		m_row_stream = _vte_file_stream_new ();
+		m_image_stream = _vte_file_stream_new ();
 	} else {
 		m_attr_stream = m_text_stream = m_row_stream = nullptr;
+		m_image_stream = nullptr;
 	}
 
 	m_utf8_buffer = g_string_sized_new (128);
@@ -176,6 +178,7 @@ Ring::~Ring()
 		g_object_unref (m_attr_stream);
 		g_object_unref (m_text_stream);
 		g_object_unref (m_row_stream);
+		g_object_unref (m_image_stream);
 	}
 
 	g_string_free (m_utf8_buffer, TRUE);
@@ -421,6 +424,202 @@ Ring::sweep_image_pool() noexcept
         m_image_pool.sweep_end();
 }
 
+/*
+ * Write an image's pixels to the image stream, so that a row naming it can
+ * still be drawn after the image itself has been freed.
+ *
+ * Keyed by priority: it comes from a monotonically increasing counter and is
+ * never reused, so unlike a pool id it still means the same image whenever it
+ * is read back.
+ */
+void
+Ring::spill_image(vte::image::Image const* image) noexcept
+{
+        if (!m_has_streams || m_image_stream == nullptr)
+                return;
+
+        auto const priority = image->get_priority();
+
+        /* Already spilled. A restored image can be evicted again, and
+         * re-appending its pixels every time would grow the stream without
+         * bound while adding nothing.
+         */
+        if (m_image_spill.find(priority) != m_image_spill.end())
+                return;
+
+        auto* const surface = image->get_surface();
+        if (surface == nullptr ||
+            cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS)
+                return;
+
+        cairo_surface_flush(surface);
+
+        auto const* const data = cairo_image_surface_get_data(surface);
+        if (data == nullptr)
+                return;
+
+        auto const stride = cairo_image_surface_get_stride(surface);
+        auto const height = image->get_height_px();
+        auto const width = image->get_width_px();
+        if (stride <= 0 || width <= 0 || height <= 0)
+                return;
+
+        auto const offset = _vte_stream_head(m_image_stream);
+
+        auto record = ImageSpillRecord{};
+        record.priority = uint64_t(priority);
+        record.width_px = int32_t(width);
+        record.height_px = int32_t(height);
+        record.left_cells = int32_t(image->get_left());
+        record.top_cells = int32_t(image->get_top());
+        /* The image's OWN layout cell. Writing the terminal's current one here
+         * would make an evicted-then-restored image change scale whenever the
+         * two differ.
+         */
+        record.cell_width = int32_t(image->get_cell_width());
+        record.cell_height = int32_t(image->get_cell_height());
+
+        /* Store tightly packed rather than at the surface's stride: the
+         * stride is an allocation detail of the cairo surface we happen to
+         * have now, and the surface built on the way back in may choose a
+         * different one.
+         */
+        auto const row_bytes = size_t(width) * 4;
+        record.data_len = uint32_t(row_bytes * size_t(height));
+
+        _vte_stream_append(m_image_stream, (char const*)&record, sizeof(record));
+        for (auto y = 0; y < height; y++)
+                _vte_stream_append(m_image_stream,
+                                   (char const*)(data + size_t(y) * size_t(stride)),
+                                   row_bytes);
+
+        m_image_spill[priority] = ImageSpill{offset,
+                                             long(image->get_top()),
+                                             long(image->get_bottom())};
+}
+
+/*
+ * Rebuild an image previously written by spill_image(), or nullptr if it was
+ * never spilled or has since been reclaimed.
+ *
+ * The restored image joins m_image_map like any other, so it is subject to the
+ * same eviction; spill_image() is idempotent so that cycle is stable.
+ */
+vte::image::Image*
+Ring::restore_image(size_t priority) /* throws */
+{
+        if (!m_has_streams || m_image_stream == nullptr)
+                return nullptr;
+
+        auto const it = m_image_spill.find(priority);
+        if (it == m_image_spill.end())
+                return nullptr;
+
+        auto record = ImageSpillRecord{};
+        if (!_vte_stream_read(m_image_stream, it->second.offset,
+                              (char*)&record, sizeof(record)))
+                return nullptr;
+
+        /* Everything below comes off disk, so none of it is trusted. */
+        if (record.priority != uint64_t(priority) ||
+            record.width_px <= 0 || record.height_px <= 0 ||
+            record.width_px > VTE_SIXEL_MAX_WIDTH ||
+            record.height_px > VTE_SIXEL_MAX_HEIGHT ||
+            record.cell_width <= 0 || record.cell_height <= 0)
+                return nullptr;
+
+        auto const row_bytes = size_t(record.width_px) * 4;
+        if (record.data_len != row_bytes * size_t(record.height_px))
+                return nullptr;
+
+        auto surface = vte::take_freeable
+                (cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+                                            record.width_px, record.height_px));
+        if (cairo_surface_status(surface.get()) != CAIRO_STATUS_SUCCESS)
+                return nullptr;
+
+        auto* const dest = cairo_image_surface_get_data(surface.get());
+        auto const stride = cairo_image_surface_get_stride(surface.get());
+        if (dest == nullptr || stride < int(row_bytes))
+                return nullptr;
+
+        auto data_offset = it->second.offset + sizeof(record);
+        for (auto y = 0; y < record.height_px; y++) {
+                if (!_vte_stream_read(m_image_stream,
+                                      data_offset + size_t(y) * row_bytes,
+                                      (char*)(dest + size_t(y) * size_t(stride)),
+                                      row_bytes))
+                        return nullptr;
+        }
+
+        cairo_surface_mark_dirty(surface.get());
+
+        /* Copied out of the packed record first: a packed field cannot bind
+         * to the constructor's reference parameters.
+         */
+        auto const width_px = int(record.width_px);
+        auto const height_px = int(record.height_px);
+        auto const left_cells = int(record.left_cells);
+        auto const top_cells = int(record.top_cells);
+        auto const cell_width = int(record.cell_width);
+        auto const cell_height = int(record.cell_height);
+
+        auto image = std::make_unique<vte::image::Image>(std::move(surface),
+                                                         priority,
+                                                         width_px,
+                                                         height_px,
+                                                         left_cells,
+                                                         top_cells,
+                                                         cell_width,
+                                                         cell_height);
+
+        auto const pool_id = m_image_pool.allocate(image.get());
+        if (pool_id == vte::image::k_ref_pool_id_none)
+                return nullptr;
+
+        image->set_pool_id(pool_id);
+
+        auto* const raw = image.get();
+        m_image_fast_memory_used += image->resource_size();
+        m_image_map[priority] = std::move(image);
+        m_image_by_top_map.emplace(raw->get_top(), raw);
+        sync_has_images();
+
+        return raw;
+}
+
+/*
+ * Drop spilled images whose rows have left the ring entirely, and advance the
+ * stream's tail past them.
+ *
+ * A spill is needed only while some row that names it can still be thawed. Once
+ * the last such row is gone the pixels are unreachable, so keeping them is pure
+ * growth - which is the failure this stream would otherwise introduce.
+ */
+void
+Ring::reclaim_image_spill(row_t before_row) noexcept
+{
+        if (!m_has_streams || m_image_stream == nullptr)
+                return;
+
+        for (auto it = m_image_spill.begin(); it != m_image_spill.end(); ) {
+                if (it->second.bottom >= long(before_row))
+                        ++it;
+                else
+                        it = m_image_spill.erase(it);
+        }
+
+        /* Records are appended in priority order and priorities only grow, so
+         * the surviving entry with the smallest offset bounds everything still
+         * reachable.
+         */
+        auto tail = _vte_stream_head(m_image_stream);
+        for (auto const& [priority, spill] : m_image_spill)
+                tail = std::min(tail, spill.offset);
+
+        _vte_stream_advance_tail(m_image_stream, tail);
+}
+
 void
 Ring::image_gc() noexcept
 {
@@ -432,6 +631,13 @@ Ring::image_gc() noexcept
                 }
 
                 auto& image = m_image_map.begin()->second;
+
+                /* Evicted for memory, not erased by the user: rows naming it
+                 * can still be thawed, so keep the pixels where they cost
+                 * disk instead of RAM.
+                 */
+                spill_image(image.get());
+
                 m_image_fast_memory_used -= image->resource_size();
                 note_image_freed(image.get());
                 unlink_image_from_top_map(image.get());
@@ -482,6 +688,12 @@ Ring::drop_images_before(row_t row) noexcept
                         ++it;
                         continue;
                 }
+
+                /* Its rows are leaving the ring, but they can be thawed until
+                 * they are discarded outright, which is where the spill is
+                 * reclaimed.
+                 */
+                spill_image(image);
 
                 it = erase_image(it);
         }
@@ -1289,9 +1501,14 @@ Ring::thaw_row(row_t position,
                                          * some recycled id.
                                          */
                                         if (sref.priority != 0) {
-                                                auto const it = m_image_map.find(size_t(sref.priority - 1));
-                                                if (it != m_image_map.end())
+                                                auto const priority = size_t(sref.priority - 1);
+                                                auto const it = m_image_map.find(priority);
+                                                if (it != m_image_map.end()) {
                                                         stream_image_pool_id = it->second->get_pool_id();
+                                                } else if (auto* const restored = restore_image(priority)) {
+                                                        /* Evicted, but its pixels were kept. */
+                                                        stream_image_pool_id = restored->get_pool_id();
+                                                }
                                         }
                                 }
 
@@ -1687,6 +1904,7 @@ Ring::discard_one_row()
                                 _vte_stream_advance_tail(m_text_stream, record.text_start_offset);
                                 _vte_stream_advance_tail(m_attr_stream, record.attr_start_offset);
                         }
+                        reclaim_image_spill(m_start);
                 }
 	} else {
 		m_writable = m_start;
