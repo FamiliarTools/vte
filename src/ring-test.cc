@@ -47,7 +47,16 @@ using namespace vte::base;
 static int const kCellWidth = 10;
 static int const kCellHeight = 20;
 
-/* The invariant the maps are supposed to keep, checked from the outside.
+/* The invariant the maps are supposed to keep is Ring::validate_images(), and
+ * these tests call it directly rather than restating it here.
+ *
+ * A second copy of an invariant in the test file is worth very little: it can
+ * agree with the ring while the ring's own copy is wrong, and it is the ring's
+ * copy that every other caller of validate() relies on. Calling it is also the
+ * only way it runs at all, since validate() is behind VTE_DEBUG and no shipping
+ * build and no default test run turns that on.
+ *
+ * What it checks:
  *
  * (a) Residency. An image whose every row has left the ring is unreachable: it
  *     cannot be drawn (its rows are not in the viewport and never will be
@@ -58,33 +67,9 @@ static int const kCellHeight = 20;
  *     against, so it has to be the sum over exactly the images that are
  *     resident. A row-destroying path that frees nothing overcounts, and the
  *     overcount is then paid for by evicting images that are still on screen.
+ * (c) Indexing. The by-top map holds the same images as the priority map, each
+ *     filed under the row it really starts at.
  */
-static void
-assert_image_invariants(Ring const& ring,
-                        char const* where)
-{
-        auto sum = size_t{0};
-
-        for (auto const& [priority, image] : ring.image_map()) {
-                if (long(image->get_bottom()) < long(ring.delta())) {
-                        g_error("%s: image at rows %ld..%ld is resident but the "
-                                "ring starts at row %lu - every row it covers is gone",
-                                where,
-                                long(image->get_top()),
-                                long(image->get_bottom()),
-                                ring.delta());
-                }
-
-                sum += image->resource_size();
-        }
-
-        if (sum != ring.image_memory_used()) {
-                g_error("%s: image memory accounted %lu, resident images hold %lu",
-                        where,
-                        (unsigned long)ring.image_memory_used(),
-                        (unsigned long)sum);
-        }
-}
 
 /* Append @n rows carrying one cell of text each, so that they are real rows
  * with content rather than untouched array slots.
@@ -101,6 +86,12 @@ append_rows(Ring& ring,
                 auto const row = ring.append(0);
                 _vte_row_data_append(row, &cell);
         }
+
+        /* Appending to a full ring discards rows off the front, which is the
+         * commonest way an image stops being reachable, so check here rather
+         * than leave it to every caller to remember.
+         */
+        ring.validate_images();
 }
 
 /* Widen @row to @n cells of text. append_rows() gives each row a single cell,
@@ -138,6 +129,11 @@ place_image(Ring& ring,
                           0, top,
                           kCellWidth, kCellHeight);
         ring.set_placing_image(nullptr);
+
+        /* Placing runs the image GC, so it both adds to the maps and may evict
+         * from them.
+         */
+        ring.validate_images();
 }
 
 /* Ring::resize() lowering the maximum drops rows off the front, exactly as
@@ -159,13 +155,12 @@ test_ring_image_resize_drops(void)
         place_image(ring, 2, 3);
         g_assert_cmpuint(ring.image_map().size(), ==, 1);
         g_assert_true(ring.has_images());
-        assert_image_invariants(ring, "after placing");
 
         /* The window is made shorter: 24 rows down to 12. Rows 0..11 go. */
         ring.resize(12);
         g_assert_cmpuint(ring.delta(), ==, 12);
 
-        assert_image_invariants(ring, "after resize");
+        ring.validate_images();
         g_assert_cmpuint(ring.image_map().size(), ==, 0);
         g_assert_cmpuint(ring.image_memory_used(), ==, 0);
         g_assert_false(ring.has_images());
@@ -190,14 +185,14 @@ test_ring_image_resize_keeps_straddling(void)
         ring.resize(12);
         g_assert_cmpuint(ring.delta(), ==, 12);
 
-        assert_image_invariants(ring, "after resize");
+        ring.validate_images();
         g_assert_cmpuint(ring.image_map().size(), ==, 1);
         g_assert_cmpuint(ring.image_memory_used(), ==, used);
 
         /* And it goes once its last row follows. */
         ring.resize(9);
         g_assert_cmpuint(ring.delta(), ==, 15);
-        assert_image_invariants(ring, "after second resize");
+        ring.validate_images();
         g_assert_cmpuint(ring.image_map().size(), ==, 0);
 }
 
@@ -215,7 +210,7 @@ test_ring_image_resize_grow(void)
         ring.resize(100);
         g_assert_cmpuint(ring.delta(), ==, 0);
 
-        assert_image_invariants(ring, "after grow");
+        ring.validate_images();
         g_assert_cmpuint(ring.image_map().size(), ==, 1);
         g_assert_cmpuint(ring.image_memory_used(), ==, used);
 }
@@ -241,7 +236,7 @@ test_ring_image_scrollback_shrink(void)
         ring.resize(100);
         g_assert_cmpuint(ring.delta(), ==, 100);
 
-        assert_image_invariants(ring, "after scrollback shrink");
+        ring.validate_images();
         g_assert_cmpuint(ring.image_map().size(), ==, 1);
         g_assert_cmpuint(ring.image_memory_used(), ==, used_both / 2);
         g_assert_cmpint(ring.image_map().begin()->second->get_top(), ==, 150);
@@ -263,7 +258,7 @@ test_ring_image_shrink_drops_below(void)
         ring.shrink(18);
         g_assert_cmpuint(ring.next(), ==, 18);
 
-        assert_image_invariants(ring, "after shrink");
+        ring.validate_images();
         g_assert_cmpuint(ring.image_map().size(), ==, 0);
         g_assert_cmpuint(ring.image_memory_used(), ==, 0);
 }
@@ -281,7 +276,7 @@ test_ring_image_discard_drops(void)
         append_rows(ring, 6);
         g_assert_cmpuint(ring.delta(), ==, 6);
 
-        assert_image_invariants(ring, "after discards");
+        ring.validate_images();
         g_assert_cmpuint(ring.image_map().size(), ==, 0);
         g_assert_cmpuint(ring.image_memory_used(), ==, 0);
 }
@@ -298,7 +293,7 @@ test_ring_image_drop_scrollback(void)
         ring.drop_scrollback(190);
         g_assert_cmpuint(ring.delta(), ==, 190);
 
-        assert_image_invariants(ring, "after drop_scrollback");
+        ring.validate_images();
         g_assert_cmpuint(ring.image_map().size(), ==, 0);
 }
 
@@ -930,6 +925,7 @@ test_ring_image_pool_retires_with_the_image(void)
 
         /* Shrinking drops the rows the image covers, which frees it. */
         ring.resize(2);
+        ring.validate_images();
 
         g_assert_cmpuint(ring.image_map().size(), ==, 0);
 
@@ -955,6 +951,7 @@ test_ring_image_pool_sweep_reclaims(void)
         auto const id = ring.image_map().begin()->second->get_pool_id();
 
         ring.resize(2);
+        ring.validate_images();
         g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
 
         /* No cell names it - none are stamped yet - so a sweep reclaims it.
@@ -1088,6 +1085,7 @@ test_ring_image_anchor_follows_the_cells(void)
          * anchoring cell goes with them.
          */
         ring.insert(5, 0);
+        ring.validate_images();
 
         g_assert_true(ring.find_image_anchor(id, &row, &col));
         g_assert_cmpuint(row, ==, 6);
@@ -1385,6 +1383,7 @@ test_ring_image_partial_erase_keeps_the_rest(void)
         auto damage_top = long{}, damage_bottom = long{};
         g_assert_true(ring.erase_images_in_rect(3, 3, 1, 1,
                                                 &damage_top, &damage_bottom));
+        ring.validate_images();
 
         /* The image is still here. */
         g_assert_cmpuint(ring.image_map().size(), ==, 1);
@@ -1429,6 +1428,7 @@ test_ring_image_full_erase_frees_it(void)
         auto damage_top = long{}, damage_bottom = long{};
         g_assert_true(ring.erase_images_in_rect(2, 4, 0, 79,
                                                 &damage_top, &damage_bottom));
+        ring.validate_images();
 
         g_assert_cmpuint(ring.image_map().size(), ==, 0);
 
@@ -1476,6 +1476,7 @@ test_ring_image_pixels_survive_eviction(void)
          */
         append_rows(ring, 200);
         ring.evict_all_images_for_test();
+        ring.validate_images();
         g_assert_cmpuint(ring.image_map().size(), ==, 0);
 
         /* Thawing the row must bring the image back. */
@@ -1524,6 +1525,7 @@ test_ring_image_spill_is_reclaimed(void)
 
         append_rows(ring, 40);
         ring.evict_all_images_for_test();
+        ring.validate_images();
         g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 1);
 
         /* Push the image's row out of the ring entirely. */
@@ -1567,10 +1569,7 @@ test_ring_image_limit_is_enforced(void)
         /* The counter still agrees with what is resident - the budget is only
          * meaningful if the number it is compared against is true.
          */
-        auto sum = size_t{0};
-        for (auto const& [priority, image] : ring.image_map())
-                sum += image->resource_size();
-        g_assert_cmpuint(sum, ==, ring.image_memory_used());
+        ring.validate_images();
 
         /* The survivors are the NEWEST: eviction takes the oldest first, so
          * what is on screen now outlives what scrolled past.
@@ -1618,6 +1617,7 @@ test_ring_image_limit_shrinks_immediately(void)
         g_assert_cmpuint(ring.image_memory_used(), >, 3200);
 
         ring.set_image_memory_max(3200);
+        ring.validate_images();
         g_assert_cmpuint(ring.image_memory_used(), <=, 3200);
 }
 
@@ -1706,6 +1706,7 @@ test_repro_cached_row_stale_id(void)
 
         /* Memory pressure evicts the image: the id retires. */
         ring.evict_all_images_for_test();
+        ring.validate_images();
         g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
 
         /* A sweep, as append_image() runs on id exhaustion. */
@@ -1757,6 +1758,7 @@ test_ring_rewrap_with_images(void)
          * horizontal window resize does.
          */
         ring.rewrap_for_test(40);
+        ring.validate_images();
 
         /* The ring must still be readable and self-consistent afterwards. */
         for (auto r = ring.delta(); r < ring.next(); r++) {
@@ -1769,6 +1771,7 @@ test_ring_rewrap_with_images(void)
          * first pass wrote.
          */
         ring.rewrap_for_test(100);
+        ring.validate_images();
         for (auto r = ring.delta(); r < ring.next(); r++) {
                 g_assert_nonnull(ring.index(r));
         }
@@ -1805,6 +1808,7 @@ test_ring_scrollback_restore_respects_the_budget(void)
         append_rows(ring, 300);
         auto const budget = size_t{9600};
         ring.set_image_memory_max(budget);
+        ring.validate_images();
         g_assert_cmpuint(ring.image_memory_used(), <=, budget);
 
         /* Now scroll back over them, read only. */
@@ -1816,10 +1820,7 @@ test_ring_scrollback_restore_respects_the_budget(void)
         /* And the accounting still matches what is actually resident, so the
          * bound is a real one rather than a stale counter.
          */
-        auto sum = size_t{0};
-        for (auto const& [priority, image] : ring.image_map())
-                sum += image->resource_size();
-        g_assert_cmpuint(sum, ==, ring.image_memory_used());
+        ring.validate_images();
 }
 
 int

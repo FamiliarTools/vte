@@ -116,9 +116,6 @@ private:
 
         #if VTE_DEBUG
         void validate() const;
-        #if WITH_SIXEL
-        void validate_images() const;
-        #endif
         #endif
 
         inline GString* hyperlink_get(hyperlink_idx_t idx) const { return (GString*)g_ptr_array_index(m_hyperlinks, idx); }
@@ -461,6 +458,17 @@ private:
         inline void sync_has_images() noexcept { m_has_images = !m_image_map.empty(); }
 
 public:
+        /* Check the image maps against the rows the ring actually holds.
+         *
+         * validate() calls this, but only under VTE_DEBUG, which no shipping
+         * build and no default test run enables - so gating the check itself on
+         * VTE_DEBUG would leave it compiled out everywhere and prove nothing.
+         * It is built whenever images are, and the tests call it directly after
+         * every step that moves rows or images, which is where the row-keyed
+         * maps can go stale without the ring noticing.
+         */
+        void validate_images() const;
+
         auto const& image_map() const noexcept { return m_image_map; }
 
         /* For tests. */
