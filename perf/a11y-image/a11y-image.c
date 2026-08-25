@@ -15,9 +15,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-/* Assert the two text paths disagree in exactly the intended way:
- * the accessibility text marks an image with U+FFFC; the clipboard text
- * does not contain it at all.
+/* Assert that both text paths mark an image's position with U+FFFC: the
+ * accessibility text so a reader can tell an image from blank space, and the
+ * selection text so a copy carries the image's position too (vte#309).
  */
 #include <vte/vte.h>
 #include <gtk/gtk.h>
@@ -25,6 +25,16 @@
 
 static VteTerminal *term;
 static const char *sixfile;
+
+static char *
+a11y_text(void)
+{
+        AtkObject *acc = gtk_widget_get_accessible(GTK_WIDGET(term));
+        if (acc == NULL || !ATK_IS_TEXT(acc))
+                return NULL;
+
+        return atk_text_get_text(ATK_TEXT(acc), 0, -1);
+}
 
 static gboolean check(gpointer u) {
         /* Select everything, which is what a copy would do. */
@@ -35,22 +45,7 @@ static gboolean check(gpointer u) {
 
         gboolean sel_has = sel && strstr(sel, ofc) != NULL;
 
-        /* The accessibility text comes through GtkAccessibleText. */
-        char *a11y = NULL;
-        if (GTK_IS_ACCESSIBLE_TEXT(term)) {
-                /* get_contents is an interface vfunc, not a public call. */
-                GtkAccessibleTextInterface *iface =
-                        GTK_ACCESSIBLE_TEXT_GET_IFACE(GTK_ACCESSIBLE_TEXT(term));
-                GBytes *b = iface->get_contents
-                        ? iface->get_contents(GTK_ACCESSIBLE_TEXT(term), 0, G_MAXUINT)
-                        : NULL;
-                if (b) {
-                        gsize n = 0;
-                        const char *d = (const char*)g_bytes_get_data(b, &n);
-                        a11y = g_strndup(d, n);
-                        g_bytes_unref(b);
-                }
-        }
+        char *a11y = a11y_text();
         gboolean a11y_has = a11y && strstr(a11y, ofc) != NULL;
 
         g_print("SEL_LEN=%d SEL_HAS_ABOVE=%s\n",
@@ -62,42 +57,40 @@ static gboolean check(gpointer u) {
         g_print("CLIPBOARD_HAS_UFFFC=%s\n", sel_has ? "yes" : "no");
         g_print("A11Y_HAS_UFFFC=%s\n", a11y_has ? "yes" : "no");
         g_print("VERDICT=%s\n",
-                (!sel_has && a11y_has) ? "PASS" : "FAIL");
+                (sel_has && a11y_has) ? "PASS" : "FAIL");
 
         g_free(sel); g_free(a11y);
-        g_application_quit(g_application_get_default());
+        gtk_main_quit();
         return G_SOURCE_REMOVE;
 }
 static void on_spawn(VteTerminal *t, GPid p, GError *e, gpointer u) {}
-static void activate(GtkApplication *app, gpointer u) {
-        GtkWidget *win = gtk_application_window_new(app);
+static gboolean feed(gpointer d) {
+        vte_terminal_feed_child(term, (const char*)d, -1);
+        return G_SOURCE_REMOVE;
+}
+int main(int argc, char **argv) {
+        sixfile = argc > 1 ? argv[1] : "/tmp/p.six";
+
+        gtk_init(&argc, &argv);
+
+        GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
         term = VTE_TERMINAL(vte_terminal_new());
         vte_terminal_set_enable_sixel(term, TRUE);
         /* The a11y snapshot only refreshes when a11y is enabled. */
         vte_terminal_set_enable_a11y(term, TRUE);
-        gtk_window_set_child(GTK_WINDOW(win), GTK_WIDGET(term));
-        char *argv[] = { (char*)"/bin/sh", NULL };
-        vte_terminal_spawn_async(term, VTE_PTY_DEFAULT, NULL, argv, NULL,
+        gtk_container_add(GTK_CONTAINER(win), GTK_WIDGET(term));
+        char *argvv[] = { (char*)"/bin/sh", NULL };
+        vte_terminal_spawn_async(term, VTE_PTY_DEFAULT, NULL, argvv, NULL,
                                  (GSpawnFlags)0, NULL, NULL, NULL, -1, NULL,
                                  on_spawn, NULL);
         char *cmd = g_strdup_printf("stty -echo; clear; printf 'ABOVE\\n'; cat %s; printf '\\nBELOW\\n'\n", sixfile);
-        g_timeout_add(1500, (GSourceFunc)[](gpointer d) -> gboolean {
-                vte_terminal_feed_child(term, (const char*)d, -1);
-                return G_SOURCE_REMOVE; }, cmd);
-        g_timeout_add(3000, (GSourceFunc)[](gpointer) -> gboolean {
-                vte_terminal_feed_child(term, "printf 'TICK\\n'\n", -1);
-                return G_SOURCE_REMOVE; }, NULL);
-        g_timeout_add(4000, (GSourceFunc)[](gpointer) -> gboolean {
-                vte_terminal_feed_child(term, "printf 'TICK2\\n'\n", -1);
-                return G_SOURCE_REMOVE; }, NULL);
+        g_timeout_add(1500, feed, cmd);
+        g_timeout_add(3000, feed, (char*)"printf 'TICK\\n'\n");
+        g_timeout_add(4000, feed, (char*)"printf 'TICK2\\n'\n");
         g_timeout_add(6500, check, NULL);
         gtk_window_set_default_size(GTK_WINDOW(win), 900, 600);
-        gtk_window_present(GTK_WINDOW(win));
-}
-int main(int argc, char **argv) {
-        sixfile = argc > 1 ? argv[1] : "/tmp/p.six";
-        GtkApplication *app = gtk_application_new("org.vte.A11yTest",
-                                                  G_APPLICATION_NON_UNIQUE);
-        g_signal_connect(app, "activate", G_CALLBACK(activate), NULL);
-        return g_application_run(G_APPLICATION(app), 1, argv);
+        gtk_widget_show_all(win);
+
+        gtk_main();
+        return 0;
 }

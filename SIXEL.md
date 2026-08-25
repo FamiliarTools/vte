@@ -155,8 +155,35 @@ loss.
 
 The covered cells hold U+FFFC (OBJECT REPLACEMENT CHARACTER), so selection,
 clipboard and accessibility have a representation - the third item on the
-maintainer's 2020 ship-blocker list. Copying an image region yields blanks
-rather than U+FFFC in the clipboard; the accessibility text keeps the marker.
+maintainer's 2020 ship-blocker list, and the one bar the maintainer wrote down
+himself for building sixel by default (vte#253 note_968299, vte#309).
+
+`Terminal::get_text()` has **no image case**. It appends each non-fragment
+cell's own `c`, and a covered cell's `c` *is* U+FFFC, so every text path marks
+an image's position and every one of them marks it the same way. That is the
+whole mechanism, and it is why there is no flag to forget: an earlier shape of
+this passed an `image_placeholder` argument down from the callers, and
+`vte_terminal_get_text_selected()` silently did not pass it, because it reaches
+`get_text()` through `_vte_terminal_get_text_range_format_full()` rather than
+through `get_selected_text()`.
+
+Four consequences, each taken deliberately:
+
+- A trailing U+FFFC is real content, so it survives the trailing-blank trimming.
+  An image at the end of a line has a position too; this is what vte#309 asks
+  for.
+- HTML clipboard output carries U+FFFC as well. `attributes_to_html()` escapes
+  the text it is given and is not touched here.
+- The regex match buffer (`match_contents_refresh()`) and the search buffer
+  carry U+FFFC where they used to carry a space. Both are one unichar per cell
+  either way, so column offsets are unchanged, and U+FFFC is in no URL or word
+  character class, so it terminates a match exactly as the space did. It is
+  also the more truthful of the two: an image is not whitespace.
+- `checksum_area()` (DECRQCRA, `VTE_DEBUG` only) checksums U+FFFC over an
+  image instead of NUL.
+
+The HTML output format and the context-menu API are deliberately left alone;
+the maintainer excluded both from vte#309.
 
 ### What falls out
 
@@ -190,8 +217,10 @@ codebase knows where an image is except the cells it covers.
 - A hyperlink-heavy scrollback render is pixel-identical to the pre-refactor
   baseline, as a check that the ring changes did not disturb existing behaviour.
 - `perf/fairness/` measures whether a terminal flooding sixels starves a sibling
-  terminal in the same process; `perf/a11y-image/` asserts the accessibility and
-  clipboard text paths disagree in exactly the intended way.
+  terminal in the same process; `perf/a11y-image/` asserts that the
+  accessibility and clipboard text paths both mark an image with U+FFFC, and
+  a real drag-select in `vte-2.91` under Xvfb, read back from the X PRIMARY
+  selection with `xclip`, shows the marker at exactly the image's columns.
 
 ## What is not done
 

@@ -1273,6 +1273,88 @@ test_ring_image_cells_hold_object_replacement(void)
 }
 
 
+/* The contract text extraction relies on: EVERY cell an image covers, on every
+ * row it covers, holds U+FFFC, and no cell outside its footprint is touched.
+ *
+ * Terminal::get_text() has no image case at all. It appends each non-fragment
+ * cell's own c, which is what makes the clipboard, the search buffer, the regex
+ * match buffer and the a11y snapshot all mark an image's position, and mark it
+ * the same way (vte#309). That only holds while the cell store keeps this
+ * shape, so pin it over a footprint that is several rows tall AND several
+ * columns wide: a one-row, one-column fixture would pass with every other
+ * covered cell left as text.
+ */
+static void
+test_ring_image_covers_every_cell_it_claims(void)
+{
+        auto const top = long{5};
+        auto const rows_tall = 3;
+        auto const left = 2;
+        auto const cols_wide = 4;    /* place_image() makes the image this wide. */
+        auto const width = left + cols_wide + 3;
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        for (auto r = top; r < top + rows_tall; r++)
+                widen_row(ring, r, width);
+
+        place_image(ring, top, rows_tall);
+        auto* image = ring.image_map().begin()->second.get();
+
+        ring.set_placing_image(image);
+        for (auto r = 0; r < rows_tall; r++)
+                ring.stamp_image_row(top + r, left, cols_wide, r);
+        ring.set_placing_image(nullptr);
+
+        /* The fixture before the assertion it is there to support: the stamped
+         * footprint really does span several distinct rows and several distinct
+         * columns.
+         */
+        auto rows_seen = std::set<long>{};
+        auto cols_seen = std::set<long>{};
+        for (auto r = top; r < top + rows_tall; r++) {
+                auto const* row = ring.index(r);
+                for (auto col = 0; col < row->len; col++) {
+                        if (!row->cells[col].attr.image())
+                                continue;
+
+                        rows_seen.insert(r);
+                        cols_seen.insert(col);
+                }
+        }
+        g_assert_cmpuint(rows_seen.size(), ==, rows_tall);
+        g_assert_cmpuint(cols_seen.size(), ==, cols_wide);
+
+        for (auto r = top; r < top + rows_tall; r++) {
+                auto const* row = ring.index(r);
+                g_assert_cmpint(row->len, ==, width);
+
+                for (auto col = 0; col < row->len; col++) {
+                        auto const& cell = row->cells[col];
+                        auto const covered = col >= left && col < left + cols_wide;
+
+                        g_assert_cmpint(cell.attr.image(), ==, covered);
+
+                        /* Fragments are skipped by text extraction, so a covered
+                         * cell that was one would contribute nothing.
+                         */
+                        g_assert_false(cell.attr.fragment());
+
+                        g_assert_cmpuint(cell.c, ==,
+                                         covered ? VTE_OBJECT_REPLACEMENT_CHARACTER
+                                                 : gunichar('x'));
+                }
+        }
+
+        /* The row just below the footprint still holds its text. */
+        auto const* below = ring.index(top + rows_tall);
+        g_assert_false(below->cells[0].attr.image());
+        g_assert_cmpuint(below->cells[0].c, ==, 'x');
+}
+
+
 static void
 test_ring_image_partial_erase_keeps_the_rest(void)
 {
@@ -1781,6 +1863,7 @@ main(int argc,
         g_test_add_func("/vte/ring/image-pool/sweep-reclaims", test_ring_image_pool_sweep_reclaims);
 
         g_test_add_func("/vte/ring/image-pool/cells-hold-object-replacement", test_ring_image_cells_hold_object_replacement);
+        g_test_add_func("/vte/ring/image-pool/covers-every-cell-it-claims", test_ring_image_covers_every_cell_it_claims);
         g_test_add_func("/vte/ring/image-pool/cells-carry-the-reference", test_ring_image_cells_carry_the_reference);
         g_test_add_func("/vte/ring/image-pool/sweep-sees-cell-references", test_ring_image_sweep_sees_cell_references);
 
