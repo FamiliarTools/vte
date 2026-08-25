@@ -6865,8 +6865,7 @@ Terminal::get_text(vte::grid::row_t start_row,
                    bool block,
                    bool preserve_empty,
                    GString *string,
-                   VteCharAttrList *attributes,
-                   bool image_placeholder)
+                   VteCharAttrList *attributes)
 {
 	const VteCell *pcell = NULL;
 	struct _VteCharAttributes attr;
@@ -6950,23 +6949,17 @@ Terminal::get_text(vte::grid::row_t start_row,
 					attr.strikethrough = pcell->attr.strikethrough();
                                         attr.columns = pcell->attr.columns();
 
-					/* Store the cell string */
-                                        if (pcell->attr.image() && image_placeholder) {
-                                                /* An image is a thing on the screen, and neither a
-                                                 * reader nor a paste buffer can tell one from blank
-                                                 * space unless its position is marked. U+FFFC
-                                                 * OBJECT REPLACEMENT CHARACTER is what marks the
-                                                 * position of an embedded object in text, and is
-                                                 * what the cells an image covers are made to hold
-                                                 * (vte#253 note_968299, note_973835, restated in
-                                                 * vte#309). It is the cell's own content, so it is
-                                                 * ordinary text here: it counts as non-empty and
-                                                 * survives the trailing-blank trimming below. */
-                                                _vte_unistr_append_to_string(VTE_OBJECT_REPLACEMENT_CHARACTER,
-                                                                             string);
-                                                last_nonempty = string->len;
-                                                last_nonemptycol = lcol;
-                                        } else if (pcell->c == 0 || pcell->attr.image()) {
+                                        /* Store the cell string.
+                                         *
+                                         * A cell an image covers holds U+FFFC OBJECT REPLACEMENT
+                                         * CHARACTER, which is what marks the position of an
+                                         * embedded object in text (vte#253 note_968299,
+                                         * note_973835, restated in vte#309). That is the cell's
+                                         * own content, so it needs no case of its own here: every
+                                         * text path marks the image's position, and marks it the
+                                         * same way. It also counts as non-empty, so an image at
+                                         * the end of a line survives the trimming below. */
+                                        if (pcell->c == 0) {
                                                 /* Empty cells of nondefault background color are
                                                  * stored as NUL characters. Treat them as spaces
                                                  * unless 'preserve_empty' is set,
@@ -7071,8 +7064,7 @@ Terminal::get_text_displayed_a11y(GString *string,
                         false /* block */,
                         false /* preserve_empty */,
                         string,
-                        attributes,
-                        true /* image_placeholder */);
+                        attributes);
 }
 
 void
@@ -7086,8 +7078,7 @@ Terminal::get_selected_text(GString *string,
                         m_selection_block_mode,
                         false /* preserve_empty */,
                         string,
-                        attributes,
-                        true /* image_placeholder */);
+                        attributes);
 }
 
 #if VTE_DEBUG
