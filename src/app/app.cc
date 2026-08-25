@@ -165,6 +165,7 @@ public:
         gboolean window_icon{true};
         gboolean xfill{true};
         gboolean yfill{true};
+        gint64 image_limit{-1 /* the widget's own default */};
         bool bg_color_set{false};
         bool fg_color_set{false};
         bool cursor_bg_color_set{false};
@@ -1419,6 +1420,8 @@ public:
                           "Enable distinct highlight foreground color for selection", "COLOR" },
                         { "icon-title", 'i', 0, G_OPTION_ARG_NONE, &icon_title,
                           "Enable the setting of the icon title", nullptr },
+                        { "image-limit", 0, 0, G_OPTION_ARG_INT64, &image_limit,
+                          "Specify the memory the terminal may hold images in (-1 for the default)", "BYTES" },
                         { "output-file", 0, 0, G_OPTION_ARG_FILENAME, &output_filename,
                           "Save terminal contents to file at exit", nullptr },
                         { "scrollback-lines", 'n', 0, G_OPTION_ARG_INT, &scrollback_lines,
@@ -4251,6 +4254,8 @@ vteapp_window_constructed(GObject *object)
         vte_terminal_set_enable_fallback_scrolling(window->terminal, options.fallback_scrolling);
         vte_terminal_set_enable_legacy_osc777(window->terminal, options.legacy_osc777);
         vte_terminal_set_font_scale(window->terminal, options.font_scale);
+        if (options.image_limit >= 0)
+                vte_terminal_set_image_limit(window->terminal, guint64(options.image_limit));
         vte_terminal_set_mouse_autohide(window->terminal, true);
         vte_terminal_set_rewrap_on_resize(window->terminal, options.rewrap);
         vte_terminal_set_scroll_on_insert(window->terminal, options.scroll_on_insert);

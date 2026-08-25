@@ -151,6 +151,14 @@ rather than by refusing to parse, and zero is meaningful: no image memory means
 images are off. Because of the fourth stream, hitting the limit is not data
 loss.
 
+The bound holds *in the process*, not only in the ring's own accounting: 300
+scrolled-away 800x480 previews cost 36 to 37 MiB of resident pixels against the
+35 MiB default and 9 to 11 MiB against an 8 MiB one, and previews 100 to 300
+add nothing outside the noise the image-free control shows.
+`perf/image-memory/` is the measurement, and it states the price too, which is
+disk: 35 MiB resident cost 406 MiB of unlinked temporary file, bounded by the
+scrollback rather than by this limit.
+
 ### 6. Cells that have something to say
 
 The covered cells hold U+FFFC (OBJECT REPLACEMENT CHARACTER), so selection,
@@ -230,6 +238,11 @@ codebase knows where an image is except the cells it covers.
   exists - a headless Wayland output at scale 1.5, since X11 has no fractional
   scale to offer - and a 96 pixel image measures 143 device pixels there
   against an exact 144.
+- `perf/image-memory/` measures the budget where a user feels it, in the
+  process: kernel Pss across a 300-preview flood, controlled by the SAME flood
+  at a budget of zero so that the difference is pixels and nothing else. The
+  ring's own accounting is not evidence for its own bound, and the disk that
+  the RAM ceiling is bought with is reported next to it.
 
 ## What is not done
 
