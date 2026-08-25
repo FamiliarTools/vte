@@ -115,6 +115,9 @@ private:
 
         #if VTE_DEBUG
         void validate() const;
+        #if WITH_SIXEL
+        void validate_images() const;
+        #endif
         #endif
 
         inline GString* hyperlink_get(hyperlink_idx_t idx) const { return (GString*)g_ptr_array_index(m_hyperlinks, idx); }
@@ -322,6 +325,15 @@ private:
 
 public:
         auto const& image_map() const noexcept { return m_image_map; }
+
+        /* The bytes the resident images are charged for, i.e. what the image GC
+         * spends its budget against. It has to be the sum over exactly the images
+         * the map holds; a row-destroying path that forgets to free leaves pixels
+         * nobody can reach still holding budget, which live images then have to be
+         * evicted to make room for. Exposed so a test can hold the counter to the
+         * map from the outside.
+         */
+        inline auto image_memory_used() const noexcept { return m_image_fast_memory_used; }
 
         /* Whether any image is resident. This is the guard the callers put in
          * front of every image rule, so that a ring holding no image - which is
