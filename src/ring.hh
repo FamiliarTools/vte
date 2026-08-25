@@ -496,6 +496,13 @@ public:
 
         auto image_spill_count_for_test() const noexcept { return m_image_spill.size(); }
 
+        /* For tests: the first row still held in memory. A read below this is
+         * the only one that thaws, so it is the only one that can fault an
+         * image back in - which a test of that path has to be able to check it
+         * really got below.
+         */
+        auto writable_start_for_test() const noexcept { return m_writable; }
+
         /* For tests: drive the reflow a horizontal resize performs. */
         void rewrap_for_test(column_t columns)
         {
