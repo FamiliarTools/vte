@@ -218,6 +218,128 @@ test_combining_mark_takes_the_cell(void)
         check_the_ring(ring);
 }
 
+/* A rectangular copy that takes an image's cells with it.
+ *
+ * DECCRA copies whole cells from one rectangle of the screen to another, and a
+ * cell that names an image IS that image at one of its tiles. Copied as it
+ * stands, it makes a second run of cells claim tiles of a picture that does not
+ * cover them, with nothing behind it to draw and nothing that can ever erase or
+ * move it as the image's own cells are erased and moved.
+ *
+ * The rectangle copied here holds the image AND a letter to its right, and the
+ * letter is what says the copy landed: a destination that is merely free of
+ * images proves nothing if the copy never reached it. So the fixture is asserted
+ * in both directions - the source really is the image plus a marker, and the
+ * marker really did arrive - before the contract is asked at all.
+ */
+static void
+test_copy_rect_leaves_the_image_behind(void)
+{
+        auto& ring = *impl->m_screen->row_data;
+
+        /* Start from nothing, so the images below are this test's own however
+         * this file is ordered.
+         */
+        feed("\x1b" "c"); /* RIS, split so the c is not read as more hex */
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+
+        feed("\x1b[H"
+             "\x1bP0;0;0q"
+             "\"1;1;200;20"
+             "#0;2;0;0;100#0" +
+             std::string(200, '~') +
+             "\x1b\\");
+
+        auto const* const image = the_image(ring);
+        auto const id = image->get_pool_id();
+        auto const top = Ring::row_t(image->get_top());
+        auto const left = long(image->get_left());
+        auto const width = long(image->get_width());
+        auto const height = long(image->get_height());
+
+        g_assert_null(ring.placing_image());
+        g_assert_cmpint(width, >=, 3);
+        g_assert_cmpint(height, >=, 1);
+
+        /* The rectangle in screen coordinates: the image, plus the column just
+         * right of it for the marker. Both rectangles have to fit on the page
+         * with room between them, or the sequence is ignored or clipped and the
+         * test asks its question of a copy that never happened.
+         */
+        auto const screen_top = long(top) - impl->m_screen->insert_delta + 1;
+        auto const marker_col = left + width + 1;
+        auto const dest_top = screen_top + height + 2;
+
+        g_assert_cmpint(marker_col, <=, long(impl->m_column_count));
+        g_assert_cmpint(dest_top + height - 1, <=, long(impl->m_row_count));
+
+        feed("\x1b[" + std::to_string(screen_top) +
+             ";" + std::to_string(marker_col) + "H"
+             "X");
+
+        /* Fixture, part one: the source rectangle is the image with a marker
+         * beside it, and the image is anchored as it should be.
+         */
+        auto const* row = ring.index_writable(top);
+        g_assert_cmpint(long(row->len), >=, marker_col);
+
+        g_assert_true(row->cells[left].attr.image());
+        g_assert_cmpuint(row->cells[left].attr.image_ref().pool_id(), ==, id);
+        g_assert_cmpuint(row->cells[marker_col - 1].c, ==, 'X');
+        g_assert_false(row->cells[marker_col - 1].attr.image());
+
+        g_assert_true(ring.image_cells_are_anchored());
+        check_the_ring(ring);
+
+        /* Copy that rectangle down the page, left edge to column one. */
+        feed("\x1b[" + std::to_string(screen_top) +
+             ";" + std::to_string(left + 1) +
+             ";" + std::to_string(screen_top + height - 1) +
+             ";" + std::to_string(marker_col) +
+             ";1;" + std::to_string(dest_top) +
+             ";1;1$v");
+
+        /* Fixture, part two: the copy reached the destination. The marker sat
+         * @width columns right of the rectangle's left edge, so it is now
+         * @width columns right of column one.
+         */
+        auto const dest_row = Ring::row_t(impl->m_screen->insert_delta + dest_top - 1);
+        auto const* drow = ring.index_writable(dest_row);
+        g_assert_nonnull(drow);
+        g_assert_cmpint(long(drow->len), >, width);
+        g_assert_cmpuint(drow->cells[width].c, ==, 'X');
+
+        /* The contract: what was copied is not the picture. No cell of the
+         * destination names an image, and none of them stands in for one
+         * either - a cell left holding the image's U+FFFC would report an
+         * object replacement character to copied text and to the screen reader
+         * with nothing behind it.
+         */
+        for (auto r = dest_row; r < dest_row + Ring::row_t(height); r++) {
+                auto const* const crow = ring.index_writable(r);
+                g_assert_nonnull(crow);
+
+                for (auto c = 0; c < crow->len; c++) {
+                        g_assert_false(crow->cells[c].attr.image());
+                        g_assert_cmpuint(crow->cells[c].c, !=,
+                                         VTE_OBJECT_REPLACEMENT_CHARACTER);
+                }
+        }
+
+        /* And the source is untouched: a copy reads it, so the picture stays
+         * where it was, whole and still anchored to its own cells.
+         */
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_cmpuint(the_image(ring)->get_pool_id(), ==, id);
+
+        row = ring.index_writable(top);
+        g_assert_true(row->cells[left].attr.image());
+        g_assert_cmpuint(row->cells[left].attr.image_ref().pool_id(), ==, id);
+
+        g_assert_true(ring.image_cells_are_anchored());
+        check_the_ring(ring);
+}
+
 int
 main(int argc,
      char* argv[])
@@ -259,6 +381,10 @@ main(int argc,
         test_combining_mark_takes_the_cell();
 
         g_print("PASS: a combining mark takes back the cell it lands on\n");
+
+        test_copy_rect_leaves_the_image_behind();
+
+        g_print("PASS: a rectangular copy does not copy the image\n");
 
         return 0;
 }

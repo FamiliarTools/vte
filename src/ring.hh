@@ -476,6 +476,14 @@ public:
          */
         void validate_images() const;
 
+        /* Whether every cell of the writable rows that names an image is a
+         * cell of THAT image, at exactly the position its tile coordinate puts
+         * it at. The cell to image half of validate_images(), returned rather
+         * than asserted so that a caller whose own assertions are live can hold
+         * the ring to it - see the comment on the definition.
+         */
+        bool image_cells_are_anchored() const noexcept;
+
         auto const& image_map() const noexcept { return m_image_map; }
 
         /* For tests. */

@@ -159,62 +159,7 @@ Ring::validate_images() const
 void
 Ring::validate_image_cells() const
 {
-        for (auto r = m_writable; r < m_end; r++) {
-                auto const* const row = get_writable_index(r);
-
-                for (auto c = 0; c < row->len; c++) {
-                        auto const& cell = row->cells[c];
-                        if (!cell.attr.image())
-                                continue;
-
-                        /* The cell holds the image rather than the text that
-                         * was there, as one whole cell. Text extraction appends
-                         * each non-fragment cell's own c, so a cell still
-                         * holding its old character copies as that character,
-                         * and a fragment copies as nothing at all.
-                         */
-                        vte_assert_cmpuint(cell.c, ==, VTE_OBJECT_REPLACEMENT_CHARACTER);
-                        vte_assert_cmpuint(cell.attr.columns(), ==, 1);
-                        vte_assert_false(cell.attr.fragment());
-
-                        auto const ref = cell.attr.image_ref();
-                        auto const* const image = m_image_pool.lookup(ref);
-
-                        /* An id that resolves to nothing is a normal outcome:
-                         * the image has been freed and the cell is on its way
-                         * out with its row. Nothing can be asked of a picture
-                         * that is gone.
-                         */
-                        if (image == nullptr)
-                                continue;
-
-                        /* An image is exempt from every rule that moves images
-                         * for as long as its own emission burst is running, so
-                         * its rectangle is deliberately behind its cells until
-                         * the burst ends.
-                         */
-                        if (image == m_placing_image)
-                                continue;
-
-                        /* The tile coordinate names a piece of THIS picture. */
-                        vte_assert_cmpint(long(ref.tile_row()), <, long(image->get_height()));
-                        vte_assert_cmpint(long(ref.tile_col()), <, long(image->get_width()));
-
-                        /* And the cell sits exactly where that piece belongs.
-                         * This is the anchoring itself. A path that moves cells
-                         * without moving the image, or an image without its
-                         * cells, leaves a rectangle naming rows and columns the
-                         * picture no longer covers - and the rectangle is what
-                         * decides which images an erase can reach, which ones
-                         * the scrollback has taken, and which ones a reflow
-                         * tears apart.
-                         */
-                        vte_assert_cmpint(long(r), ==,
-                                          long(image->get_top()) + long(ref.tile_row()));
-                        vte_assert_cmpint(long(c), ==,
-                                          long(image->get_left()) + long(ref.tile_col()));
-                }
-        }
+        vte_assert_true(image_cells_are_anchored());
 
         /* The other direction: no resident image has been orphaned by its own
          * cells.
@@ -237,6 +182,104 @@ Ring::validate_image_cells() const
 
                 vte_assert_true(image_has_any_cell(image.get()));
         }
+}
+
+/*
+ * The cell to image direction of validate_image_cells(), asked so that it can
+ * be ANSWERED and not only asserted.
+ *
+ * The ring's own assertions are vte_assert_*, which -DG_DISABLE_ASSERT erases
+ * from the library's objects; a build that carries that flag walks the cells
+ * and concludes nothing. A caller that gets the verdict back can assert it with
+ * assertions of its own, which is how a test binary built without that flag can
+ * hold the library to this even where the library cannot hold itself to it.
+ *
+ * Answered for the writable rows, which are the ones an operation can still
+ * reach. A false verdict names the cell in a debug build; the bool is what
+ * every build has.
+ */
+bool
+Ring::image_cells_are_anchored() const noexcept
+{
+        for (auto r = m_writable; r < m_end; r++) {
+                auto const* const row = get_writable_index(r);
+
+                for (auto c = 0; c < row->len; c++) {
+                        auto const& cell = row->cells[c];
+                        if (!cell.attr.image())
+                                continue;
+
+                        /* The cell holds the image rather than the text that
+                         * was there, as one whole cell. Text extraction appends
+                         * each non-fragment cell's own c, so a cell still
+                         * holding its old character copies as that character,
+                         * and a fragment copies as nothing at all.
+                         */
+                        if (cell.c != VTE_OBJECT_REPLACEMENT_CHARACTER ||
+                            cell.attr.columns() != 1 ||
+                            cell.attr.fragment()) {
+                                _vte_debug_print(vte::debug::category::RING,
+                                                 "Image cell at {},{} is not one whole object replacement character",
+                                                 r, c);
+                                return false;
+                        }
+
+                        auto const ref = cell.attr.image_ref();
+                        auto const* const image = m_image_pool.lookup(ref);
+
+                        /* An id that resolves to nothing is a normal outcome:
+                         * the image has been freed and the cell is on its way
+                         * out with its row. Nothing can be asked of a picture
+                         * that is gone.
+                         */
+                        if (image == nullptr)
+                                continue;
+
+                        /* An image is exempt from every rule that moves images
+                         * for as long as its own emission burst is running, so
+                         * its rectangle is deliberately behind its cells until
+                         * the burst ends.
+                         */
+                        if (image == m_placing_image)
+                                continue;
+
+                        /* The tile coordinate names a piece of THIS picture. */
+                        if (long(ref.tile_row()) >= long(image->get_height()) ||
+                            long(ref.tile_col()) >= long(image->get_width())) {
+                                _vte_debug_print(vte::debug::category::RING,
+                                                 "Image cell at {},{} names tile {},{} outside its image",
+                                                 r, c, ref.tile_row(), ref.tile_col());
+                                return false;
+                        }
+
+                        /* And the cell sits exactly where that piece belongs.
+                         * This is the anchoring itself. A path that moves cells
+                         * without moving the image, or an image without its
+                         * cells, leaves a rectangle naming rows and columns the
+                         * picture no longer covers - and the rectangle is what
+                         * decides which images an erase can reach, which ones
+                         * the scrollback has taken, and which ones a reflow
+                         * tears apart.
+                         *
+                         * It is also what catches a picture being DUPLICATED. A
+                         * path that copies cells wholesale - a rectangular copy
+                         * is the one that can - leaves a second run of cells
+                         * naming the same tiles of one image somewhere the image
+                         * does not cover, and only one run of the two can be
+                         * where the image says it is.
+                         */
+                        if (long(r) != long(image->get_top()) + long(ref.tile_row()) ||
+                            long(c) != long(image->get_left()) + long(ref.tile_col())) {
+                                _vte_debug_print(vte::debug::category::RING,
+                                                 "Image cell at {},{} names tile {},{} of an image at {},{}",
+                                                 r, c, ref.tile_row(), ref.tile_col(),
+                                                 image->get_top(), image->get_left());
+                                return false;
+                        }
+                }
+        }
+
+        return true;
 }
 
 #endif /* WITH_SIXEL */

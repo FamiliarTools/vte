@@ -1019,6 +1019,36 @@ Terminal::erase_image_rect(vte::grid::row_t rows,
         m_screen->cursor_advanced_by_graphic_character = false;
 }
 
+/* What a copy of @cell is.
+ *
+ * A copy of a picture is not the picture. A cell that names an image is not a
+ * character with an image attribute on it: it IS that image, at one named tile
+ * of it, and the picture is drawn, moved and erased through exactly the cells
+ * that name it. Copying such a cell as it stands would leave two disjoint runs
+ * of cells claiming the same tile of one image, in two places, which no rule
+ * that moves an image can keep true of both - and the second run has no pixels
+ * behind it in any case, since the image covers the rectangle it was placed on
+ * and no other.
+ *
+ * So the copy is the cell without the image: erased content, the source's
+ * attributes, and the reference dropped. Dropping it through the hyperlink
+ * index is what clears the union tag along with the payload, so the copy names
+ * neither an image nor a hyperlink rather than reading one as the other.
+ *
+ * The character goes with it. A cell that kept the image's U+FFFC would report
+ * an object replacement character to copied text, selection and the screen
+ * reader with no image behind it to stand for.
+ */
+static inline VteCell
+cell_for_copy(VteCell const& cell) noexcept
+{
+        if (!cell.attr.image()) [[likely]]
+                return cell;
+
+        auto copy = VteCell{.c = 0, .attr = cell.attr};
+        copy.attr.set_hyperlink_idx(0);
+        return copy;
+}
 
 void
 Terminal::copy_rect(grid_rect source_rect,
@@ -1058,7 +1088,8 @@ try
         }
 
         /* Only the destination is written; the source is read, so the images
-         * over it stay. */
+         * over it stay. What lands on the destination brings no image with it
+         * either, see cell_for_copy(). */
         erase_images_in_rect(m_screen->insert_delta + dest_rect.top(),
                              m_screen->insert_delta + dest_rect.bottom(),
                              dest_rect.left(),
@@ -1097,7 +1128,7 @@ try
                                col + int(cell->attr.columns()) <= source_rect.right() + 1) {
                                 auto const cols = cell->attr.columns();
                                 for (auto j = 0u; j < cols; ++j, ++cell)
-                                        vec.push_back(*cell);
+                                        vec.push_back(cell_for_copy(*cell));
 
                                 col += cols;
                         }
@@ -1107,7 +1138,8 @@ try
                         for (;
                              col < int(srowdata->len) && col <= source_rect.right();
                              ++col, ++cell) {
-                                auto erased_cell = VteCell{.c = 0, .attr = cell->attr};
+                                auto erased_cell = cell_for_copy(*cell);
+                                erased_cell.c = 0;
                                 erased_cell.attr.set_fragment(false);
                                 vec.push_back(erased_cell);
                         }
