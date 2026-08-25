@@ -135,18 +135,33 @@ export VTE_SIXEL=1
 # the test is a coin flip on blink phase.
 CHILD="printf '\\033[H'; cat '$SIX'; printf '\\033[20;1H'; sleep 30"
 
-# Pin the font, because the golden is a PIXEL comparison and an image is laid
-# out against the font's cell: both the cells it occupies and the pixels it is
-# drawn at follow the font. A machine whose default monospace resolves to
-# different metrics therefore renders the same image at a different scale and
-# every golden mismatches by a uniform factor. That is not a regression, and a
-# test that cannot tell the difference is worse than no test.
+# Pin the font, because some of the compared regions move with the cell.
 #
-# Pinning the family and size removes the settings-derived variation. It does
-# NOT make this fully portable: fontconfig still resolves "Monospace" to
-# whatever the system has. If every render case fails at once and the actual
-# frames look right but scaled, that is this, and the fix is --update-golden on
-# your machine, not a code change.
+# Not all of them, and it is worth being exact about which, because the loose
+# version of this claim - "a different font renders the image at a different
+# scale, so every golden mismatches by a uniform factor" - was measured on
+# this arm and is false. Running the gtk3 cases against three fonts:
+#
+#   case              Monospace 12   Monospace 30      DejaVu Serif 12
+#   bands             PASS           PASS              PASS
+#   raster-opaque     PASS           FAIL AE=107.294   PASS
+#   cursor-right-off  PASS           FAIL AE=338.792   FAIL AE=89.8
+#   bands-margin      PASS           FAIL AE=1764      FAIL AE=1764
+#
+# bands is byte-identical across all three: the image is drawn at its own
+# pixel size at the terminal origin, and neither that size nor that origin
+# follows the font. What follows the font is WHERE ELSE in the window a case
+# looks - the right margin bands-margin crops to sits at the column count
+# times the cell width, and the cursor and the raster rows below the image are
+# placed in cells - so those three move, by different amounts, and not by any
+# single factor. (That the alternate fonts took effect at all is what those
+# failures show; a --font that was ignored would have left all four PASS.)
+#
+# So the pin is here for the three, not for the image scale, and an
+# all-cases-fail run is NOT explained by it - bands would still be passing.
+# It does not make this portable either: fontconfig still resolves "Monospace"
+# to whatever the system has, and a system whose Monospace is not the one the
+# goldens were captured against moves the same three cases.
 FONT=${VTE_TEST_FONT:-Monospace 12}
 
 "$APP" --no-load-config --no-decorations --geometry 80x24 --font "$FONT" \
