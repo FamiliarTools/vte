@@ -759,8 +759,15 @@ test_attr_stream_stripe_is_one_run(void)
                        "one-stripe image row %" G_GSIZE_FORMAT " bytes",
                        uniform, stripe);
 
-        /* Constant, not proportional to the 500 columns. */
-        g_assert_cmpuint(stripe, <=, 2 * uniform);
+        /* Constant, not proportional to the 500 columns.
+         *
+         * An image run costs a little MORE than a plain one - the record
+         * carries a 4-byte image reference after the hyperlink tail - but the
+         * cost is per RUN, not per cell. The bound is deliberately generous
+         * about the constant and strict about the growth: 500 columns must
+         * not cost anything like 500 records.
+         */
+        g_assert_cmpuint(stripe, <=, uniform + 64);
 }
 
 
@@ -1080,6 +1087,135 @@ test_ring_image_anchor_follows_the_cells(void)
         g_assert_false(ring.find_image_anchor(vte::image::k_ref_pool_id_none, &row, &col));
 }
 
+
+static void
+test_ring_image_reference_survives_freeze(void)
+{
+        /* A cell must still know it is part of an image after its row has
+         * been frozen into the scrollback and thawed back out - and must know
+         * WHICH part, since the tile coordinates are what position it.
+         *
+         * Here the pool entry has no image behind it, so there is nothing
+         * to resolve on the way back and the cell correctly comes back
+         * naming no image. The sibling test below covers the case where the
+         * image IS still resident and must be re-bound.
+         */
+        auto ring = Ring{1024, true};   /* with streams: freezing is the point */
+        ring.set_visible_rows(24);
+        append_rows(ring, 4);
+
+        auto const id = ring.image_pool().allocate(nullptr);
+        auto* row = ring.index_writable(1);
+        g_assert_cmpint(row->len, >, 0);
+        row->cells[0].attr.set_image_ref(vte::image::Ref{id, 3, 0});
+        g_assert_true(ring.index(1)->cells[0].attr.image());
+
+        /* Push it far out of the writable window, so it is frozen. */
+        append_rows(ring, 200);
+
+        /* Reading it back thaws it. */
+        auto const* thawed = ring.index(1);
+        g_assert_nonnull(thawed);
+        g_assert_cmpint(thawed->len, >, 0);
+
+        auto const& attr = thawed->cells[0].attr;
+
+        /* Still an image cell, and still the same piece of the image. */
+        g_assert_true(attr.image());
+
+        auto const ref = attr.image_ref();
+        g_assert_cmpuint(ref.tile_row(), ==, 3);
+        g_assert_cmpuint(ref.tile_col(), ==, 0);
+
+        /* No image was behind this id, so nothing was written down that
+         * could resolve it, and it comes back naming nothing.
+         *
+         * That is the correct outcome and not merely an accident of the
+         * fixture: the pool id itself is never what survives, because it
+         * indexes an in-memory table whose quarantine only tracks cells in
+         * the writable rows. Replaying a stale id could name a different
+         * image - exactly the aliasing the pool exists to prevent - so the
+         * id is always re-resolved, and resolves to nothing when the image
+         * is gone.
+         */
+        g_assert_cmpuint(ref.pool_id(), ==, vte::image::k_ref_pool_id_none);
+        g_assert_false(ref.valid());
+        g_assert_null(ring.image_pool().lookup(ref));
+
+        /* And it must not be mistaken for a hyperlink: the union tag decides,
+         * and an image cell answers "no hyperlink" in range.
+         */
+        g_assert_cmpuint(attr.hyperlink_idx_or_none(), ==, 0);
+}
+
+
+
+static void
+test_ring_image_reference_rebinds_after_thaw(void)
+{
+        /* A row carrying a REAL, still-resident image must come back out of
+         * the scrollback naming that same image again.
+         *
+         * This is the case the sibling test above does not reach: it uses a
+         * pool entry with no image behind it, so nothing is written down to
+         * resolve and the cell correctly comes back naming nothing. Here the
+         * image is alive the whole time, so coming back as "no image" would
+         * be a silent loss - a picture that vanishes when you scroll past it
+         * and back.
+         *
+         * What makes it safe is that the stream records the image's PRIORITY,
+         * which is allocated from a monotonic counter and never reused, and
+         * not its pool id, which is an index that a sweep can recycle. The
+         * pool id on the way back out is looked up fresh, so it may legally
+         * differ from the one that went in; the IMAGE must not.
+         */
+        auto ring = Ring{1024, true};   /* with streams: freezing is the point */
+        ring.set_visible_rows(24);
+        append_rows(ring, 4);
+
+        place_image(ring, 1, 1);
+        auto* image = ring.image_map().begin()->second.get();
+        auto const id_before = image->get_pool_id();
+
+        ring.set_placing_image(image);
+        ring.stamp_image_row(1, 0, 1, 0);
+        ring.set_placing_image(nullptr);
+
+        g_assert_true(ring.index(1)->cells[0].attr.image());
+        g_assert_true(ring.image_pool().lookup(ring.index(1)->cells[0].attr.image_ref())
+                      == image);
+
+        /* Push the row far out of the writable window, so it is frozen, then
+         * read it back, which thaws it.
+         */
+        append_rows(ring, 200);
+
+        auto const* thawed = ring.index(1);
+        g_assert_nonnull(thawed);
+        g_assert_cmpint(thawed->len, >, 0);
+
+        auto const& attr = thawed->cells[0].attr;
+        g_assert_true(attr.image());
+
+        auto const ref = attr.image_ref();
+
+        /* The tile coordinates place it within the image. */
+        g_assert_cmpuint(ref.tile_row(), ==, 0);
+        g_assert_cmpuint(ref.tile_col(), ==, 0);
+
+        /* And it resolves to THE SAME image object, not to nothing and not
+         * to some other image that inherited the id.
+         */
+        g_assert_true(ref.valid());
+        g_assert_true(ring.image_pool().lookup(ref) == image);
+
+        /* The id is re-resolved rather than replayed: whatever it is now, it
+         * is the id the image actually holds.
+         */
+        g_assert_cmpuint(ref.pool_id(), ==, image->get_pool_id());
+        (void)id_before;
+}
+
 int
 main(int argc,
      char* argv[])
@@ -1119,6 +1255,9 @@ main(int argc,
         g_test_add_func("/vte/ring/image-pool/sweep-sees-cell-references", test_ring_image_sweep_sees_cell_references);
 
         g_test_add_func("/vte/ring/image-pool/anchor-follows-the-cells", test_ring_image_anchor_follows_the_cells);
+
+        g_test_add_func("/vte/ring/image-pool/reference-survives-freeze", test_ring_image_reference_survives_freeze);
+        g_test_add_func("/vte/ring/image-pool/reference-rebinds-after-thaw", test_ring_image_reference_rebinds_after_thaw);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

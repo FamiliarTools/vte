@@ -133,6 +133,22 @@ private:
                 VteStreamCellAttr attr;
         } CellAttrChange;
 
+        /* What an image run writes after the hyperlink tail.
+         *
+         * The image is identified by its PRIORITY, not by its pool id. The
+         * pool id is an index into an in-memory table that is reused once a
+         * sweep reclaims it, so a frozen row holding one could come back
+         * pointing at a different image. The priority is allocated from a
+         * monotonically increasing counter and is never reused, so it is safe
+         * to write down and still means the same image whenever it is read
+         * back. It is also already the key of m_image_map, so resolving it is
+         * a lookup rather than a search.
+         */
+        typedef struct _VTE_GNUC_PACKED _StreamImageRef {
+                uint64_t priority;
+                uint32_t ref_bits;      /* tile coordinates; pool id ignored */
+        } StreamImageRef;
+
         /* The stride of one CellAttrChange record in the attr stream: the
          * fixed part, then the hyperlink target and its two terminating
          * bytes.
@@ -144,9 +160,20 @@ private:
          * than failing. Anything added to the record's variable tail goes
          * here and nowhere else.
          */
-        static inline constexpr gsize attr_record_stride(gsize hyperlink_length) noexcept
+        static inline constexpr gsize attr_record_stride(gsize hyperlink_length,
+                                                        bool has_image = false) noexcept
         {
-                return sizeof(CellAttrChange) + hyperlink_length + 2;
+                return sizeof(CellAttrChange) + hyperlink_length + 2 +
+                        (has_image ? sizeof(StreamImageRef) : 0);
+        }
+
+        /* Whether a record read back from the stream carries an image
+         * reference. The tag lives in the attr word, which IS persisted, so
+         * the reader can tell without any out-of-band state.
+         */
+        static inline constexpr bool record_has_image(CellAttrChange const& c) noexcept
+        {
+                return !!(c.attr.attr & VTE_ATTR_IMAGE_MASK);
         }
 
         typedef struct _RowRecord {
