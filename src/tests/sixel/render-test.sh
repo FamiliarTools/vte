@@ -31,17 +31,26 @@
 # suite stays green in a sandbox without X or ImageMagick rather than
 # reporting a failure it cannot distinguish from a real one.
 #
-# usage: render-test.sh <vte-app> <srcdir> <case> [--update-golden]
+# usage: render-test.sh <vte-app> <srcdir> <case> <gtk-arm> [--update-golden]
 
 set -u
 
 APP=${1:?vte app binary}
 SRCDIR=${2:?source dir}
 CASE=${3:?case name}
-UPDATE=${4:-}
+ARM=${4:?gtk arm}
+UPDATE=${5:-}
 
 SIX="$SRCDIR/$CASE.six"
-GOLDEN="$SRCDIR/$CASE.golden.png"
+
+# One golden per GTK arm, because the compared frame is the WINDOW and the two
+# toolkits put the terminal at different offsets inside it: the same fixture
+# renders identically - same 96x63 px, same bands, same colours - but GTK4's
+# client-side border pushes the content five pixels down and right of where
+# GTK3 puts it. A single shared golden would therefore fail on one arm for a
+# reason that is not a defect, and papering over it with an offset constant
+# would make the compared region a knob that can silently drift off the image.
+GOLDEN="$SRCDIR/$CASE.golden-$ARM.png"
 
 for tool in Xvfb import compare convert; do
         command -v "$tool" >/dev/null 2>&1 || {
