@@ -115,6 +115,13 @@ option(
 )
 
 option(
+  'sixel_display_tests',
+  type: 'boolean',
+  value: false,
+  description: 'Register the SIXEL tests that need a running X server (Xvfb) and, for the golden-frame ones, ImageMagick',
+)
+
+option(
   '_systemd',
   type: 'boolean',
   value: true,

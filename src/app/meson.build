@@ -178,7 +178,31 @@ endif
 # The runner exits 77 (skip) when Xvfb or ImageMagick are absent, so a
 # sandboxed build without a display reports "skipped" rather than a failure it
 # could not tell apart from a real one.
-if get_option('sixel')
+#
+# Registered behind sixel_display_tests, which is OFF by default, rather than
+# behind the sixel option these test. Those are two different questions and
+# they were being answered by one switch: enabling the sixel FEATURE is what a
+# distributor does to ship images, and it was also signing them up to boot an
+# X server for every case and to have Xvfb and ImageMagick's import, compare
+# and convert on the build host. Without the tools the runners do skip rather
+# than fail, but a suite that reports fourteen skips on every build is noise
+# the builder did not ask for, and with the tools installed it is an X server
+# per case they did not ask for either.
+#
+# Measured on this branch, gtk3: `meson test` runs 20 tests with the option off
+# and 34 with it on, the 14 added costing 25.3s of test time.
+#
+# The runner's own skip path is not made redundant by the option. The option
+# decides whether the tests are ASKED FOR; the skip decides what to say when
+# they were asked for and the tools are not there, which is "skipped" and never
+# a pass. Both were exercised: the option off gives the 20 above, and each of
+# Xvfb, import, compare and convert removed from PATH on its own makes the
+# runner print that tool by name and exit 77.
+#
+# They also carry the sixel-display suite name, so a builder who wants the
+# tests registered but not run in a given invocation has
+# `meson test --no-suite sixel-display` without reconfiguring.
+if get_option('sixel') and get_option('sixel_display_tests')
   sixel_render_cases = [
     'bands',
     # Same image with a DECGCH spliced in. A command a VT340 does not
@@ -237,6 +261,7 @@ if get_option('sixel')
       files(sixel_test_dir / 'xtsmgraphics-test.sh'),
       args: [arm[1].full_path()],
       depends: [arm[1]],
+      suite: 'sixel-display',
       timeout: 120,
     )
 
@@ -256,6 +281,7 @@ if get_option('sixel')
         sixel_test_dir,
       ],
       depends: [arm[1]],
+      suite: 'sixel-display',
       timeout: 420,
     )
 
@@ -274,6 +300,7 @@ if get_option('sixel')
         arm[0],
       ],
       depends: [arm[1]],
+      suite: 'sixel-display',
       timeout: 240,
     )
 
@@ -294,6 +321,7 @@ if get_option('sixel')
         arm[0],
       ],
       depends: [arm[1]],
+      suite: 'sixel-display',
       timeout: 420,
     )
 
@@ -308,6 +336,7 @@ if get_option('sixel')
           arm[0],
         ],
         depends: [arm[1]],
+        suite: 'sixel-display',
         timeout: 120,
       )
     endforeach

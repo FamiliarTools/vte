@@ -177,7 +177,10 @@ export LIBGL_ALWAYS_SOFTWARE=1
 # 10x19+1+381; with the DECTCEM below, all eight crops are byte-identical.
 # The park stays, now only to keep the terminal's idea of the cursor away from
 # the image.
-CHILD="printf '\\033[?25l\\033[H'; cat '$SIX'; printf '\\033[20;1H'; sleep 30"
+#
+# The child ends by touching $WORK/fed, which is the first half of the
+# readiness handshake below; see wait_until_fed.
+CHILD="printf '\\033[?25l\\033[H'; cat '$SIX'; printf '\\033[20;1H'; touch '$WORK/fed'; sleep 30"
 KEEP=()
 
 # A case whose fixture is a sixel with NO TERMINATOR has to be run
@@ -197,7 +200,7 @@ KEEP=()
 # only the DECTCEM the child above already begins with.
 if [ -r "$SRCDIR/$CASE.eof" ]; then
         KEEP=(--keep)
-        CHILD="printf '\\033[?25l\\033[H'; cat '$SIX'"
+        CHILD="printf '\\033[?25l\\033[H'; cat '$SIX'; touch '$WORK/fed'"
 fi
 
 # Pin the font, because some of the compared regions move with the cell.
@@ -244,7 +247,70 @@ FONT=${VTE_TEST_FONT:-Monospace 12}
 "$APP" --sixel "${KEEP[@]}" --no-load-config --no-decorations --geometry 80x24 --font "$FONT" \
         -- sh -c "$CHILD" >"$WORK/app.log" 2>&1 &
 APID=$!
-sleep 6
+
+# Wait for the terminal to have CONSUMED the fixture, rather than for a number
+# of seconds.
+#
+# This used to be `sleep 6`. A fixed sleep is not a wait: when it is short of
+# what the machine needs, the capture lands before the image is on screen and
+# the runner does not skip or say "not ready" - it compares an early frame
+# against the golden and reports the mismatch as a VERDICT, which on a pixel
+# gate is a flaky red indistinguishable from a real regression. The display
+# these tests run on is already handshaken (Xvfb -displayfd), so the harness
+# knew how to do this.
+#
+# Measured, gtk3/bands, this runner against a copy of it whose only difference
+# is `sleep 6` in place of this block, both run inside a systemd scope with
+# -p CPUQuota=2% -p AllowedCPUs=0 to stand in for a loaded builder, three runs
+# each:
+#
+#   sleep 6        FAIL: bands differs from the golden (AE=38144), all three
+#   this block     ready after 23s, 22s, 19s; PASS, all three
+#
+# That is the whole case for the change: the sleep did not report a slow
+# machine, it reported a rendering defect that was not there.
+#
+# The signal is the child's own word. It touches $WORK/fed as its last act, so
+# the flag appearing means the app booted, the pty was spawned, the child ran
+# and `cat` returned with the whole fixture written. Nothing about it is a
+# guess, and it has no lower bound - unthrottled, the same case reports "ready
+# after 0s" where the sleep spent 6.
+#
+# There is deliberately NO second wait here for the painting to settle. One was
+# written and then removed, because it could not be shown to observe anything:
+# instrumented to capture the screen at the moment the flag appears and again
+# once two consecutive captures agreed, the two frames were identical on all
+# twelve runs measured - bands and bands-truncated, unthrottled and at the 2%
+# quota above, including the .eof case whose image is only drawn at eos. A
+# guard that never observes the state it exists to catch is a guard nothing
+# holds, so what is left is the one mechanism with a red run behind it.
+#
+# The cap is a last resort, not the mechanism: reaching it is reported and
+# fails the run, so a capture taken from a terminal that never read the fixture
+# is never quietly turned into a verdict about pixels.
+READY_TIMEOUT=${VTE_TEST_READY_TIMEOUT:-90}
+
+wait_until_fed() {
+        local started=$SECONDS
+        local deadline=$((SECONDS + READY_TIMEOUT))
+
+        while [ "$SECONDS" -lt "$deadline" ]; do
+                [ -e "$WORK/fed" ] && { echo "ready after $((SECONDS - started))s"; return 0; }
+                sleep 0.1
+        done
+
+        echo "NOT READY: the child never finished writing $CASE to the terminal"
+        return 1
+}
+
+# A terminal that never read the fixture is not evidence about the renderer
+# either way, so it is reported as the machine being too slow rather than as a
+# verdict on the pixels - the same distinction broken_comparison draws below.
+wait_until_fed || {
+        echo "FAIL: $CASE was never ready to be captured"
+        [ -s "$WORK/app.log" ] && sed 's/^/  /' "$WORK/app.log"
+        exit 1
+}
 
 import -window root "$WORK/shot.png" 2>/dev/null || {
         echo "FAIL: could not capture the window"

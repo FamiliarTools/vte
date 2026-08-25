@@ -1168,11 +1168,15 @@ endif
 #
 # Not in test_units, because it has to realize a widget and so needs a display;
 # the runner supplies a throwaway one and reports "skipped" when it cannot.
+# That display is an Xvfb the runner boots, so this is registered behind
+# sixel_display_tests along with the render tests in src/app/meson.build, and
+# is off by default: enabling the sixel FEATURE must not oblige a builder to
+# have an X server.
 #
 # Built WITHOUT release_args, like every other test here: those carry
 # -DG_DISABLE_ASSERT, which turns g_assert() into nothing, and a test whose
 # assertions are compiled away passes no matter what the code does.
-if get_option('sixel')
+if get_option('sixel') and get_option('sixel_display_tests')
   image_contract_tests = []
 
   if get_option('gtk3')
@@ -1209,6 +1213,7 @@ if get_option('sixel')
       files(meson.project_source_root() / 'src' / 'tests' / 'sixel' / 'image-contract-test.sh'),
       args: [arm[1].full_path()],
       depends: [arm[1]],
+      suite: 'sixel-display',
       timeout: 120,
     )
   endforeach

@@ -143,7 +143,49 @@ ask() {
                 "stty raw -echo; printf '${q}'; dd bs=1 count=${n} 2>/dev/null | cat -v > $WORK/out; stty sane; sleep 1" \
                 >/dev/null 2>&1 &
         APID=$!
-        sleep 7
+
+        # Wait for the reply to have ARRIVED, rather than for a number of
+        # seconds.
+        #
+        # This used to be `sleep 7`, and a fixed sleep is the wrong shape for
+        # the question. Short of what the machine needs it reads $WORK/out
+        # before the terminal has answered, and the empty file comes back as a
+        # conformance FAILURE - the terminal blamed for a wait nobody made.
+        # Measured on gtk3 inside a systemd scope with -p CPUQuota=2%
+        # -p AllowedCPUs=0, geometry mode:
+        #
+        #   sleep 7     FAIL geometry agreement: unparseable replies
+        #               (XTSMGRAPHICS '', CSI 14t '')
+        #   this wait   ok   XTSMGRAPHICS geometry agrees with CSI 14t at 640x408
+        #
+        # Longer than needed it is just as wrong in the other direction: the
+        # full run took 42.8s under the sleep and 3.2s under this wait, with
+        # every reply byte-identical between the two.
+        #
+        # ${n} is a ceiling and not a length - the replies here are 7 to 17
+        # bytes, so `dd bs=1 count=${n}` never returns on its own and cannot be
+        # the signal. The file is: `cat -v` writes the reply through as it
+        # reads it, so out being non-empty is the answer having arrived.
+        #
+        # Nothing further is waited for. A settle check was written on top of
+        # this - out the same size on two consecutive samples - and removed,
+        # because sampling out every 20ms showed it has nothing to do: both
+        # unthrottled and at the 2% quota above, out went straight from 0 bytes
+        # to the full 16 in a single sample and was never once observed
+        # part-written.
+        #
+        # Reaching the cap is reported rather than treated as a reply, and the
+        # caller then compares whatever did arrive - a terminal that answered
+        # nothing is a result this file should show, not hide.
+        deadline=$((SECONDS + ${VTE_TEST_READY_TIMEOUT:-90}))
+        replied=
+        while [ "$SECONDS" -lt "$deadline" ]; do
+                [ -s "$WORK/out" ] && { replied=1; break; }
+                sleep 0.1
+        done
+        [ -n "$replied" ] ||
+                echo "NOT READY: no reply to ${q} arrived in time" >&2
+
         kill "$APID" 2>/dev/null; APID=
         kill "$XPID" 2>/dev/null; XPID=
         wait 2>/dev/null
