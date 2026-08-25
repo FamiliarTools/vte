@@ -184,6 +184,14 @@ if get_option('sixel') and get_option('gtk4')
     'bands-margin',
   ]
 
+  test(
+    'sixel-xtsmgraphics',
+    files(meson.project_source_root() / 'src' / 'tests' / 'sixel' / 'xtsmgraphics-test.sh'),
+    args: [app_gtk4.full_path()],
+    depends: [app_gtk4],
+    timeout: 120,
+  )
+
   foreach case: sixel_render_cases
     test(
       'sixel-render-' + case,
