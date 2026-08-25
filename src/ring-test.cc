@@ -30,6 +30,8 @@
 
 #include "ring.hh"
 #include "vterowdata.hh"
+#include <set>
+
 #include "cell.hh"
 #include "image-ref.hh"
 #include "image-pool.hh"
@@ -864,6 +866,220 @@ test_sixel_right_margin_clip(void)
         }
 }
 
+
+/* The pool wired into the ring: an id's life is the image's life. */
+
+static void
+test_ring_image_pool_allocates(void)
+{
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        g_assert_cmpuint(ring.image_pool().live_count(), ==, 0);
+
+        place_image(ring, 2, 3);
+        place_image(ring, 8, 3);
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 2);
+        g_assert_cmpuint(ring.image_pool().live_count(), ==, 2);
+
+        /* Every resident image has a real id, and the id resolves back to
+         * that same image - which is what a cell holding the id will rely on.
+         */
+        auto seen = std::set<uint32_t>{};
+        for (auto const& [priority, image] : ring.image_map()) {
+                auto const id = image->get_pool_id();
+                g_assert_cmpuint(id, !=, vte::image::k_ref_pool_id_none);
+                g_assert_true(ring.image_pool().lookup(id) == image.get());
+                g_assert_false(seen.contains(id));
+                seen.insert(id);
+        }
+}
+
+static void
+test_ring_image_pool_retires_with_the_image(void)
+{
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        place_image(ring, 2, 3);
+        auto const id = ring.image_map().begin()->second->get_pool_id();
+        g_assert_cmpuint(id, !=, vte::image::k_ref_pool_id_none);
+
+        /* Shrinking drops the rows the image covers, which frees it. */
+        ring.resize(2);
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+
+        /* The id must NOT resolve to the dead image any more... */
+        g_assert_null(ring.image_pool().lookup(id));
+
+        /* ...and must not be free either: it is retired, because a cell may
+         * still name it. Reuse here is what would make a stale cell display
+         * some future image.
+         */
+        g_assert_cmpuint(ring.image_pool().live_count(), ==, 0);
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
+}
+
+static void
+test_ring_image_pool_sweep_reclaims(void)
+{
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        place_image(ring, 2, 3);
+        auto const id = ring.image_map().begin()->second->get_pool_id();
+        g_assert_true(ring.image_pool().lookup(id) != nullptr);
+
+        ring.resize(2);
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
+
+        /* Its rows are gone, so no cell names it and a sweep reclaims its id.
+         * The sweep must not touch anything else.
+         */
+        ring.sweep_image_pool_for_test();
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 0);
+        g_assert_true(ring.image_pool().lookup(id) == nullptr);
+
+        /* And a live image keeps its id across a sweep. */
+        auto ring2 = Ring{24, false};
+        ring2.set_visible_rows(24);
+        append_rows(ring2, 24);
+        place_image(ring2, 2, 3);
+        auto const live_id = ring2.image_map().begin()->second->get_pool_id();
+        ring2.sweep_image_pool_for_test();
+        g_assert_true(ring2.image_pool().lookup(live_id) ==
+                      ring2.image_map().begin()->second.get());
+}
+
+
+static void
+test_ring_image_cells_carry_the_reference(void)
+{
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        place_image(ring, 2, 3);
+        auto* image = ring.image_map().begin()->second.get();
+        auto const id = image->get_pool_id();
+
+        /* place_image() only appends the image; stamping is what
+         * erase_image_rect() does, so drive it directly here.
+         */
+        ring.set_placing_image(image);
+        for (auto r = 0u; r < 3u; r++)
+                ring.stamp_image_row(2 + r, 0, 1, r);
+        ring.set_placing_image(nullptr);
+
+        /* Each stamped cell names the image AND its own place in it. */
+        for (auto r = 0u; r < 3u; r++) {
+                auto const* row = ring.index(2 + r);
+                g_assert_nonnull(row);
+                g_assert_cmpint(row->len, >, 0);
+
+                auto const& attr = row->cells[0].attr;
+                g_assert_true(attr.image());
+
+                auto const ref = attr.image_ref();
+                g_assert_cmpuint(ref.pool_id(), ==, id);
+                g_assert_cmpuint(ref.tile_row(), ==, r);
+                g_assert_cmpuint(ref.tile_col(), ==, 0);
+
+                /* And the reference resolves back to the image itself. */
+                g_assert_true(ring.image_pool().lookup(ref) == image);
+        }
+
+        /* Cells of different tile rows are different stripes, cells of the
+         * same row are one stripe - the unit of lifetime.
+         */
+        auto const a = ring.index(2)->cells[0].attr.image_ref();
+        auto const b = ring.index(3)->cells[0].attr.image_ref();
+        g_assert_true(a.same_image(b));
+        g_assert_false(a.same_stripe(b));
+}
+
+static void
+test_ring_image_sweep_sees_cell_references(void)
+{
+        /* The sweep's marking loop is only worth anything if a stamped cell
+         * keeps an id alive by itself.
+         *
+         * Use an id with NO resident image, because sweep_image_pool() also
+         * marks every resident image's id - so with an image still in the map
+         * the cell's contribution would be invisible, and the test would pass
+         * whether or not cells were walked at all.
+         */
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        auto const id = ring.image_pool().allocate(nullptr);
+        g_assert_cmpuint(id, !=, vte::image::k_ref_pool_id_none);
+
+        auto* row = ring.index_writable(2);
+        g_assert_cmpint(row->len, >, 0);
+        row->cells[0].attr.set_image_ref(vte::image::Ref{id, 0, 0});
+
+        ring.image_pool().retire(id);
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
+
+        /* A cell still names it: the sweep must not reclaim it. */
+        ring.sweep_image_pool_for_test();
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 1);
+
+        /* Clear that cell, and nothing names it any more. */
+        row->cells[0].attr.set_hyperlink_idx(0);
+        ring.sweep_image_pool_for_test();
+        g_assert_cmpuint(ring.image_pool().retired_count(), ==, 0);
+}
+
+
+
+static void
+test_ring_image_anchor_follows_the_cells(void)
+{
+        /* The whole reason for anchoring images to cells: an operation that
+         * moves TEXT must move the image, without that operation knowing
+         * images exist.
+         */
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        place_image(ring, 5, 3);
+        auto* image = ring.image_map().begin()->second.get();
+        auto const id = image->get_pool_id();
+
+        ring.set_placing_image(image);
+        for (auto r = 0u; r < 3u; r++)
+                ring.stamp_image_row(5 + r, 0, 1, r);
+        ring.set_placing_image(nullptr);
+
+        auto row = Ring::row_t{};
+        auto col = Ring::column_t{};
+        g_assert_true(ring.find_image_anchor(id, &row, &col));
+        g_assert_cmpuint(row, ==, 5);
+        g_assert_cmpuint(col, ==, 0);
+
+        /* Insert a row above it: every row below shifts down by one, and the
+         * anchoring cell goes with them.
+         */
+        ring.insert(5, 0);
+
+        g_assert_true(ring.find_image_anchor(id, &row, &col));
+        g_assert_cmpuint(row, ==, 6);
+
+        /* An id nothing names has no anchor, rather than a wrong one. */
+        auto const unused = ring.image_pool().allocate(nullptr);
+        g_assert_false(ring.find_image_anchor(unused, &row, &col));
+        g_assert_false(ring.find_image_anchor(vte::image::k_ref_pool_id_none, &row, &col));
+}
+
 int
 main(int argc,
      char* argv[])
@@ -894,6 +1110,15 @@ main(int argc,
 
         g_test_add_func("/vte/ring/attr-stream/rle-trap", test_attr_stream_rle_trap);
         g_test_add_func("/vte/ring/attr-stream/stripe-is-one-run", test_attr_stream_stripe_is_one_run);
+
+        g_test_add_func("/vte/ring/image-pool/allocates", test_ring_image_pool_allocates);
+        g_test_add_func("/vte/ring/image-pool/retires-with-the-image", test_ring_image_pool_retires_with_the_image);
+        g_test_add_func("/vte/ring/image-pool/sweep-reclaims", test_ring_image_pool_sweep_reclaims);
+
+        g_test_add_func("/vte/ring/image-pool/cells-carry-the-reference", test_ring_image_cells_carry_the_reference);
+        g_test_add_func("/vte/ring/image-pool/sweep-sees-cell-references", test_ring_image_sweep_sees_cell_references);
+
+        g_test_add_func("/vte/ring/image-pool/anchor-follows-the-cells", test_ring_image_anchor_follows_the_cells);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

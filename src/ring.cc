@@ -314,6 +314,106 @@ Ring::image_gc_region() noexcept
         sync_has_images();
 }
 
+/*
+ * Mark and sweep the image id space.
+ *
+ * Marks every id still named by a cell in the writable rows, then releases
+ * the retired ids nothing marked. Rows already frozen into the stream are
+ * deliberately NOT walked: the same restriction hyperlink_gc() operates
+ * under, and it is sound for the same reason only once frozen rows carry
+ * their image reference in the stream rather than in the pool. Until that
+ * exists, this is conservative in the safe direction - it can only fail to
+ * reclaim an id, never reclaim one too early.
+ */
+bool
+Ring::find_image_anchor(uint32_t pool_id,
+                        row_t* out_row,
+                        column_t* out_col) const noexcept
+{
+        if (pool_id == vte::image::k_ref_pool_id_none)
+                return false;
+
+        for (auto i = m_writable; i < m_end; i++) {
+                auto const row = get_writable_index(i);
+                for (auto j = 0; j < row->len; j++) {
+                        auto const& attr = row->cells[j].attr;
+                        if (!attr.image())
+                                continue;
+
+                        auto const ref = attr.image_ref();
+                        if (ref.pool_id() != pool_id)
+                                continue;
+                        if (ref.tile_row() != 0 || ref.tile_col() != 0)
+                                continue;
+
+                        *out_row = i;
+                        *out_col = j;
+                        return true;
+                }
+        }
+
+        return false;
+}
+
+void
+Ring::stamp_image_row(row_t position,
+                      column_t left,
+                      column_t columns,
+                      uint32_t image_row) noexcept
+{
+        if (m_placing_image == nullptr)
+                return;
+
+        auto const id = m_placing_image->get_pool_id();
+        if (id == vte::image::k_ref_pool_id_none)
+                return;
+
+        if (position < m_writable || position >= m_end)
+                return;
+
+        auto const row = get_writable_index(position);
+
+        for (auto col = std::max(left, column_t{0}); col < left + columns; col++) {
+                if (col >= row->len)
+                        break;
+
+                auto const tile_col = uint32_t(col - left);
+
+                /* Refuse rather than store a masked reference: a truncated
+                 * tile coordinate draws the wrong part of the image.
+                 */
+                if (!vte::image::Ref::fits(id, image_row, tile_col))
+                        continue;
+
+                row->cells[col].attr.set_image_ref(vte::image::Ref{id, image_row, tile_col});
+        }
+}
+
+void
+Ring::sweep_image_pool() noexcept
+{
+        m_image_pool.sweep_begin();
+
+        for (auto i = m_writable; i < m_end; i++) {
+                auto const row = get_writable_index(i);
+                for (auto j = 0; j < row->len; j++) {
+                        auto const& cell = row->cells[j];
+                        if (cell.attr.image())
+                                m_image_pool.mark(cell.attr.image_ref());
+                }
+        }
+
+        /* An image that is still resident keeps its id whether or not any
+         * cell names it yet: the cells are stamped separately from the
+         * allocation, so an image can legitimately exist for a moment with
+         * none.
+         */
+        for (auto const& [priority, image] : m_image_map)
+                m_image_pool.mark(image->get_pool_id());
+
+        m_image_pool.sweep_end();
+}
+
 void
 Ring::image_gc() noexcept
 {
@@ -2281,9 +2381,30 @@ Ring::append_image(vte::Freeable<cairo_surface_t> surface,
         if (!success)
                 return;
 
-        ++m_next_image_priority;
-
         auto const& image = it->second;
+
+        /* Give the image an id that cells can name it by.
+         *
+         * If the id space is exhausted, sweep once - retired ids that no
+         * surviving cell refers to become available - and try again. If it is
+         * still exhausted, DROP the image rather than storing one that no
+         * cell can reference: an unreferenceable image is retention with no
+         * way to draw it and no way to erase it.
+         */
+        auto pool_id = m_image_pool.allocate(image.get());
+        if (pool_id == vte::image::k_ref_pool_id_none) {
+                sweep_image_pool();
+                pool_id = m_image_pool.allocate(image.get());
+        }
+
+        if (pool_id == vte::image::k_ref_pool_id_none) {
+                m_image_map.erase(it);
+                return;
+        }
+
+        image->set_pool_id(pool_id);
+
+        ++m_next_image_priority;
 
         m_image_by_top_map.emplace(std::piecewise_construct,
                                    std::forward_as_tuple(image->get_top()),

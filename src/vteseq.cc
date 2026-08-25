@@ -976,7 +976,32 @@ Terminal::erase_image_rect(vte::grid::row_t rows,
         for (auto i = 0; i < rows; ++i) {
                 auto const row = top + i;
 
+                /* Create the cells the image covers, even past the end of the
+                 * row, and blank them.
+                 *
+                 * The cells ARE the image's representation: they carry the
+                 * reference, they are what the draw walks, and they are what
+                 * scrolling, insertion and rewrap move on the image's behalf.
+                 * A row that stops short of the image's width has nothing to
+                 * carry the rest of that stripe, so those columns cannot be
+                 * drawn at all - which is what happens when an image lands on
+                 * an empty row, i.e. the common case.
+                 *
+                 * This does mean the row's length now reflects the image, and
+                 * a reflow wraps on it. That is the intended behaviour rather
+                 * than a side effect: an image that reflows with the text it
+                 * sits among is the whole point of anchoring it to cells.
+                 */
                 erase_characters(columns, true);
+
+                /* Anchor the image to the cells it covers. The cells carry
+                 * their position WITHIN THE IMAGE, so they keep naming the
+                 * right piece of it after the row has moved.
+                 */
+                m_screen->row_data->stamp_image_row(row,
+                                                    m_screen->cursor.col,
+                                                    columns,
+                                                    uint32_t(i));
 
                 if (row > m_screen->insert_delta - 1 &&
                     row < m_screen->insert_delta + m_row_count)

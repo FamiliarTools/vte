@@ -19,6 +19,7 @@
 #pragma once
 
 #include "cairo-glue.hh"
+#include "image-ref.hh"
 
 #if VTE_GTK == 4
 #include <gdk/gdk.h>
@@ -49,6 +50,13 @@ private:
         // Cell dimensions in pixels at time of image creation
         int m_cell_width;
         int m_cell_height;
+
+        /* The id cells use to name this image; see image-ref.hh. Zero means
+         * the image is not addressable by any cell, which is a resource
+         * failure rather than a normal state.
+         */
+        uint32_t m_pool_id{vte::image::k_ref_pool_id_none};
+
 
 #if VTE_GTK == 4
         /* Lazily created from the immutable m_surface, whose pixel buffer it
@@ -86,6 +94,8 @@ public:
         Image operator=(Image&&) = delete;
 
         inline constexpr auto get_priority() const noexcept { return m_priority; }
+        inline constexpr auto get_pool_id() const noexcept { return m_pool_id; }
+        inline void set_pool_id(uint32_t id) noexcept { m_pool_id = id; }
         inline constexpr auto get_left() const noexcept { return m_left_cells; }
         inline auto get_top() const noexcept { return m_top_cells; }
         inline void set_top(int row) noexcept { m_top_cells = row; }
