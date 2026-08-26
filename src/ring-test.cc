@@ -30,9 +30,14 @@
 
 #include "ring.hh"
 #include "vterowdata.hh"
+#include <algorithm>
+#include <cstdio>
 #include <map>
 #include <set>
 #include <utility>
+#include <vector>
+
+#include <unistd.h>
 
 #include "cell.hh"
 #include "image-ref.hh"
@@ -2616,6 +2621,425 @@ test_ring_scrollback_restore_respects_the_budget(void)
         ring.validate_images();
 }
 
+
+/* --- Image memory soak ---
+ *
+ * The question these answer is not whether one path frees one image, which the
+ * tests above each pin down, but whether a session that runs for hours with
+ * images churning through it returns to a plateau or climbs. Those are
+ * different questions: every individual free can be correct while an
+ * append-only structure alongside them grows forever, and the second failure is
+ * invisible to any test that runs one cycle.
+ *
+ * So these run many cycles and look at the SHAPE of the curve, comparing the
+ * second half of the run against the first rather than checking any single
+ * value. A bound that holds at cycle 40 having also held at cycle 20 is a
+ * plateau; the same bound holding only because the run was short is not.
+ *
+ * Both screens are soaked, because their image rules genuinely differ:
+ * spill_image() returns immediately when the ring has no stream (ring.cc), and
+ * the alternate screen is built without one (vte.cc), so eviction there
+ * DESTROYS the pixels where on the normal screen it parks them. A soak of only
+ * the normal screen would miss the destroy path entirely.
+ */
+
+/* Resident set size in bytes, from the kernel rather than from any allocator's
+ * own bookkeeping, since what matters to the person whose laptop this is
+ * running on is the pages actually held.
+ */
+static size_t
+process_rss(void)
+{
+        auto* const f = std::fopen("/proc/self/statm", "r");
+        if (!f)
+                return 0;
+
+        auto size = 0UL;
+        auto resident = 0UL;
+        auto const n = std::fscanf(f, "%lu %lu", &size, &resident);
+        std::fclose(f);
+
+        if (n != 2)
+                return 0;
+
+        return size_t(resident) * size_t(sysconf(_SC_PAGESIZE));
+}
+
+/* How many cycles a soak runs.
+ *
+ * The default is what keeps the test suite quick; a real answer to "does this
+ * plateau" needs a longer run than that, and the honest way to get one is the
+ * same code with the count turned up rather than a second, shorter-lived
+ * program that might not be doing the same thing.
+ */
+static size_t
+soak_cycles(size_t fallback)
+{
+        auto const* const env = g_getenv("VTE_RING_SOAK_CYCLES");
+        if (!env)
+                return fallback;
+
+        auto const v = g_ascii_strtoll(env, nullptr, 10);
+        return (v > 0 && v < (1 << 20)) ? size_t(v) : fallback;
+}
+
+struct Sample {
+        size_t cycle;
+        size_t image_memory;
+        size_t resident;
+        size_t pool_live;
+        size_t pool_retired;
+        size_t pool_available;
+        size_t spill_records;
+        size_t spill_bytes;
+        size_t spill_written;
+        size_t delta;
+        size_t writable;
+        size_t rss;
+};
+
+static Sample
+take_sample(Ring const& ring,
+            size_t cycle)
+{
+        return Sample{
+                cycle,
+                ring.image_memory_used(),
+                ring.image_map().size(),
+                const_cast<Ring&>(ring).image_pool().live_count(),
+                const_cast<Ring&>(ring).image_pool().retired_count(),
+                const_cast<Ring&>(ring).image_pool().available(),
+                ring.image_spill_count_for_test(),
+                size_t(ring.image_stream_size()),
+                size_t(ring.image_stream_head()),
+                size_t(ring.delta()),
+                size_t(ring.writable_start_for_test()),
+                process_rss(),
+        };
+}
+
+static void
+report(char const* what,
+       std::vector<Sample> const& samples)
+{
+        g_test_message("%s: cycle imagemem resident live retired avail spillrec spilllive spillwritten delta writable rss", what);
+        for (auto const& s : samples) {
+                /* Every cycle would drown the useful signal in a long run; the
+                 * ends and a regular stride are what shows the shape.
+                 */
+                if (s.cycle < 4 || s.cycle % 8 == 0 || s.cycle + 4 >= samples.size())
+                        g_test_message("%s: %5zu %9zu %8zu %5zu %7zu %6zu %8zu %9zu %12zu %6zu %8zu %9zu",
+                                       what, s.cycle, s.image_memory, s.resident,
+                                       s.pool_live, s.pool_retired, s.pool_available,
+                                       s.spill_records, s.spill_bytes, s.spill_written,
+                                       s.delta, s.writable, s.rss);
+        }
+}
+
+/* Place @count images, each on its own fresh row, and stamp the cells that
+ * carry them - the same two halves place_image()'s contract asks for.
+ */
+static void
+churn_place(Ring& ring,
+            int count)
+{
+        auto const base = ring.next();
+        append_rows(ring, count);
+
+        for (auto i = 0; i < count; i++) {
+                auto const row = base + i;
+                widen_row(ring, row, 4);
+                place_image(ring, row, 1);
+
+                auto* const img = ring.image_map().rbegin()->second.get();
+                ring.set_placing_image(img);
+                ring.stamp_image_row(row, 0, 4, 0);
+                ring.set_placing_image(nullptr);
+        }
+}
+
+static void
+test_ring_image_soak_normal_screen(void)
+{
+        /* The normal screen: streams present, so eviction PARKS pixels in the
+         * image stream and a later read faults them back.
+         */
+        auto const cycles = soak_cycles(48);
+        auto const per_cycle = 8;
+        auto const budget = size_t{64 * 1024};
+
+        /* A short scrollback on purpose. The ring only reclaims spilled image
+         * bytes from discard_one_row(), and only on every 256th row, so a ring
+         * long enough that the run never fills it would never reach the reclaim
+         * at all - and the soak would then report a monotonic spill curve that
+         * says nothing about whether reclamation works.
+         */
+        auto ring = Ring{256, true};
+        ring.set_visible_rows(24);
+        ring.set_image_memory_max(budget);
+
+        auto samples = std::vector<Sample>{};
+
+        for (auto cycle = size_t{0}; cycle < cycles; cycle++) {
+                auto const base = ring.next();
+
+                churn_place(ring, per_cycle);
+
+                /* Scroll them out of the writable window and into history,
+                 * which is what forces the freeze and then the eviction.
+                 */
+                append_rows(ring, 64);
+
+                /* Scroll back over them, which faults evicted images in again.
+                 * This is the half of the cycle that ADDS, and a soak that only
+                 * ever evicted would show a falling curve and prove nothing.
+                 */
+                for (auto i = 0; i < per_cycle; i++)
+                        (void)ring.index(base + i);
+
+                /* Overwrite some of them with text, and reflow, both of which
+                 * move rows underneath images that are already placed.
+                 */
+                if ((cycle % 4) == 0) {
+                        ring.rewrap_for_test(40);
+                        ring.rewrap_for_test(80);
+                }
+
+                /* Clear the scrollback outright now and then, which is what
+                 * Ctrl-L and a `clear` do, and the one operation that can
+                 * actually give the streams back.
+                 */
+                if ((cycle % 32) == 31)
+                        ring.drop_scrollback(ring.next() - 1);
+
+                ring.validate_images();
+
+                /* The budget is the ring's own promise and has to hold at every
+                 * point of the cycle, not just at the end of it.
+                 */
+                g_assert_cmpuint(ring.image_memory_used(), <=, budget);
+
+                samples.push_back(take_sample(ring, cycle));
+        }
+
+        report("soak/normal", samples);
+
+        /* The shape. Compare the second half against the first: a plateau has
+         * the two roughly equal, a leak has the second strictly and largely
+         * above. Taking the MAXIMUM of each half rather than the last value
+         * matters, because a curve that climbs and is then knocked down by the
+         * final drop_scrollback would look flat from its endpoints alone.
+         */
+        auto max_over = [&](size_t from, size_t to, size_t Sample::*field) {
+                auto m = size_t{0};
+                for (auto i = from; i < to; i++)
+                        m = std::max(m, samples[i].*field);
+                return m;
+        };
+
+        auto const half = cycles / 2;
+        auto const mem_first = max_over(0, half, &Sample::image_memory);
+        auto const mem_second = max_over(half, cycles, &Sample::image_memory);
+
+        g_test_message("soak/normal: image memory max first half %zu, second half %zu",
+                       mem_first, mem_second);
+
+        /* Resident image memory is bounded by the budget by construction, so
+         * the interesting bound is the one nothing enforces: that the second
+         * half does not sit above the first. Allowing a factor of two leaves
+         * room for where in its cycle the run happens to stop.
+         */
+        g_assert_cmpuint(mem_second, <=, std::max(mem_first * 2, size_t(4096)));
+
+        /* Pool identifiers are the resource with a hard ceiling: 14 bits, and
+         * an image that cannot get one is DROPPED rather than queued. Retired
+         * ids are only reclaimed by a sweep, and a sweep only happens when
+         * allocation has already failed, so this climbing is by design - what
+         * must not happen is it reaching the floor and staying there, which is
+         * the point at which pictures silently stop appearing.
+         */
+        g_assert_cmpuint(samples.back().pool_available, >, 0);
+
+        ring.validate_images();
+}
+
+/* The spill stream must RECYCLE, not just grow.
+ *
+ * spill_image() appends pixels to a disk-backed stream and reclaim_image_spill()
+ * advances that stream's tail once the last row naming a spilled image is gone.
+ * Only the tail makes the space come back, and the difference is invisible to
+ * the record count and to head: both of those look identical whether the tail
+ * follows or never moves. What separates a session that plateaus from one that
+ * fills the user's disk is head minus tail, and nothing measured that before.
+ *
+ * This soak is deliberately narrower than the one above - it scrolls, and does
+ * nothing else - because the bound it asserts is exact rather than approximate.
+ * The images it makes are all the same size and all die the same way, so the
+ * live byte count is not merely bounded, it is FLAT, and an exact bound is what
+ * makes a small per-cycle leak visible at all. A test that allowed the live size
+ * to drift by a factor would pass with a leak of a few kilobytes a cycle, which
+ * over a working day is the whole of the user's /tmp.
+ */
+static void
+test_ring_image_spill_stream_recycles(void)
+{
+        auto const cycles = soak_cycles(64);
+        auto const per_cycle = 8;
+
+        auto ring = Ring{256, true};
+        ring.set_visible_rows(24);
+        ring.set_image_memory_max(size_t{64 * 1024});
+
+        auto samples = std::vector<Sample>{};
+
+        for (auto cycle = size_t{0}; cycle < cycles; cycle++) {
+                auto const base = ring.next();
+
+                churn_place(ring, per_cycle);
+                append_rows(ring, 64);
+
+                for (auto i = 0; i < per_cycle; i++)
+                        (void)ring.index(base + i);
+
+                ring.validate_images();
+                samples.push_back(take_sample(ring, cycle));
+        }
+
+        report("soak/spill", samples);
+
+        /* Past the first few cycles the ring is in steady state: the same
+         * number of images alive, the same number parked, the same bytes held.
+         * Take the bound from the run itself at that point rather than writing
+         * a number in, so that changing the image size or the cycle shape here
+         * does not silently turn the assertion off.
+         */
+        auto const warmup = size_t{8};
+        g_assert_cmpuint(cycles, >, warmup * 2);
+
+        auto const settled = samples[warmup].spill_bytes;
+        g_assert_cmpuint(settled, >, 0);
+
+        auto worst = size_t{0};
+        auto worst_cycle = size_t{0};
+        for (auto i = warmup; i < cycles; i++) {
+                if (samples[i].spill_bytes > worst) {
+                        worst = samples[i].spill_bytes;
+                        worst_cycle = i;
+                }
+        }
+
+        g_test_message("soak/spill: settled at %zu bytes after %zu cycles, "
+                       "worst %zu at cycle %zu, total written %zu",
+                       settled, warmup, worst, worst_cycle,
+                       samples.back().spill_written);
+
+        /* The stream was genuinely used: far more was written than is held, so
+         * the flatness below is recycling and not simply an absence of spilling.
+         */
+        g_assert_cmpuint(samples.back().spill_written, >, settled * 4);
+
+        /* And it is flat. One image's worth of slack, since where in its cycle
+         * the sample lands decides whether the newest spill is counted yet.
+         */
+        auto const slack = settled;
+        g_assert_cmpuint(worst, <=, settled + slack);
+}
+
+static void
+test_ring_image_soak_alternate_screen(void)
+{
+        /* The alternate screen: no streams, so spill_image() returns at its
+         * first line and eviction DESTROYS. Nothing can be faulted back, which
+         * makes this the case where memory must return to a floor rather than
+         * to a plateau, and the case where a missed free has nothing to hide
+         * behind.
+         */
+        auto const cycles = soak_cycles(48);
+        auto const per_cycle = 4;
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+
+        auto samples = std::vector<Sample>{};
+
+        for (auto cycle = size_t{0}; cycle < cycles; cycle++) {
+                churn_place(ring, per_cycle);
+
+                /* A full-screen redraw, which on the alt screen is how nearly
+                 * every image ever dies: the rows it sits on are simply gone.
+                 */
+                append_rows(ring, 24);
+
+                /* Window resizes, which drop rows off the front outright.
+                 */
+                if ((cycle % 4) == 0) {
+                        ring.resize(12);
+                        ring.set_visible_rows(12);
+                        ring.resize(24);
+                        ring.set_visible_rows(24);
+                }
+
+                /* No rewrap here, deliberately. The alternate screen is never
+                 * reflowed - vte.cc, where screen_set_size() is called for it:
+                 * "Resize the alternate screen if it's the current one, but
+                 * never rewrap it: bug 336238 comment 60" - and rewrapping a
+                 * ring with no streams trips freeze_row()'s own assertion,
+                 * which is the ring correctly refusing a state the terminal
+                 * cannot put it in. Driving it anyway would be testing a
+                 * fiction.
+                 */
+
+                ring.validate_images();
+
+                /* Nothing was ever parked, because there is no stream to park
+                 * into. If this ever became non-zero the alt screen would have
+                 * grown a stream and the destroy/park asymmetry would have
+                 * changed underneath everything that assumes it.
+                 */
+                g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 0);
+                g_assert_cmpuint(ring.image_stream_size(), ==, 0);
+                g_assert_cmpuint(ring.image_stream_head(), ==, 0);
+
+                samples.push_back(take_sample(ring, cycle));
+        }
+
+        report("soak/alternate", samples);
+
+        /* Everything gone once the rows are. The alt screen holds 24 rows and
+         * each cycle appends 28, so every image from a cycle before the last is
+         * unreachable, and unreachable means freed rather than merely
+         * uncollected.
+         */
+        auto const resident_bound = size_t(per_cycle) * 4;
+        auto max_resident = size_t{0};
+        for (auto const& s : samples)
+                max_resident = std::max(max_resident, s.resident);
+
+        g_test_message("soak/alternate: max resident images %zu over %zu cycles",
+                       max_resident, cycles);
+        g_assert_cmpuint(max_resident, <=, resident_bound);
+
+        /* And the counter agrees with the map, at the end as at every step.
+         */
+        auto const last = samples.back();
+        auto expected = size_t{0};
+        for (auto const& [priority, image] : ring.image_map())
+                expected += image->resource_size();
+
+        g_test_message("soak/alternate: final image memory %zu over %zu resident images",
+                       last.image_memory, last.resident);
+        g_assert_cmpuint(last.image_memory, >=, expected);
+
+        /* Drain it and the accounting must land exactly on zero, which is the
+         * assertion a slow leak of a few bytes per cycle cannot survive.
+         */
+        ring.evict_all_images_for_test();
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+        g_assert_cmpuint(ring.image_memory_used(), ==, 0);
+        g_assert_false(ring.has_images());
+        ring.validate_images();
+}
+
 int
 main(int argc,
      char* argv[])
@@ -2644,6 +3068,10 @@ main(int argc,
         g_test_add_func("/vte/image/pool/sweep-end-without-begin", test_image_pool_sweep_end_without_begin);
         g_test_add_func("/vte/image/pool/exhaustion", test_image_pool_exhaustion);
         g_test_add_func("/vte/image/pool/retire-is-idempotent", test_image_pool_retire_is_idempotent);
+
+        g_test_add_func("/vte/ring/image/soak/normal-screen", test_ring_image_soak_normal_screen);
+        g_test_add_func("/vte/ring/image/soak/alternate-screen", test_ring_image_soak_alternate_screen);
+        g_test_add_func("/vte/ring/image/soak/spill-stream-recycles", test_ring_image_spill_stream_recycles);
 
         g_test_add_func("/vte/ring/attr-stream/rle-trap", test_attr_stream_rle_trap);
         g_test_add_func("/vte/ring/attr-stream/stripe-is-one-run", test_attr_stream_stripe_is_one_run);

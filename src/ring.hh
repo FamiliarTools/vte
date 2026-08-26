@@ -591,6 +591,39 @@ public:
                 return m_attr_stream ? _vte_stream_head(m_attr_stream) : 0;
         }
 
+        /* For tests: how many bytes the image stream has been appended.
+         *
+         * The spill RECORD count says how many images are parked; it says
+         * nothing about how much they cost, and the two can move in opposite
+         * directions - spill_image() returns early when a priority is already
+         * parked, so a long evict/fault-in cycle is supposed to hold the byte
+         * count still while the record count goes up and down. Only bytes can
+         * tell a stream that is being reused from one that is being appended to
+         * forever, which is the difference between a session that plateaus and
+         * one that fills the disk.
+         */
+        inline auto image_stream_head() const noexcept
+        {
+                return m_image_stream ? _vte_stream_head(m_image_stream) : 0;
+        }
+
+        /* For tests: the bytes the image stream is actually HOLDING, which is
+         * head minus tail and not head.
+         *
+         * head is a cumulative write position that only ever grows, so reading
+         * it alone makes a stream that is being correctly recycled look exactly
+         * like one that grows forever - the two differ only in whether the tail
+         * follows, which is what reclaim_image_spill() advances. This is the
+         * number that corresponds to space on the user's disk.
+         */
+        inline gsize image_stream_size() const noexcept
+        {
+                if (!m_image_stream)
+                        return 0;
+                return _vte_stream_head(m_image_stream) -
+                        _vte_stream_tail(m_image_stream);
+        }
+
         /* Whether any image is resident. This is the guard the callers put in
          * front of every image rule, so that a ring holding no image - which is
          * very nearly always - pays one predicted branch on a cache line it is
