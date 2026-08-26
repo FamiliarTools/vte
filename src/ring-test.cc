@@ -2135,6 +2135,81 @@ test_ring_image_pixels_survive_eviction(void)
 }
 
 static void
+test_ring_image_unrecoverable_still_reads_back_where_it_froze(void)
+{
+        /* image_is_recoverable() is a WHOLE-IMAGE predicate - bottom below
+         * m_writable - while thawing is per ROW, so an image straddling that
+         * boundary is called unrecoverable and yet has rows that thaw.
+         *
+         * Those rows froze while the image was still in the pool, so they carry
+         * its priority, and thaw_row() resolves a priority the map no longer
+         * holds through restore_image(). The spill is therefore READ for the
+         * frozen part of an image image_gc() took as its unrecoverable
+         * fallback, which is why that spill is unconditional and not merely
+         * bounded waste.
+         *
+         * Held: guarding the spill_image() call in image_gc() with
+         * image_is_recoverable() turns this red. It stops at the spill count
+         * first - "(0 == 1)" - and with that precondition taken out as well the
+         * payload behind it fails on its own terms: "'restored' should not be
+         * nullptr", the row having thawed and still named the image. Both
+         * measured on gtk3.
+         */
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 10);
+
+        /* Tall enough to span the writable boundary once the ring scrolls. */
+        place_image(ring, 2, 8);
+        for (auto r = 2; r < 10; r++)
+                widen_row(ring, r, 4);
+
+        auto* const image = ring.image_map().rbegin()->second.get();
+        auto const priority = image->get_priority();
+        auto const bottom = long(image->get_bottom());
+
+        /* Scroll until row 2 has frozen while the image's bottom has not. That
+         * split is the whole fixture: without it the image is either wholly
+         * recoverable, and image_gc() would never reach its fallback, or
+         * wholly writable, and no row of it could thaw.
+         */
+        for (auto i = 0; i < 200; i++) {
+                auto const writable = long(ring.writable_start_for_test());
+                if (writable > 2 && writable <= bottom)
+                        break;
+                append_rows(ring, 1);
+        }
+        g_assert_cmpint(long(ring.writable_start_for_test()), >, 2);
+        g_assert_cmpint(long(ring.writable_start_for_test()), <=, bottom);
+
+        /* Those two are image_is_recoverable() read out loud: it is
+         * bottom < m_writable, so a writable start at or below the bottom is
+         * exactly the case image_gc() has to reach its fallback for.
+         */
+
+        ring.evict_all_images_for_test();
+        ring.validate_images();
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+        g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 1);
+
+        /* Row 2 is below m_writable, so reading it thaws. The map being empty
+         * a line above is what makes the image appearing below a fault-in from
+         * the spill rather than a row handed back out of a cache.
+         */
+        auto const* const data = ring.index(2);
+        g_assert_nonnull(data);
+        g_assert_cmpint(data->len, >, 0);
+        g_assert_true(data->cells[0].attr.image());
+
+        auto const* const restored =
+                ring.image_pool().lookup(data->cells[0].attr.image_ref());
+        g_assert_nonnull(restored);
+        g_assert_cmpuint(restored->get_priority(), ==, priority);
+        g_assert_nonnull(restored->get_surface());
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+}
+
+static void
 test_ring_image_spill_is_reclaimed(void)
 {
         /* A spill is only needed while a row naming it can still be thawed.
@@ -2906,6 +2981,8 @@ main(int argc,
         g_test_add_func("/vte/ring/image/emitted-at-the-bottom-survives",
                         test_ring_image_emitted_at_the_bottom_survives);
         g_test_add_func("/vte/ring/image/pixels-survive-eviction", test_ring_image_pixels_survive_eviction);
+        g_test_add_func("/vte/ring/image/unrecoverable-reads-back-where-it-froze",
+                        test_ring_image_unrecoverable_still_reads_back_where_it_froze);
         g_test_add_func("/vte/ring/image/spill-is-reclaimed", test_ring_image_spill_is_reclaimed);
 
         g_test_add_func("/vte/ring/image/limit-is-enforced", test_ring_image_limit_is_enforced);

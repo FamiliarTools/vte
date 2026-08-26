@@ -877,12 +877,20 @@ Ring::reclaim_image_spill(row_t before_row) noexcept
 /*
  * Whether evicting @image would only move its pixels, rather than destroy them.
  *
- * thaw_row() is the one caller of restore_image(), so an image can be read back
- * exactly when every row that names it is frozen. A row still in the writable
- * window is never thawed and its cells are drawn straight out of the array, so
- * evicting an image anchored there loses the picture for good - and loses it
- * even for the scrollback, since the reference the row freezes later resolves
- * through the pool to an image that is no longer in it.
+ * thaw_row() is the one caller of restore_image(), so a ROW can fault its image
+ * back exactly when it is frozen. A row still in the writable window is never
+ * thawed and its cells are drawn straight out of the array; when it freezes
+ * later the image is already gone from the pool, so append_stream_image_ref()
+ * writes priority 0 and the row comes back naming nothing.
+ *
+ * This answers for the whole image, so it is CONSERVATIVE and not an exact
+ * account of what an eviction costs: it is false as soon as one row of the
+ * image is still writable, including for an image straddling m_writable whose
+ * rows above it have already frozen and do read the spill back
+ * (/vte/ring/image/unrecoverable-reads-back-where-it-froze). What the false
+ * answer buys is the right eviction ORDER - the image with any row still
+ * writable is the one with something to lose - and image_gc() spills every
+ * victim regardless, so nothing recoverable is thrown away by the imprecision.
  */
 bool
 Ring::image_is_recoverable(vte::image::Image const* image) const noexcept
@@ -954,17 +962,25 @@ Ring::image_gc(vte::image::Image const* exempt) noexcept
                 /* Evicted for memory, not erased by the user, so keep the
                  * pixels where they cost disk instead of RAM.
                  *
-                 * Unconditional, and deliberately not read as "rows naming it
-                 * can still be thawed" - that is true of the recoverable victim
-                 * the loop prefers, and false of the unrecoverable one it falls
-                 * back on when nothing recoverable is left. That fallback's
-                 * pixels go to the stream as well and no read ever comes for
-                 * them: its rows have not frozen yet, and the reference they
-                 * freeze after note_image_freed() below retires the pool id
-                 * resolves to an image no longer in the pool. The waste is
-                 * bounded, not leaked - reclaim_image_spill() drops the record
-                 * and advances the tail past it once the image's bottom row has
-                 * left the ring.
+                 * Unconditional, and image_is_recoverable() is deliberately not
+                 * asked first, because it answers for the WHOLE image while
+                 * thawing happens per ROW. An image straddling m_writable is
+                 * unrecoverable by that predicate - its bottom has not frozen -
+                 * and its rows ABOVE m_writable have, carrying its priority,
+                 * because append_stream_image_ref() resolved the pool while the
+                 * image was still in it. thaw_row() feeds a priority the map no
+                 * longer holds to restore_image(), so those rows read this
+                 * spill back. Skipping it here would lose the frozen part of
+                 * exactly the image with the least to spare. Held:
+                 * /vte/ring/image/unrecoverable-reads-back-where-it-froze.
+                 *
+                 * The spill goes unread only for a victim wholly inside the
+                 * writable window, since every row of that one freezes AFTER
+                 * note_image_freed() below retires the pool id, and a freeze
+                 * that cannot resolve the id writes priority 0, which names
+                 * nothing on the way back in. That waste is bounded, not leaked
+                 * - reclaim_image_spill() drops the record and advances the
+                 * tail past it once the image's bottom row has left the ring.
                  */
                 spill_image(image.get());
 

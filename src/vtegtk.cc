@@ -2369,9 +2369,11 @@ vte_terminal_class_init(VteTerminalClass *klass)
          * oldest first among those; their pixels remain in the scrollback
          * stream and are drawn again when scrolled back to.
          *
-         * An image that has not scrolled into the scrollback yet has nothing
-         * to be read back from, so it is evicted only when the limit cannot
-         * be met without it, and its pixels are then lost.
+         * An image is read back a row at a time, and only the rows that had
+         * already scrolled into the scrollback when it was evicted can be.
+         * Such an image is therefore evicted only when the limit cannot be met
+         * without it, and it then loses the part of itself that had not
+         * scrolled in yet.
          *
          * Setting this to 0 disables images.
          *
@@ -7477,9 +7479,10 @@ catch (...)
  * into the scrollback first and oldest first among those; their pixels remain
  * in the scrollback stream and are drawn again when scrolled back to.
  *
- * An image that has not scrolled into the scrollback yet has nothing to be
- * read back from, so it is evicted only when the limit cannot be met without
- * it, and its pixels are then lost.
+ * An image is read back a row at a time, and only the rows that had already
+ * scrolled into the scrollback when it was evicted can be. Such an image is
+ * therefore evicted only when the limit cannot be met without it, and it then
+ * loses the part of itself that had not scrolled in yet.
  *
  * A @limit of 0 disables images.
  *

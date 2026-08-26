@@ -315,32 +315,46 @@ byte limit and sends many small images will still see eviction at 4097 images,
 with nothing in the API to tell it why.
 
 
-An image evicted before it reaches the scrollback loses its pixels
-─────────────────────────────────────────────────────────────────
+An image evicted before it reaches the scrollback loses the rows still writable
+──────────────────────────────────────────────────────────────────────────────
 
 image_is_recoverable() is true only when the image's bottom row is below
 m_writable, that is, when every row naming it has frozen. thaw_row() is the one
-caller of restore_image(), so an image can be read back exactly when every row
-that names it is frozen; a row still in the writable window is never thawed and
-its cells are drawn straight out of the array.
+caller of restore_image(), so a ROW faults its image back exactly when it is
+frozen; a row still in the writable window is never thawed and its cells are
+drawn straight out of the array.
 
 image_gc() therefore prefers a recoverable victim, and takes an unrecoverable
 one only when nothing recoverable is left - otherwise a screenful of images
 would raise the limit to whatever it happened to need
-(/vte/ring/image/limit-spares-the-unrecoverable). When it does take one, that
-image's pixels are gone for good, and gone for the scrollback too: the
-reference the row freezes later resolves through the pool to an image that is
-no longer in it, and the cells draw as background.
+(/vte/ring/image/limit-spares-the-unrecoverable).
 
-The pixels are written out anyway. image_gc() calls spill_image() on every
-victim it takes, without asking image_is_recoverable() first, so the
-unrecoverable one's bytes are appended to m_image_stream too - and no read ever
-comes for them, for the reason just given. They are bounded rather than leaked:
-reclaim_image_spill() drops the record, and advances the stream's tail past it,
-once the image's bottom row has left the ring. Until then they are disk spent
-on a picture nothing can reach.
+What that costs is per row, not per image, because the two predicates are at
+different scales. A row that had already frozen when the eviction happened
+carries the image's priority - append_stream_image_ref() resolved the pool
+while the image was still in it - and thaw_row() hands a priority the map no
+longer holds to restore_image(), so the row draws its picture again. A row that
+freezes AFTER the eviction cannot: note_image_freed() has retired the pool id,
+the lookup fails, priority 0 is written, and the row comes back naming nothing.
 
-vte_terminal_set_image_limit()'s documentation does state this.
+So an image wholly inside the writable window loses its picture outright, and
+an image straddling m_writable loses only the part below it - the part above
+reads back from the spill
+(/vte/ring/image/unrecoverable-reads-back-where-it-froze). This is why
+image_gc() calls spill_image() on every victim without asking
+image_is_recoverable() first: for the straddling case that spill is load
+bearing. It is unread only for the wholly-writable victim, and even then
+bounded rather than leaked - reclaim_image_spill() drops the record, and
+advances the stream's tail past it, once the image's bottom row has left the
+ring.
+
+image_is_recoverable() being whole-image is thus deliberate imprecision. It
+buys the eviction ORDER - an image with any row still writable is the one with
+something to lose - and, since every victim is spilled anyway, nothing
+recoverable is thrown away by it.
+
+vte_terminal_set_image_limit()'s documentation says this too, in the same
+per-row terms.
 
 
 DECSDM is unimplemented
