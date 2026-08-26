@@ -158,11 +158,31 @@ m_image_by_top_map is keyed by top row, and drop_images_before() stops at the
 first entry keyed at or after the row it is dropping.
 
 The two representations are kept from drifting by two things. Only whole-row
-moves update the rectangle, and reanchor_image() is the only mover, so the
-rectangle and the key it is filed under cannot be updated one without the
-other. And image_invariant_violation() checks the agreement in both directions:
-every cell naming an image sits where that image's rectangle puts it, and every
-image the writable rows can answer for still has a cell.
+moves update the rectangle, and every such move either re-keys the image in the
+same step or runs under a full rebuild of the index. There are two movers.
+reanchor_image() is the first: it extracts the map node, sets the top and
+re-inserts under the new key, so the rectangle and the key cannot be updated one
+without the other. rewrap_images_in_range() is the second, and it leaves the key
+stale deliberately - it is a forward walk over the very map the key belongs to,
+and re-keying an entry mid-walk would move it under the cursor. What pays for
+that is rebuild_image_top_map(), which Ring::rewrap() calls once the walk is
+done and before anything reads a key again; the keys are stale between the two
+and nothing may read them there. So the rule is not one mover, it is: re-key
+with the move, or move under a rebuild that lands before the next key read.
+
+That makes the rebuild's POSITION load-bearing, not just its presence.
+drop_images_before() reads keys rather than images - it is ordered and stops at
+the first entry keyed at or after the row it is dropping - and rewrap() runs it
+to take in the rows the reflow pushed off the front. Rewrap numbers the
+reflowed rows from zero, so a scrolled ring's stale keys are far larger than the
+rows the images now sit on, and that early exit fires on the first entry and
+drops nothing. /vte/ring/rewrap-drops-before-the-map-is-rebuilt holds the order:
+move that call above the rebuild and an image stays resident on rows that have
+left the ring.
+
+And the agreement is not assumed. image_invariant_violation() checks it in both
+directions: every cell naming an image sits where that image's rectangle puts
+it, and every image the writable rows can answer for still has a cell.
 
 
 Rewrap

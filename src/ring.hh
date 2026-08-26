@@ -412,8 +412,18 @@ private:
          * DCH, SL, SR, insert mode, a partial-width region scroll - deletes the
          * image instead of following it, which is why the position has a
          * set_top() and no set_left(): the column is fixed at placement.
-         * reanchor_image() is the only mover, so the rectangle and the key it is
-         * filed under cannot be updated one without the other.
+         *
+         * A whole-row move either re-keys the image in the same step or runs
+         * under a full rebuild of this index. reanchor_image() is the first
+         * kind: extract the node, set the top, re-insert under the new key.
+         * rewrap_images_in_range() is the second, and leaves the key stale on
+         * purpose, since it is a forward walk over this map and re-keying an
+         * entry mid-walk would move it under the cursor; Ring::rewrap() calls
+         * rebuild_image_top_map() once that walk is done, and nothing between
+         * the two may read a key. Everything rewrap does afterwards is ordered
+         * against that rebuild - drop_images_before() reads keys, and its early
+         * exit is exact only against fresh ones; see
+         * /vte/ring/rewrap-drops-before-the-map-is-rebuilt.
          *
          * And the agreement is not assumed. image_invariant_violation() checks
          * it in both directions - every cell naming an image sits exactly where

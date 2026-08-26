@@ -2510,6 +2510,90 @@ test_ring_rewrap_needs_the_boundary_above_torn(void)
 
 
 static void
+test_ring_rewrap_drops_before_the_map_is_rebuilt(void)
+{
+        /* rewrap_images_in_range() moves an image's top row WITHOUT re-keying
+         * m_image_by_top_map - it is a forward walk over that very map, and
+         * re-keying an entry mid-walk would move it under the cursor. So from
+         * the moment the first image is moved until rebuild_image_top_map()
+         * runs, every key in the map is a row number in the OLD ring's
+         * numbering, and drop_images_before() is the one caller that reads a
+         * key rather than the image: it is ordered, and it stops at the first
+         * entry keyed at or after the row it is dropping.
+         *
+         * That early exit is exact against fresh keys and arbitrary against
+         * stale ones, and the two numberings are not merely offset: rewrap
+         * numbers the reflowed rows from zero, so a ring that has already
+         * scrolled files its images under keys far LARGER than the rows they
+         * now sit on. Run drop_images_before() before the rebuild and it stops
+         * on the very first entry, drops nothing, and leaves an image resident
+         * on rows the reflow has just pushed out of the ring.
+         *
+         * The fixture is that ring, and the figures it produces are the
+         * argument: 200 rows through a ring 32 long leaves the image filed
+         * under row 170, the reflow puts it on new row 2 and moves the ring's
+         * front to 87. Fresh keys, and the walk reaches an entry keyed 2 and
+         * drops it. Stale ones, and it stops at 170 >= 87 without looking.
+         *
+         * Move the rebuild_image_top_map() call in Ring::rewrap() to after
+         * drop_images_before() and this goes red at "a resident image covers no
+         * row the ring still holds" - which also says the image survived
+         * drop_images_torn_by_rewrap(), since only a resident image can fail
+         * that way.
+         */
+        auto const max_rows = Ring::row_t{32};
+        auto ring = Ring{max_rows, true};
+        ring.set_visible_rows(24);
+
+        /* Scroll the ring right past its own length, so that its rows are
+         * numbered from well above zero. Without this the old and the new
+         * numbering agree closely enough that the stale keys happen to sort the
+         * same way and the bug hides.
+         */
+        append_rows(ring, 200);
+        g_assert_cmpint(long(ring.delta()), >, 0);
+
+        auto const image_row = ring.delta() + 2;
+
+        /* The row above the image is hard wrapped, which is what
+         * erase_image_rect() leaves behind and what carries the picture through
+         * the reflow; see /vte/ring/rewrap-needs-the-boundary-above-torn.
+         */
+        ring.index_writable(image_row - 1)->attr.soft_wrapped = false;
+
+        widen_row(ring, image_row, 4);
+        place_image(ring, image_row, 1);
+        auto const id = ring.image_map().rbegin()->second->get_pool_id();
+        g_assert_cmpuint(image_cell_positions(ring, id).size(), ==, 4);
+
+        /* All the growth is BELOW the image: rows wide enough to split several
+         * ways at the width rewrapped to, and enough of them that the reflowed
+         * content is longer than the ring holds. The image itself must not be
+         * the thing that moves m_start, or it would be dropped for a reason
+         * this test is not about.
+         */
+        for (auto r = image_row + 1; r < ring.next(); r++)
+                widen_row(ring, r, 24);
+
+        ring.rewrap_for_test(6);
+
+        /* The reflow really did overflow the ring, so rows left the front:
+         * without that drop_images_before() has nothing to do and either order
+         * passes.
+         */
+        g_assert_cmpint(long(ring.delta()), >, 0);
+
+        /* The image came through the tear - the swapped order leaves it
+         * RESIDENT rather than deleting it, which is what says the entry the
+         * early exit skipped was really there - and then went with the rows it
+         * covered.
+         */
+        ring.validate_images();
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+        g_assert_cmpuint(ring.image_memory_used(), ==, 0);
+}
+
+static void
 test_ring_scrollback_restore_respects_the_budget(void)
 {
         /* Scrolling back through history that held images must not blow the
@@ -2696,6 +2780,8 @@ main(int argc,
         g_test_add_func("/vte/ring/rewrap-with-images", test_ring_rewrap_with_images);
         g_test_add_func("/vte/ring/rewrap-needs-the-boundary-above-torn",
                         test_ring_rewrap_needs_the_boundary_above_torn);
+        g_test_add_func("/vte/ring/rewrap-drops-before-the-map-is-rebuilt",
+                        test_ring_rewrap_drops_before_the_map_is_rebuilt);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

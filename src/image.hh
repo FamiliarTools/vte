@@ -72,10 +72,18 @@ private:
         mutable vte::glib::RefPtr<GdkTexture> m_texture{};
 #endif
 
-        /* Only the ring may move an image, and only between rows. Public would
-         * mean a caller could move the rectangle without re-keying the ring's
-         * by-top index, leaving the image filed under a row it no longer starts
-         * at. Ring::reanchor_image() does both at once.
+        /* An image's position is the ring's to change, and only between rows.
+         * What the access control buys is that NOTHING OUTSIDE THE RING can
+         * change it: the rectangle is half of a fact whose other half is the
+         * ring's by-top index, and a caller who could move one without the
+         * other would leave the image filed under a row it no longer starts at.
+         *
+         * It buys nothing against the ring itself, which is a friend and whose
+         * every method can reach this. Keeping the two halves in step there is
+         * a rule the ring holds itself to, not one the language enforces:
+         * re-key with the move, as Ring::reanchor_image() does, or move under a
+         * rebuild of the index that lands before the next key read, as
+         * Ring::rewrap_images_in_range() does.
          */
         friend class vte::base::Ring;
 

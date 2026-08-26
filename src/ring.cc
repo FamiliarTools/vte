@@ -1382,13 +1382,20 @@ Ring::shift_images_for_remove(row_t position) noexcept
 /*
  * Move @it's image to top row @new_top and return an iterator to it.
  *
- * The only mover of an image's row, which is why Image::set_top() is not
- * public: the rectangle and the key the image is filed under are one fact in
- * two places, and a caller that could update either alone would be free to
- * leave m_image_by_top_map filed under a row the image no longer starts at.
- * The by-top map is ordered, and drop_images_before() stops on its key, so a
- * stale key does not merely look wrong - it makes a live image invisible to
- * the rule that is supposed to free it.
+ * The rectangle and the key the image is filed under are one fact in two
+ * places, and this moves both in one step: extract the node, set the top,
+ * re-insert under the new key. The by-top map is ordered, and
+ * drop_images_before() stops on its key, so a stale key does not merely look
+ * wrong - it makes a live image invisible to the rule that is supposed to free
+ * it.
+ *
+ * Not the only mover, though. rewrap_images_in_range() also calls set_top(),
+ * and deliberately does not re-key: it walks this map forwards, so re-keying an
+ * entry would move it under its own cursor. It is safe for the other reason a
+ * move can be safe - it runs under a full rebuild, Ring::rewrap() calling
+ * rebuild_image_top_map() before any key is read again. So the rule the two
+ * halves are kept in step by is: re-key with the move, or move under a rebuild
+ * that lands before the next key read.
  */
 Ring::image_by_top_map_type::iterator
 Ring::reanchor_image(Ring::image_by_top_map_type::iterator it,
@@ -1503,7 +1510,11 @@ Ring::rewrap_images_in_range(Ring::image_by_top_map_type::iterator& it,
                  * The keys are stale from here until rewrap() calls
                  * rebuild_image_top_map(), which is why that call is not
                  * optional and why nothing between the two may read the map's
-                 * key.
+                 * key. Delete it and /vte/ring/rewrap-needs-the-boundary-above-torn
+                 * reports "an image is filed under a top row it does not start
+                 * at"; run rewrap's drop_images_before() before it instead and
+                 * /vte/ring/rewrap-drops-before-the-map-is-rebuilt reports "a
+                 * resident image covers no row the ring still holds".
                  */
                 image->set_top(new_row_index);
                 ++it;
@@ -3029,7 +3040,11 @@ Ring::rewrap(column_t columns,
          * update above has just moved m_start forward and dropped rows off the front.
          * This has to run after rebuild_image_top_map(), since drop_images_before()
          * walks m_image_by_top_map in key order and the keys are only the new row
-         * numbers once the map has been rebuilt.
+         * numbers once the map has been rebuilt. Its early exit is exact against
+         * fresh keys and arbitrary against stale ones, and rewrap numbers the
+         * reflowed rows from zero, so a scrolled ring's stale keys are LARGER
+         * than the rows the images now sit on and the exit fires on the first
+         * entry. /vte/ring/rewrap-drops-before-the-map-is-rebuilt holds the order.
          */
         drop_images_before(m_start);
 #endif
