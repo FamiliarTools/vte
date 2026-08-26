@@ -2040,6 +2040,87 @@ test_ring_image_pixels_survive_eviction(void)
         g_assert_nonnull(restored->get_surface());
 }
 
+/* The pixels that come back have to be the pixels that went out.
+ *
+ * The geometry of a restored image is already asserted above, and geometry is
+ * what a data-structure test naturally reaches for - but an image is a
+ * PICTURE, and a round trip that returns the right rectangle full of the wrong
+ * colours is a fault nothing else here would see. It is not hypothetical: the
+ * rendered probe caught a restored image drawing at exactly half the intensity
+ * of the resident one, which is a whole-frame difference no row number can
+ * describe.
+ */
+static void
+test_ring_image_spill_keeps_the_pixels(void)
+{
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 4);
+        widen_row(ring, 1, 4);
+
+        auto const width_px = 4 * kCellWidth;
+        auto const height_px = kCellHeight;
+
+        /* Opaque red, in the premultiplied ARGB32 cairo actually stores. */
+        auto const pixel = uint32_t{0xffff0000};
+
+        auto surface = vte::take_freeable
+                (cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width_px, height_px));
+        g_assert_cmpint(cairo_surface_status(surface.get()), ==, CAIRO_STATUS_SUCCESS);
+        {
+                auto* const data = cairo_image_surface_get_data(surface.get());
+                auto const stride = cairo_image_surface_get_stride(surface.get());
+                g_assert_nonnull(data);
+                for (auto y = 0; y < height_px; y++)
+                        for (auto x = 0; x < width_px; x++)
+                                *(uint32_t*)(data + size_t(y) * size_t(stride) + size_t(x) * 4) = pixel;
+                cairo_surface_mark_dirty(surface.get());
+        }
+
+        ring.append_image(std::move(surface),
+                          width_px, height_px,
+                          0, 1,
+                          kCellWidth, kCellHeight);
+        ring.set_placing_image(nullptr);
+
+        auto* const image = ring.image_map().begin()->second.get();
+        ring.set_placing_image(image);
+        ring.stamp_image_row(1, 0, 4, 0);
+        ring.set_placing_image(nullptr);
+
+        append_rows(ring, 200);
+        ring.evict_all_images_for_test();
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+        g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 1);
+
+        auto const* const thawed = ring.index(1);
+        g_assert_nonnull(thawed);
+        g_assert_true(thawed->cells[0].attr.image());
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        auto* const restored = ring.image_map().begin()->second.get();
+
+        auto* const rsurface = restored->get_surface();
+        g_assert_nonnull(rsurface);
+        cairo_surface_flush(rsurface);
+        g_assert_cmpint(cairo_image_surface_get_width(rsurface), ==, width_px);
+        g_assert_cmpint(cairo_image_surface_get_height(rsurface), ==, height_px);
+        g_assert_cmpint(cairo_image_surface_get_format(rsurface), ==, CAIRO_FORMAT_ARGB32);
+
+        auto const* const rdata = cairo_image_surface_get_data(rsurface);
+        auto const rstride = cairo_image_surface_get_stride(rsurface);
+        g_assert_nonnull(rdata);
+        for (auto y = 0; y < height_px; y++) {
+                for (auto x = 0; x < width_px; x++) {
+                        auto const got = *(uint32_t const*)
+                                (rdata + size_t(y) * size_t(rstride) + size_t(x) * 4);
+                        if (got != pixel)
+                                g_error("restored pixel at %d,%d is %08x, not %08x",
+                                        x, y, got, pixel);
+                }
+        }
+}
+
 static void
 test_ring_image_spill_is_reclaimed(void)
 {
@@ -2572,6 +2653,165 @@ test_ring_rewrap_needs_the_boundary_above_torn(void)
                 }
                 for (auto c = 4; c < long(columns); c++)
                         g_assert_true(row->cells[c].attr.image());
+        }
+}
+
+/* Push the image placed by place_image_below_a_boundary() out of RAM and far
+ * enough back that the rows naming it are frozen, so that reading one of them
+ * has to fault the picture in from the spill.
+ *
+ * The count is asserted rather than assumed: a budget that failed to evict, or
+ * a stream that refused the write, would leave the image resident and every
+ * assertion below would then be about the RESIDENT path, which the tests above
+ * already cover.
+ */
+static void
+spill_the_boundary_image(Ring& ring)
+{
+        append_rows(ring, 400);
+        ring.evict_all_images_for_test();
+        ring.validate_images();
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+        g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 1);
+}
+
+/* A spilled image faulted back in after a reflow must arrive on the row the
+ * reflow gave it, not the row it had when it was parked.
+ *
+ * Renumbering the spill RECORD is only half of the picture's journey. The
+ * record's rows are what reclamation decides on, but they are not what
+ * restore_image() builds the Image from: that comes off the disk record
+ * written at eviction, which names the row the image had BEFORE the reflow. So
+ * a test that only reads image_spill_rows_for_test() can be green while the
+ * image that comes back is anchored a whole reflow's worth of rows away from
+ * the cells that carry it.
+ *
+ * What that costs is the ring's bookkeeping, not the frame: the draw places
+ * each stripe from the row and column of the CELL naming it, so a stale anchor
+ * still paints in the right place - the rendered probe was run with this fix
+ * reverted and stayed green. The anchor is what decides which images a row drop
+ * takes with it, what image_gc() and the by-top map see, and which rectangle an
+ * erase is compared against, and all of those are being asked about a row the
+ * picture does not occupy.
+ *
+ * The fixture is the torn one from the test above, whose resident image is
+ * re-anchored from row 2 to row 3 by the same rewrap. That number is not
+ * computed here with the arithmetic under test; it is the number the RESIDENT
+ * path is already asserted to produce, so the spilled path is being held to
+ * the resident path's answer.
+ */
+static void
+test_ring_image_spill_restores_at_the_new_row(void)
+{
+        auto const columns = Ring::column_t{6};
+
+        auto ring = Ring{4096, true};
+        place_image_below_a_boundary(ring, true);
+        spill_the_boundary_image(ring);
+
+        ring.rewrap_for_test(columns);
+        ring.validate_images();
+
+        /* The reflow really did move the rows under the paragraph, so a
+         * restored image sitting at its old top would be sitting one row too
+         * high rather than coincidentally right.
+         */
+        auto const rows = ring.image_spill_rows_for_test();
+        g_assert_cmpuint(rows.size(), ==, 1);
+        g_assert_cmpint(rows[0].first, ==, 3);
+
+        /* Reading the row faults the picture back in. */
+        auto const* const row = ring.index(3);
+        g_assert_nonnull(row);
+        g_assert_cmpint(row->len, >, 0);
+        g_assert_true(row->cells[0].attr.image());
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        auto const* const restored = ring.image_map().begin()->second.get();
+
+        g_assert_cmpint(long(restored->get_top()), ==, 3);
+        g_assert_cmpint(long(restored->get_bottom()), ==, 3);
+}
+
+/* A reflow that rewrites the rows under a SPILLED image must destroy it, on the
+ * same rule that destroys a resident one.
+ *
+ * The soak and the renumbering test above only ever reflow rows narrow enough
+ * that no paragraph re-wraps across the image, which is the path where the
+ * record survives. The other path - the picture's rows torn apart, so that the
+ * text it was emitted beside is no longer there - has no Image object left to
+ * ask, and a record that came through it would either resurrect the picture on
+ * top of whatever moved underneath, or sit in the spill map holding rows the
+ * reflow never assigned and pin the stream.
+ *
+ * Both directions of the width change are exercised, because they tear the
+ * paragraph in opposite ways: narrowing SPLITS the row above into two, widening
+ * JOINS it with the rows under it.
+ */
+static void
+test_ring_image_spill_torn_by_rewrap_is_dropped(void)
+{
+        /* Narrowing: the 12-cell paragraph above splits, and being soft
+         * wrapped it carries on into the image's own row.
+         */
+        {
+                auto ring = Ring{4096, true};
+                place_image_below_a_boundary(ring, false);
+                g_assert_true(ring.is_soft_wrapped(1));
+                spill_the_boundary_image(ring);
+
+                ring.rewrap_for_test(6);
+                ring.validate_images();
+
+                /* The record is gone, so nothing can put those pixels back. */
+                g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 0);
+
+                /* And reading the rows it used to cover does not resurrect it:
+                 * the cells still say "image", as the resident case leaves
+                 * them, but they resolve to no picture at all.
+                 */
+                for (auto r = 0; r < 6; r++) {
+                        auto const* const row = ring.index(r);
+                        g_assert_nonnull(row);
+                }
+                g_assert_cmpuint(ring.image_map().size(), ==, 0);
+                g_assert_false(ring.has_images());
+        }
+
+        /* Widening: the same paragraph joins instead of splitting. */
+        {
+                auto ring = Ring{4096, true};
+                place_image_below_a_boundary(ring, false);
+                spill_the_boundary_image(ring);
+
+                ring.rewrap_for_test(24);
+                ring.validate_images();
+
+                g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 0);
+
+                for (auto r = 0; r < 6; r++) {
+                        auto const* const row = ring.index(r);
+                        g_assert_nonnull(row);
+                }
+                g_assert_cmpuint(ring.image_map().size(), ==, 0);
+                g_assert_false(ring.has_images());
+        }
+
+        /* The rule has to be able to say NO as well as yes, or the two arms
+         * above would be satisfied by a reflow that dropped every spill record
+         * it ever saw - which is precisely the cheap alternative the fix chose
+         * not to take. Same reflow, tear repaired: the record survives.
+         */
+        {
+                auto ring = Ring{4096, true};
+                place_image_below_a_boundary(ring, true);
+                spill_the_boundary_image(ring);
+
+                ring.rewrap_for_test(6);
+                ring.validate_images();
+
+                g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 1);
         }
 }
 
@@ -3243,6 +3483,8 @@ main(int argc,
         g_test_add_func("/vte/ring/image/full-erase-frees-it", test_ring_image_full_erase_frees_it);
 
         g_test_add_func("/vte/ring/image/pixels-survive-eviction", test_ring_image_pixels_survive_eviction);
+        g_test_add_func("/vte/ring/image/spill-keeps-the-pixels",
+                        test_ring_image_spill_keeps_the_pixels);
         g_test_add_func("/vte/ring/image/spill-is-reclaimed", test_ring_image_spill_is_reclaimed);
         g_test_add_func("/vte/ring/image/spill-rows-survive-rewrap",
                         test_ring_image_spill_rows_survive_rewrap);
@@ -3257,6 +3499,10 @@ main(int argc,
         g_test_add_func("/vte/ring/rewrap-with-images", test_ring_rewrap_with_images);
         g_test_add_func("/vte/ring/rewrap-needs-the-boundary-above-torn",
                         test_ring_rewrap_needs_the_boundary_above_torn);
+        g_test_add_func("/vte/ring/image/spill-restores-at-the-new-row",
+                        test_ring_image_spill_restores_at_the_new_row);
+        g_test_add_func("/vte/ring/image/spill-torn-by-rewrap-is-dropped",
+                        test_ring_image_spill_torn_by_rewrap_is_dropped);
 
         g_test_add_func("/vte/ring/image/resize-drops", test_ring_image_resize_drops);
         g_test_add_func("/vte/ring/image/resize-keeps-straddling", test_ring_image_resize_keeps_straddling);

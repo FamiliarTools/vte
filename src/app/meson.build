@@ -341,6 +341,24 @@ if get_option('sixel') and get_option('sixel_display_tests')
       timeout: 180,
     )
 
+    # A SPILLED image faulted back in after a REFLOW, in pixels. Like the
+    # selection case this drives the pointer - the scrollback is reached by
+    # scrolling, which no escape sequence asks for - and its verdict is the
+    # same run WITHOUT the resize rather than a golden. It refuses to pass a
+    # build that cannot tell it the image was really evicted.
+    test(
+      'sixel-render-reflow-spill-' + arm[0],
+      files(sixel_test_dir / 'reflow-spill-render-test.sh'),
+      args: [
+        arm[1].full_path(),
+        sixel_test_dir,
+        arm[0],
+      ],
+      depends: [arm[1]],
+      suite: 'sixel-display',
+      timeout: 420,
+    )
+
     # The render cases above are only worth their runtime if their verdict
     # tells a right frame from a wrong one. This one damages the captured frame
     # in each of the ways it can be wrong - one pixel, every pixel, one column
