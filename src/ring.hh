@@ -33,6 +33,7 @@
 #include "image-pool.hh"
 #include <map>
 #include <memory>
+#include <vector>
 #endif
 
 #include <type_traits>
@@ -441,6 +442,13 @@ private:
                                     row_t new_row_index) noexcept;
         void shift_images_for_insert(row_t position) noexcept;
         void shift_images_for_remove(row_t position) noexcept;
+        bool erase_images_in_rect_except(long top,
+                                         long bottom,
+                                         long left,
+                                         long right,
+                                         long* damage_top,
+                                         long* damage_bottom,
+                                         std::vector<vte::image::Image*> const& exempt) noexcept;
 
         inline void note_image_freed(vte::image::Image const* image) noexcept {
                 if (m_placing_image == image)
@@ -607,6 +615,14 @@ public:
                                   long right,
                                   long* damage_top,
                                   long* damage_bottom) noexcept;
+
+        bool shift_images_for_scroll(long top,
+                                     long bottom,
+                                     long left,
+                                     long right,
+                                     long amount,
+                                     long* damage_top,
+                                     long* damage_bottom) noexcept;
 
         void append_image(vte::Freeable<cairo_surface_t> surface,
                           int pixelwidth,

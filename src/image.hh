@@ -96,7 +96,8 @@ public:
         inline constexpr auto get_priority() const noexcept { return m_priority; }
         inline constexpr auto get_pool_id() const noexcept { return m_pool_id; }
         inline void set_pool_id(uint32_t id) noexcept { m_pool_id = id; }
-        inline constexpr auto get_left() const noexcept { return m_left_cells; }
+        inline auto get_left() const noexcept { return m_left_cells; }
+        inline void set_left(int col) noexcept { m_left_cells = col; }
         inline auto get_top() const noexcept { return m_top_cells; }
         inline void set_top(int row) noexcept { m_top_cells = row; }
         inline constexpr auto get_width() const noexcept { return (m_width_pixels + m_cell_width - 1) / m_cell_width; }

@@ -3019,9 +3019,11 @@ Terminal::scroll_text_left(scrolling_region const& scrolling_region,
 
         const VteCell *cell = fill ? &m_color_defaults : &basic_cell;
 
-        /* DCH, SL and friends move cells sideways within their rows; an image
-         * has no way to follow them, so it goes. */
-        erase_images_in_rect(top, bottom, left, right);
+        /* DCH, SL and friends move cells sideways within their rows. A cell
+         * carries its own piece of a picture, so a picture whose cells are all
+         * inside the moving rectangle follows the memmove below; one that
+         * would be torn by it is taken instead. */
+        shift_images_for_scroll(top, bottom, left, right, -amount);
 
         /* Scroll left in each row separately. */
         for (auto row = top; row <= bottom; row++) {
@@ -3072,8 +3074,10 @@ Terminal::scroll_text_right(scrolling_region const& scrolling_region,
 
         const VteCell *cell = fill ? &m_color_defaults : &basic_cell;
 
-        /* As in scroll_text_left(): ICH, SR and insert mode move cells sideways. */
-        erase_images_in_rect(top, bottom, left, right);
+        /* As in scroll_text_left(): ICH, SR and insert mode move cells
+         * sideways, and a picture whose cells are all inside the moving
+         * rectangle goes with them. */
+        shift_images_for_scroll(top, bottom, left, right, amount);
 
         /* Scroll right in each row separately. */
         for (auto row = top; row <= bottom; row++) {
@@ -3527,17 +3531,6 @@ Terminal::insert_char(gunichar c,
                 m_last_graphic_character = c_unmapped;
 	}
 
-        /* Text written over an image is a delete verb too, and it is the one
-         * the ring cannot see: it is an in-place write to cells, not a row
-         * operation. This is where the autowrap above has settled which row is
-         * going to be written, and where the combining-mark branch that writes
-         * somewhere else has already left.
-         */
-        erase_images_in_rect(m_screen->cursor.row,
-                             m_screen->cursor.row,
-                             col,
-                             col + columns - 1);
-
 	/* Make sure we have enough rows to hold this data. */
 	row = ensure_cursor();
 	g_assert(row != NULL);
@@ -3555,6 +3548,19 @@ Terminal::insert_char(gunichar c,
 		_vte_row_data_fill (row, &basic_cell, col);
 		_vte_row_data_expand (row, col + columns);
 	}
+
+        /* Text written over an image is a delete verb too, and it is the one
+         * the ring cannot see: it is an in-place write to cells, not a row
+         * operation. The autowrap above has settled which row is going to be
+         * written, the combining-mark branch that writes somewhere else has
+         * already left, and in insert mode the push to the right just above
+         * has already moved the picture out of the way - so the cells taken
+         * here are the ones this character really lands on.
+         */
+        erase_images_in_rect(m_screen->cursor.row,
+                             m_screen->cursor.row,
+                             col,
+                             col + columns - 1);
 
         attr = m_defaults.attr;
 	attr.set_columns(columns);
@@ -3731,6 +3737,28 @@ Terminal::erase_images_in_rect_slow(vte::grid::row_t top,
         /* The deleted images can reach outside the erased rectangle - that is the
          * whole point of deleting them whole - so repaint the rows they occupied
          * rather than the ones the caller is about to invalidate.
+         */
+        invalidate_rows(damage_top, damage_bottom);
+}
+
+void
+Terminal::shift_images_for_scroll_slow(vte::grid::row_t top,
+                                       vte::grid::row_t bottom,
+                                       vte::grid::column_t left,
+                                       vte::grid::column_t right,
+                                       long amount)
+{
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+
+        if (!m_screen->row_data->shift_images_for_scroll(top, bottom, left, right,
+                                                         amount,
+                                                         &damage_top, &damage_bottom))
+                return;
+
+        /* An image that was taken rather than moved can reach outside the
+         * rectangle, so repaint the rows the affected images occupied rather
+         * than the ones the caller is about to invalidate.
          */
         invalidate_rows(damage_top, damage_bottom);
 }

@@ -958,10 +958,38 @@ Ring::erase_images_in_rect(long top,
                            long* damage_top,
                            long* damage_bottom) noexcept
 {
+        auto const none = std::vector<vte::image::Image*>{};
+        return erase_images_in_rect_except(top, bottom, left, right,
+                                           damage_top, damage_bottom, none);
+}
+
+/*
+ * Ring::erase_images_in_rect_except:
+ * @exempt: images that are moving with the cells rather than being taken by
+ *   them, and so must keep their cells
+ *
+ * The body of erase_images_in_rect(); see there. The exemption exists for
+ * shift_images_for_scroll(), whose caller is about to memmove these cells
+ * sideways rather than write over them.
+ */
+bool
+Ring::erase_images_in_rect_except(long top,
+                                  long bottom,
+                                  long left,
+                                  long right,
+                                  long* damage_top,
+                                  long* damage_bottom,
+                                  std::vector<vte::image::Image*> const& exempt) noexcept
+{
         if (top > bottom || left > right)
                 return false;
 
         auto damaged = false;
+
+        auto const is_exempt = [&](vte::image::Image const* image) noexcept {
+                return image == m_placing_image ||
+                       std::find(exempt.begin(), exempt.end(), image) != exempt.end();
+        };
 
         auto note_damage = [&](vte::image::Image const* image) noexcept {
                 auto const t = long(image->get_top());
@@ -1003,9 +1031,9 @@ Ring::erase_images_in_rect(long top,
 
                         /* An image whose own emission burst is still running is
                          * placing these cells right now; it is not being erased
-                         * by them.
+                         * by them. Neither is one that is following the cells.
                          */
-                        if (image != nullptr && image == m_placing_image)
+                        if (image != nullptr && is_exempt(image))
                                 continue;
 
                         if (image != nullptr)
@@ -1037,7 +1065,7 @@ Ring::erase_images_in_rect(long top,
                 if (long(image->get_top()) > bottom)
                         break;
 
-                if (image == m_placing_image ||
+                if (is_exempt(image) ||
                     long(image->get_bottom()) < top ||
                     long(image->get_left()) > right ||
                     long(image->get_left()) + long(image->get_width()) - 1 < left) {
@@ -1052,6 +1080,140 @@ Ring::erase_images_in_rect(long top,
 
                 note_damage(image);
                 it = erase_image(it);
+        }
+
+        return damaged;
+}
+
+/*
+ * Ring::shift_images_for_scroll:
+ * @top, @bottom, @left, @right: the inclusive rectangle of cells about to be
+ *   moved sideways, in ring coordinates
+ * @amount: how far, in cells; positive moves right, negative left
+ * @damage_top, @damage_bottom: out, the rows that need repainting
+ *
+ * What the caller of a horizontal scroll (ICH, DCH, SL, SR, insert mode) owes
+ * the images before it memmoves the cells.
+ *
+ * A cell carries its own tile coordinate and the draw reads the picture off
+ * the cells, so cells that are memmoved sideways carry their piece of the
+ * image with them for free. The only thing that does not move by itself is
+ * the image's own rectangle, which every lifetime rule reads and which
+ * validate_image_cells() requires to agree with the cells. So an image every
+ * one of whose CELLS is inside the moving rectangle, and stays inside it
+ * after the move, is shifted here and keeps them.
+ *
+ * The test is over the cells and not over the image's rectangle because the
+ * two are not the same shape: a picture whose lower rows have been written
+ * over still has a rectangle that reaches down to where they were, and that
+ * rectangle would reject a one-row ICH on the row the picture actually still
+ * occupies. The cells are what moves and what the draw reads, so the cells
+ * are what decides.
+ *
+ * An image that does not fit that description would be torn - part of it
+ * moved, part of it standing still, or part of it pushed off the edge of the
+ * region and gone - and no single rectangle can describe the result. Those
+ * lose the cells inside the rectangle exactly as any other write to them
+ * would, which is what erase_images_in_rect() already does.
+ */
+bool
+Ring::shift_images_for_scroll(long top,
+                              long bottom,
+                              long left,
+                              long right,
+                              long amount,
+                              long* damage_top,
+                              long* damage_bottom) noexcept
+{
+        if (top > bottom || left > right)
+                return false;
+
+        auto followers = std::vector<vte::image::Image*>{};
+
+        if (amount != 0) {
+                for (auto const& [key, image] : m_image_by_top_map) {
+                        /* Keyed by top row: once past @bottom nothing left
+                         * begins inside the rectangle either. */
+                        if (long(image->get_top()) > bottom)
+                                break;
+
+                        /* An image is exempt from every rule that moves images
+                         * while its own emission burst is running. */
+                        if (image == m_placing_image)
+                                continue;
+
+                        if (long(image->get_bottom()) < top)
+                                continue;
+
+                        /* Every cell of this image, over the rows it spans,
+                         * has to be inside the rectangle: one outside it would
+                         * stand still while the rest of the picture moved, and
+                         * then no single left/top can describe where the
+                         * picture is.
+                         *
+                         * A cell that the move pushes off the end of the
+                         * rectangle is not such a case. It is overwritten or
+                         * dropped exactly as a cell of text there would be,
+                         * and what is left still sits at left+amount+tile_col,
+                         * so the picture is simply clipped - which is what the
+                         * cell whose column DCH deleted deserves. What cannot
+                         * happen is every cell going that way, since then the
+                         * image would be left resident with nothing naming it.
+                         */
+                        auto const first = std::max(long(image->get_top()),
+                                                    long(m_writable));
+                        auto const last = std::min(long(image->get_bottom()),
+                                                   long(m_end) - 1);
+
+                        auto follows = true;
+                        auto any_cell = false;
+                        auto any_survivor = false;
+
+                        for (auto r = first; r <= last && follows; r++) {
+                                auto const* const row = get_writable_index(r);
+
+                                for (auto c = long{0}; c < long(row->len); c++) {
+                                        auto const& cell = row->cells[c];
+                                        if (!cell.attr.image())
+                                                continue;
+                                        if (m_image_pool.lookup(cell.attr.image_ref()) != image)
+                                                continue;
+
+                                        any_cell = true;
+
+                                        if (r < top || r > bottom ||
+                                            c < left || c > right) {
+                                                follows = false;
+                                                break;
+                                        }
+
+                                        if (c + amount >= left && c + amount <= right)
+                                                any_survivor = true;
+                                }
+                        }
+
+                        if (any_cell && follows && any_survivor)
+                                followers.push_back(image);
+                }
+        }
+
+        auto damaged = erase_images_in_rect_except(top, bottom, left, right,
+                                                   damage_top, damage_bottom,
+                                                   followers);
+
+        for (auto* const image : followers) {
+                auto const t = long(image->get_top());
+                auto const b = long(image->get_bottom());
+                if (!damaged) {
+                        *damage_top = t;
+                        *damage_bottom = b;
+                        damaged = true;
+                } else {
+                        *damage_top = std::min(*damage_top, t);
+                        *damage_bottom = std::max(*damage_bottom, b);
+                }
+
+                image->set_left(int(long(image->get_left()) + amount));
         }
 
         return damaged;

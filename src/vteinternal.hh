@@ -1820,6 +1820,11 @@ public:
                                        vte::grid::row_t bottom,
                                        vte::grid::column_t left,
                                        vte::grid::column_t right);
+        void shift_images_for_scroll_slow(vte::grid::row_t top,
+                                          vte::grid::row_t bottom,
+                                          vte::grid::column_t left,
+                                          vte::grid::column_t right,
+                                          long amount);
 #endif
 
         /* Repaint after the ring's own rules have moved or deleted an image
@@ -1869,6 +1874,30 @@ public:
 
 #if WITH_SIXEL
                 erase_images_in_rect_slow(top, bottom, left, right);
+#endif
+        }
+
+        /* What a horizontal scroll of a rectangle of cells owes the images,
+         * in place of erase_images_in_rect(): a picture whose cells are all
+         * inside the moving rectangle travels with them, and only one that
+         * would be torn is taken. See Ring::shift_images_for_scroll().
+         *
+         * @amount is signed: positive moves the cells right, negative left.
+         *
+         * The no-image fast path is erase_images_in_rect()'s, for the same
+         * reason: same test, same value already in the caller's cache.
+         */
+        inline void shift_images_for_scroll(vte::grid::row_t top,
+                                            vte::grid::row_t bottom,
+                                            vte::grid::column_t left,
+                                            vte::grid::column_t right,
+                                            long amount)
+        {
+                if (!m_screen->row_data->has_images()) [[likely]]
+                        return;
+
+#if WITH_SIXEL
+                shift_images_for_scroll_slow(top, bottom, left, right, amount);
 #endif
         }
 
