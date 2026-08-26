@@ -574,7 +574,9 @@ test_image_ref_stripe_identity(void)
         auto const c = vte::image::Ref{pool_id_t{42}, tile_row_t{4}, tile_col_t{0}};
         auto const d = vte::image::Ref{pool_id_t{43}, tile_row_t{3}, tile_col_t{0}};
 
-        /* Same image, same tile row: one stripe, the unit of lifetime. */
+        /* Same image, same tile row: one stripe, the unit of a RUN. Lifetime
+         * is per whole image, not per stripe.
+         */
         g_assert_true(a.same_stripe(b));
         g_assert_true(a.same_image(c));
         g_assert_false(a.same_stripe(c));   /* different tile row */
@@ -1385,7 +1387,7 @@ test_ring_image_cells_carry_the_reference(void)
         }
 
         /* Cells of different tile rows are different stripes, cells of the
-         * same row are one stripe - the unit of lifetime.
+         * same row are one stripe - the unit of a run, not of lifetime.
          */
         auto const a = ring.index(2)->cells[0].attr.image_ref();
         auto const b = ring.index(3)->cells[0].attr.image_ref();

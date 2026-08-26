@@ -93,8 +93,19 @@ using tile_col_t = coord_t<tile_col_tag>;
  *
  * The tile coordinates are relative to the image, not to the screen, so a
  * cell keeps naming the same piece of the image wherever its row is moved
- * to. Rewrap therefore re-anchors an image for free: it rebuilds row_stream
- * only, and the image follows the cells that survived.
+ * to. What that buys is the REFERENCE, not the image: rewrap rebuilds the row
+ * stream and leaves the text and attr streams alone, so a cell comes back out
+ * of the same bytes it went in as and still names the same tile. The ring's
+ * own index is a separate matter and is not free - Ring::rewrap() calls
+ * drop_images_torn_by_rewrap(), rewrap_images_in_range() and
+ * rebuild_image_top_map() explicitly, and the first of those DELETES any image
+ * whose rows did not come through the reflow together. So the image does not
+ * simply follow its cells: a window resize can destroy an image while the
+ * cells that referenced it survive. That is deliberate - re-anchoring only
+ * moves an image's top row and leaves its height alone, so an image whose
+ * covered rows reflowed differently would be drawn under text that is not
+ * where it was emitted. See doc/images.txt and
+ * /vte/ring/rewrap-needs-the-boundary-above-torn.
  *
  * The coordinate widths cover the largest image the parser admits, divided
  * by the smallest cell it may be laid out against:
@@ -222,9 +233,14 @@ public:
         }
 
         /* Whether two cells belong to the same stripe: one tile row of one
-         * image. The stripe is the unit of image lifetime, so that a single
-         * surviving cell pins one row of tiles rather than a whole
-         * multi-megapixel image.
+         * image. The stripe is the unit of a RUN, not of lifetime: its only
+         * callers are the attr stream's run coalescing (cell.hh) and the draw
+         * run's extension (vte.cc). Lifetime is per whole Image - m_image_map,
+         * image_gc(), drop_images_before() and erase_image() all work on an
+         * Image at a time, and nothing in the tree frees one tile row of an
+         * image and keeps another. So a single surviving cell pins the ENTIRE
+         * image, and worst-case image memory is bounded by whole images rather
+         * than by the rows still on screen.
          */
         inline constexpr bool same_stripe(Ref const& other) const noexcept
         {
