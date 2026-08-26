@@ -89,6 +89,14 @@ private:
 
         inline void set_top(int row) noexcept { m_top_cells = row; }
 
+        /* The column has no index to keep in step - nothing is keyed by it -
+         * so this one is private only to keep the two edges together, and
+         * because moving an image sideways is a rule of the ring's and not
+         * something a caller may decide on its own. See
+         * Ring::shift_images_for_scroll() for the one rule that uses it.
+         */
+        inline void set_left(int col) noexcept { m_left_cells = col; }
+
 public:
         Image(vte::Freeable<cairo_surface_t> surface,
               size_t priority,
@@ -126,10 +134,11 @@ public:
          * step, and Ring::rewrap_images_in_range(), which leaves the key
          * stale on purpose and is paid for by the rebuild Ring::rewrap() runs
          * before the next key read (see the note on set_top() above). The
-         * column never moves, since every operation that shifts cells
-         * sideways deletes the image instead of following it.
+         * column is the ring's to move too, through
+         * Ring::shift_images_for_scroll(), which is what lets a picture
+         * follow the cells an ICH or a DCH carries sideways.
          */
-        inline constexpr auto get_left() const noexcept { return m_left_cells; }
+        inline auto get_left() const noexcept { return m_left_cells; }
         inline auto get_top() const noexcept { return m_top_cells; }
         inline constexpr auto get_width() const noexcept { return (m_width_pixels + m_cell_width - 1) / m_cell_width; }
         inline constexpr auto get_height() const noexcept { return (m_height_pixels + m_cell_height - 1) / m_cell_height; }

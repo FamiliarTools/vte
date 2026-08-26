@@ -355,22 +355,34 @@ These are real, they are visible to users, and they are not worked around
 anywhere in the tree.
 
 
-Sideways movement deletes the image
-───────────────────────────────────
+Sideways movement carries the image, but only whole
+───────────────────────────────────────────────────
 
-Nothing in the ring can express "these cells and this bitmap move together".
-The rectangle index is updated only by whole-row moves. So an operation that
-moves cells WITHIN a row erases the image over the affected region instead of
-following it.
+A cell carries its own tile of a picture and the draw reads the picture off the
+cells, so cells memmoved sideways take their piece of the image with them for
+free. What does not move by itself is the image's own left edge, which every
+lifetime rule reads and which validate_image_cells() requires to agree with the
+cells - and until Image grew a set_left() there was no way to move it, so every
+sideways move deleted the picture outright.
 
-The erasure hangs off the PRIMITIVES that move the cells, not off a list of
+Ring::shift_images_for_scroll() is the rule that moves it. An image every one of
+whose CELLS is inside the moving rectangle follows the memmove and keeps them; a
+cell the move pushes off the end of the rectangle is dropped exactly as a cell
+of text there would be, and the rest of the picture follows clipped. An image
+with a cell OUTSIDE the rectangle would be torn - part moved, part standing
+still, and no single left edge describing the result - so that one still loses
+the cells the move takes.
+
+The rule hangs off the PRIMITIVES that move the cells, not off a list of
 control sequences, and that is the level to state it at: this section used to
 carry the list, and the list was wrong - it named ICH, DCH, SL, SR and insert
 mode, and had never heard of DECIC, DECDC or DECCRA. The primitives are the
-closed part, because each one calls erase_images_in_rect() over the region
-before it memmoves the cells:
+closed part. scroll_text_left() and scroll_text_right() now call
+shift_images_for_scroll() over the region before they memmove the cells; the
+other two still erase over it:
 
-	scroll_text_left(), scroll_text_right()	src/vte.cc, sideways scroll
+	scroll_text_left(), scroll_text_right()	src/vte.cc, sideways scroll -
+						the picture FOLLOWS
 	scroll_text_up(), scroll_text_down()	src/vte.cc, else branch only -
 						a partial-width region
 	copy_rect()				src/vteseq.cc, over the
@@ -396,12 +408,15 @@ the two cursor_*_with_scrolling(), and the sequences DCH, DECDC, DECIC, ICH, SL
 and SR. copy_rect() has the one caller DECCRA. Run the grep rather than
 trusting this paragraph - the paragraph is the part that decayed before.
 
-This is why the image position has a set_top() and no set_left(): the column is
-fixed at placement and never moves.
+This is why the image position has a set_left() alongside its set_top(): the
+column moves, and it moves through the ring, which is the only thing that can
+keep the edge and the cells saying the same thing.
 
 A full-width row scroll is fine, and a whole-row insert or remove is fine.
 Running `ls` in a pane and having something ICH into the row an image sits on
-is not.
+now moves the picture with the text; what is still lost is a picture the move
+would TEAR, which is one with a cell outside the moving rectangle - a tall
+image under a one-row ICH, most of all.
 
 
 image_gc has a count cap the public API does not mention

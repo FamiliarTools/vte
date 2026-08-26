@@ -1831,6 +1831,11 @@ public:
                                        vte::grid::row_t bottom,
                                        vte::grid::column_t left,
                                        vte::grid::column_t right);
+        void shift_images_for_scroll_slow(vte::grid::row_t top,
+                                          vte::grid::row_t bottom,
+                                          vte::grid::column_t left,
+                                          vte::grid::column_t right,
+                                          long amount);
 #endif
 
         /* Repaint after the ring's own rules have moved or deleted an image
@@ -1880,6 +1885,29 @@ public:
 
 #if WITH_SIXEL
                 erase_images_in_rect_slow(top, bottom, left, right);
+#endif
+        }
+
+        /* What a horizontal scroll of the given rectangle owes the images
+         * before the cells are memmoved, in the same coordinates as
+         * erase_images_in_rect(). A picture whose cells are all inside the
+         * rectangle follows them; one that would be torn loses them, exactly
+         * as erase_images_in_rect() would take them.
+         *
+         * Same shape and same cost as erase_images_in_rect() above: one
+         * predicted branch for the terminal that holds no image.
+         */
+        inline void shift_images_for_scroll(vte::grid::row_t top,
+                                            vte::grid::row_t bottom,
+                                            vte::grid::column_t left,
+                                            vte::grid::column_t right,
+                                            long amount)
+        {
+                if (!m_screen->row_data->has_images()) [[likely]]
+                        return;
+
+#if WITH_SIXEL
+                shift_images_for_scroll_slow(top, bottom, left, right, amount);
 #endif
         }
 

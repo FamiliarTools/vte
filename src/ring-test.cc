@@ -1750,6 +1750,211 @@ image_cell_positions(Ring& ring,
         return found;
 }
 
+/* Move the cells of @row in the inclusive column range [@left, @right] by
+ * @amount, exactly as Terminal::scroll_text_right() and scroll_text_left()
+ * memmove them for ICH, DCH, SL, SR and insert mode. Positive is rightwards.
+ *
+ * The ring does not do this itself - the terminal does, and the ring is only
+ * told about it - so a test of what the ring owes that move has to perform the
+ * move.
+ */
+static void
+scroll_row_cells(Ring& ring,
+                 long row,
+                 long left,
+                 long right,
+                 long amount)
+{
+        auto* const data = ring.index_writable(row);
+        g_assert_cmpint(long(data->len), >=, right + 1);
+
+        auto const span = right - left + 1;
+        auto const n = span - std::abs(amount);
+
+        if (amount > 0) {
+                memmove(data->cells + left + amount, data->cells + left,
+                        n * sizeof(VteCell));
+                std::fill_n(&data->cells[left], amount, basic_cell);
+        } else if (amount < 0) {
+                memmove(data->cells + left, data->cells + left - amount,
+                        n * sizeof(VteCell));
+                std::fill_n(&data->cells[right + amount + 1], -amount, basic_cell);
+        }
+}
+
+/* Place a @rows_tall x 4 image at (@top, @left) with rows wide enough to carry
+ * the whole stripe, and hand back the image. place_image() stamps the cells
+ * that exist, so the rows have to be widened FIRST or the picture is one cell
+ * wide whatever the image says.
+ */
+static vte::image::Image*
+place_wide_image(Ring& ring,
+                 long top,
+                 int rows_tall,
+                 long left,
+                 long row_width)
+{
+        for (auto r = top; r < top + rows_tall; r++)
+                widen_row(ring, r, row_width);
+
+        place_image(ring, top, rows_tall, left);
+
+        return ring.image_map().begin()->second.get();
+}
+
+/* ICH, DCH, SL, SR and insert mode move cells sideways inside one row without
+ * moving the row. A cell carries its own piece of the picture, so the picture
+ * can go with them - but only if the image's own left edge is moved to match,
+ * because that edge is what every lifetime rule reads and what
+ * validate_images() requires to agree with the cells.
+ *
+ * Before this, the ring had no way to say "these cells and this bitmap move
+ * together" and every such move deleted the image outright.
+ */
+static void
+test_ring_image_follows_horizontal_scroll(void)
+{
+        auto const top = long{5};
+        auto const left = long{2};
+        auto const rows_tall = 2;
+        auto const cols_wide = 4;
+        auto const width = long{40};
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        auto* const image = place_wide_image(ring, top, rows_tall, left, width);
+        auto const id = image->get_pool_id();
+
+        /* The fixture is where the assertions below say it starts from. */
+        g_assert_cmpuint(image_cell_positions(ring, id).size(), ==, rows_tall * cols_wide);
+
+        /* Push one cell in at the left margin, over both of the image's rows. */
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+        g_assert_true(ring.shift_images_for_scroll(top, top + rows_tall - 1,
+                                                   0, width - 1, 1,
+                                                   &damage_top, &damage_bottom));
+        for (auto r = top; r < top + rows_tall; r++)
+                scroll_row_cells(ring, r, 0, width - 1, 1);
+
+        ring.validate_images();
+
+        /* The picture is still here, and it went with its cells. */
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_cmpint(image->get_left(), ==, left + 1);
+        g_assert_cmpint(image->get_top(), ==, top);
+
+        auto const found = image_cell_positions(ring, id);
+        g_assert_cmpuint(found.size(), ==, rows_tall * cols_wide);
+        for (auto r = 0; r < rows_tall; r++) {
+                for (auto c = 0; c < cols_wide; c++) {
+                        auto const it = found.find({uint32_t(r), uint32_t(c)});
+                        g_assert_true(it != found.end());
+                        g_assert_cmpint(it->second.first, ==, top + r);
+                        g_assert_cmpint(it->second.second, ==, left + 1 + c);
+                }
+        }
+
+        /* And back the other way, which is DCH's direction. */
+        g_assert_true(ring.shift_images_for_scroll(top, top + rows_tall - 1,
+                                                   0, width - 1, -1,
+                                                   &damage_top, &damage_bottom));
+        for (auto r = top; r < top + rows_tall; r++)
+                scroll_row_cells(ring, r, 0, width - 1, -1);
+
+        ring.validate_images();
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_cmpint(image->get_left(), ==, left);
+        g_assert_cmpuint(image_cell_positions(ring, id).size(), ==, rows_tall * cols_wide);
+}
+
+/* A cell that the move pushes off the end of the region is lost exactly as a
+ * cell of text there would be, and the rest of the picture still follows. This
+ * is what DCH on the image's own first column does.
+ */
+static void
+test_ring_image_clipped_by_horizontal_scroll(void)
+{
+        auto const top = long{5};
+        auto const left = long{0};
+        auto const rows_tall = 1;
+        auto const cols_wide = 4;
+        auto const width = long{40};
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        auto* const image = place_wide_image(ring, top, rows_tall, left, width);
+        auto const id = image->get_pool_id();
+        g_assert_cmpuint(image_cell_positions(ring, id).size(), ==, cols_wide);
+
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+        g_assert_true(ring.shift_images_for_scroll(top, top, 0, width - 1, -1,
+                                                   &damage_top, &damage_bottom));
+        scroll_row_cells(ring, top, 0, width - 1, -1);
+
+        ring.validate_images();
+
+        /* The leftmost tile column is gone; the other three moved left. */
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_cmpint(image->get_left(), ==, left - 1);
+
+        auto const found = image_cell_positions(ring, id);
+        g_assert_cmpuint(found.size(), ==, cols_wide - 1);
+        for (auto c = 1; c < cols_wide; c++) {
+                auto const it = found.find({0u, uint32_t(c)});
+                g_assert_true(it != found.end());
+                g_assert_cmpint(it->second.first, ==, top);
+                g_assert_cmpint(it->second.second, ==, left - 1 + c);
+        }
+}
+
+/* An image with a cell OUTSIDE the moving region cannot follow: part of it
+ * would move and part would stand still, and no single left edge describes
+ * that. Those cells are taken, as any other write to them would take them.
+ */
+static void
+test_ring_image_torn_by_horizontal_scroll(void)
+{
+        auto const top = long{5};
+        auto const left = long{2};
+        auto const width = long{40};
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        /* Two rows tall, but the region is only the first of them. */
+        auto* const image = place_wide_image(ring, top, 2, left, width);
+        auto const id = image->get_pool_id();
+        g_assert_cmpuint(image_cell_positions(ring, id).size(), ==, 8);
+
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+        g_assert_true(ring.shift_images_for_scroll(top, top, 0, width - 1, 1,
+                                                   &damage_top, &damage_bottom));
+        scroll_row_cells(ring, top, 0, width - 1, 1);
+
+        ring.validate_images();
+
+        /* The image did not move, and the row inside the region lost its
+         * cells rather than being dragged out from under the other one.
+         */
+        g_assert_cmpint(image->get_left(), ==, left);
+        auto const found = image_cell_positions(ring, id);
+        g_assert_cmpuint(found.size(), ==, 4);
+        for (auto c = 0; c < 4; c++) {
+                auto const it = found.find({1u, uint32_t(c)});
+                g_assert_true(it != found.end());
+                g_assert_cmpint(it->second.first, ==, top + 1);
+                g_assert_cmpint(it->second.second, ==, left + c);
+        }
+}
+
 static void
 test_ring_image_cells_stay_with_their_image(void)
 {
@@ -3092,6 +3297,9 @@ main(int argc,
 
         g_test_add_func("/vte/ring/image-pool/anchor-follows-the-cells", test_ring_image_anchor_follows_the_cells);
         g_test_add_func("/vte/ring/image-pool/cells-stay-with-their-image", test_ring_image_cells_stay_with_their_image);
+        g_test_add_func("/vte/ring/image-pool/follows-horizontal-scroll", test_ring_image_follows_horizontal_scroll);
+        g_test_add_func("/vte/ring/image-pool/clipped-by-horizontal-scroll", test_ring_image_clipped_by_horizontal_scroll);
+        g_test_add_func("/vte/ring/image-pool/torn-by-horizontal-scroll", test_ring_image_torn_by_horizontal_scroll);
 
         g_test_add_func("/vte/ring/image-pool/reference-survives-freeze", test_ring_image_reference_survives_freeze);
         g_test_add_func("/vte/ring/image-pool/reference-rebinds-after-thaw", test_ring_image_reference_rebinds_after_thaw);

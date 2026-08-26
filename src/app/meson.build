@@ -230,6 +230,33 @@ if get_option('sixel') and get_option('sixel_display_tests')
     # the child exiting rather than sleeping; see the <case>.eof note in
     # render-test.sh.
     'bands-truncated',
+    # The cell-move family. Every one of these used to DELETE the picture
+    # outright; the unit tests in ring-test.cc watch the model, and nothing
+    # watched the pixels.
+    #
+    # They come in pairs on purpose. A single case here could only say "an
+    # image is still drawn somewhere", and the whole question is WHERE: an
+    # image that survived ICH but did not move with the cells is exactly as
+    # wrong as one that was destroyed, and it renders as a picture. So the
+    # golden for the moved case is captured from the PLACED one - the same
+    # strip put at the destination by cursor addressing, which involves no
+    # image movement code at all - and copied across. Sharing it makes
+    # "follows by exactly one cell" a comparison against an independently
+    # produced frame rather than a number read off a picture.
+    #
+    # strip-placed is the pair's other half made testable on its own: it is
+    # the unmoved strip, and it is what tells a broken cell move apart from
+    # a broken strip.
+    'strip-placed',
+    # ICH one cell on the strip's own row. Golden shared with, and captured
+    # from, strip-ich-placed.
+    'strip-ich',
+    'strip-ich-placed',
+    # DCH one cell at the strip's left edge. The column DCH deletes is gone
+    # and the rest of the picture follows it left, clipped - the one case in
+    # the family that is not a pure translation, so it carries its own
+    # golden.
+    'strip-dch',
   ]
 
   # The case the isolation test runs, which cannot be sixel_render_cases[0].
