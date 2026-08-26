@@ -351,6 +351,181 @@ test_copy_rect_leaves_the_image_behind(void)
         g_assert_true(ring.image_cells_are_anchored());
 }
 
+/* How many cells anywhere in the ring still name @id.
+ *
+ * The count, not merely "some cell does": what an overlapping copy is capable
+ * of taking from a picture is a few cells at the intersection, and a test that
+ * only asked whether the image still exists would report that as untouched.
+ */
+static long
+image_cell_count(Ring& ring,
+                 uint32_t id)
+{
+        auto n = long{0};
+
+        for (auto r = ring.delta(); r < ring.next(); r++) {
+                auto const* const row = ring.index_writable(r);
+                if (row == nullptr)
+                        continue;
+
+                for (auto c = 0; c < row->len; c++) {
+                        if (row->cells[c].attr.image() &&
+                            row->cells[c].attr.image_ref().pool_id().value() == id)
+                                n++;
+                }
+        }
+
+        return n;
+}
+
+/* A rectangular copy whose two rectangles OVERLAP.
+ *
+ * The copy detaches the destination from its images before it reads the
+ * source, and when the rectangles overlap that erase reaches source cells the
+ * copy has not read yet. On a branch where the copied cells carried the image
+ * with them that ordering holes the picture being copied - so the question has
+ * to be asked here, of this branch, rather than answered from the shape of the
+ * code.
+ *
+ * It is asked as an exact count of the cells the picture still owns, derived
+ * from the fixture's own geometry: the destination rectangle takes the cells
+ * inside it, and nothing else. A test that merely asked whether the image
+ * survived would be satisfied by one holed everywhere but a corner.
+ *
+ * The marker is what says the copy happened at all. It sits in the source
+ * rectangle just right of the picture, where no image cell can be confused for
+ * it, and its arrival is asserted before the contract is read.
+ */
+static void
+test_overlapping_copy_rect_holes_nothing(void)
+{
+        auto& ring = *impl->m_screen->row_data;
+
+        feed("\x1b" "c"); /* RIS, split so the c is not read as more hex */
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+
+        /* Tall enough that the two rectangles can overlap in ROWS as well as
+         * columns; the shared fixture above is one band high on most cells.
+         */
+        auto sixel = std::string("\x1b[H"
+                                 "\x1bP0;0;0q"
+                                 "\"1;1;200;120"
+                                 "#0;2;0;0;100#0");
+        for (auto band = 0; band < 20; band++)
+                sixel += std::string(200, '~') + "-";
+        sixel += "\x1b\\";
+        feed(sixel);
+
+        auto const* const image = the_image(ring);
+        auto const id = image->get_pool_id().value();
+        auto const top = Ring::row_t(image->get_top());
+        auto const width = long(image->get_width());
+        auto const height = long(image->get_height());
+
+        g_assert_null(ring.placing_image());
+        g_assert_cmpint(long(image->get_left()), ==, 0);
+        g_assert_cmpint(width, >=, 3);
+        g_assert_cmpint(height, >=, 3);
+
+        auto const screen_top = long(top) - impl->m_screen->insert_delta + 1;
+        g_assert_cmpint(screen_top, ==, 1);
+
+        /* The source rectangle is the picture plus the column to its right;
+         * the destination is that rectangle moved one row down and two columns
+         * right, so the two genuinely intersect. Both must fit on the page or
+         * the sequence is ignored and the question is asked of a copy that
+         * never happened.
+         */
+        auto const src_right = width + 1;
+        auto const dest_top = long{2};
+        auto const dest_left = long{3};
+
+        g_assert_cmpint(src_right + dest_left - 1, <=, long(impl->m_column_count));
+        g_assert_cmpint(height + dest_top - 1, <=, long(impl->m_row_count));
+
+        feed("\x1b[1;" + std::to_string(src_right) + "H" "X");
+
+        /* Fixture: the picture owns exactly its own rectangle, and the marker
+         * is beside it rather than on it.
+         */
+        g_assert_cmpint(image_cell_count(ring, id), ==, width * height);
+
+        auto const* row = ring.index_writable(top);
+        g_assert_cmpint(long(row->len), >=, src_right);
+        g_assert_cmpuint(row->cells[src_right - 1].c, ==, 'X');
+        g_assert_false(row->cells[src_right - 1].attr.image());
+
+        g_assert_true(ring.image_cells_are_anchored());
+
+        feed("\x1b[1;1;" + std::to_string(height) +
+             ";" + std::to_string(src_right) +
+             ";1;" + std::to_string(dest_top) +
+             ";" + std::to_string(dest_left) + ";1$v");
+
+        /* Fixture, part two: the copy reached the destination. The marker sat
+         * @src_right - 1 columns right of the source's left edge, so it is now
+         * that far right of the destination's.
+         */
+        auto const dest_row = Ring::row_t(impl->m_screen->insert_delta + dest_top - 1);
+        auto const* const drow = ring.index_writable(dest_row);
+        g_assert_nonnull(drow);
+        g_assert_cmpint(long(drow->len), >=, dest_left + src_right - 1);
+        g_assert_cmpuint(drow->cells[dest_left + src_right - 2].c, ==, 'X');
+
+        /* The contract: the destination rectangle took the cells inside it and
+         * nothing else. Row one of the picture is above the destination, and
+         * the two columns left of the destination's left edge are beside it, so
+         * those cells are still the picture's - and every cell of the
+         * intersection is not.
+         */
+        auto const expected = width + (dest_left - 1) * (height - 1);
+        g_assert_cmpint(image_cell_count(ring, id), ==, expected);
+
+        /* Whatever the destination now holds, none of it is a picture, and the
+         * one still standing is anchored to the cells it has left.
+         */
+        for (auto r = dest_row; r < dest_row + Ring::row_t(height); r++) {
+                auto const* const crow = ring.index_writable(r);
+                g_assert_nonnull(crow);
+
+                for (auto c = dest_left - 1;
+                     c < std::min(long(crow->len), dest_left + src_right - 1);
+                     c++)
+                        g_assert_false(crow->cells[c].attr.image());
+        }
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_cmpuint(the_image(ring)->get_pool_id().value(), ==, id);
+        g_assert_true(ring.image_cells_are_anchored());
+
+        /* And the degenerate overlap: a copy onto its OWN rectangle.
+         *
+         * It asks for no change, and for text it makes none - every cell is
+         * replaced by itself. A cell that names an image does not come back the
+         * same, though: the destination is detached from its images before the
+         * source is read, and what is written back over it is that cell without
+         * the picture. Measured on this fixture before copy_rect() returned
+         * early for it, the picture went from 39 cells to 0 and was freed,
+         * while the letters beside it were still there.
+         *
+         * Asserted on the whole ring rather than on the rectangle, because a
+         * sequence that changes nothing must leave nothing changed.
+         */
+        {
+                auto const before = image_cell_count(ring, id);
+                g_assert_cmpint(before, >, 0);
+
+                feed("\x1b[1;1;" + std::to_string(height) +
+                     ";" + std::to_string(src_right) +
+                     ";1;1;1;1$v");
+
+                g_assert_cmpuint(ring.image_map().size(), ==, 1);
+                g_assert_cmpuint(the_image(ring)->get_pool_id().value(), ==, id);
+                g_assert_cmpint(image_cell_count(ring, id), ==, before);
+                g_assert_true(ring.image_cells_are_anchored());
+        }
+}
+
 /* Place the test image at the home position, on a screen holding nothing else,
  * and return it. Wide enough to be several cells across on any cell this
  * terminal can have, so that a footprint is something to measure rather than a
@@ -524,6 +699,10 @@ main(int argc,
         test_copy_rect_leaves_the_image_behind();
 
         g_print("PASS: a rectangular copy does not copy the image\n");
+
+        test_overlapping_copy_rect_holes_nothing();
+
+        g_print("PASS: an overlapping rectangular copy holes nothing\n");
 
         test_footprint_ignores_the_zoom();
 

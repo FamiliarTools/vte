@@ -1072,6 +1072,20 @@ try
             !screen_rect.contains(dest_rect))
                 return;
 
+        /* A copy onto its own rectangle changes nothing, and saying so here is
+         * not an optimisation: the path below writes every cell of the
+         * destination, and for these two rectangles those are the very cells
+         * being read. The text survives that, because each cell is replaced by
+         * itself - but a cell that names an image does not come back the same.
+         * The destination is detached from its images before the source is
+         * read, and what cell_for_copy() then writes over it is that cell
+         * without the picture. So a DECCRA that asks for no change at all
+         * destroys any image inside the rectangle, while the text in the same
+         * cells is untouched.
+         */
+        if (dest_rect == source_rect)
+                return;
+
         auto const dest_width = dest_rect.right() - dest_rect.left() + 1;
 
         // Ensure all used rows exist
