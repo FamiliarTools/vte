@@ -126,9 +126,10 @@ option(
                'region holds anything the terminal placed in CELLS - the right ' +
                'margin, a marker glyph, the edge of a window that is 80x24 cells - ' +
                'and is font-invariant when the region holds nothing but the image ' +
-               'on blank background. Measured on gtk3 over six fonts, five of the ' +
-               'nine cases move and four do not; the count is not worth memorising, ' +
-               'the sentinel below is. To tell a foreign font from a real regression, ' +
+               'on blank background. Which cases move is therefore read off their ' +
+               'crops and not off a list here, which the next case added would ' +
+               'falsify; the rule is what is worth keeping, and the sentinel below. ' +
+               'To tell a foreign font from a real regression, ' +
                'read the FAILURE LINE first and then the sentinel. A run that never ' +
                'got a frame at all reports itself in the terminal\'s own terms - it ' +
                'never answered, never painted, never finished parsing, never drew - ' +

@@ -185,12 +185,18 @@ endif
 # distributor does to ship images, and it was also signing them up to boot an
 # X server for every case and to have Xvfb and ImageMagick's import, compare
 # and convert on the build host. Without the tools the runners do skip rather
-# than fail, but a suite that reports fourteen skips on every build is noise
+# than fail, but a suite that reports a skip per case on every build is noise
 # the builder did not ask for, and with the tools installed it is an X server
 # per case they did not ask for either.
 #
-# Measured on this branch, gtk3: `meson test` runs 20 tests with the option off
-# and 34 with it on, the 14 added costing 25.3s of test time.
+# What the option costs a build is not written down here, because a number in
+# this comment is falsified by the next case added below and cannot announce
+# it. Ask the build:
+#
+#   meson configure <builddir> -Dsixel_display_tests=false
+#   meson test -C <builddir> --list | wc -l
+#   meson configure <builddir> -Dsixel_display_tests=true
+#   meson test -C <builddir> --list | wc -l
 #
 # The runner's own skip path is not made redundant by the option. The option
 # decides whether the tests are ASKED FOR; the skip decides what to say when
