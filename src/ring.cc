@@ -733,6 +733,17 @@ Ring::spill_image(vte::image::Image const* image) noexcept
         m_image_spill[priority] = ImageSpill{offset,
                                              long(image->get_top()),
                                              long(image->get_bottom())};
+
+        /* Announced, because from outside the library an evicted-and-spilled
+         * image and one that simply stayed resident look exactly alike: both
+         * draw. A rendered test of the spill path has no other way to know its
+         * insult landed, and one that assumed it would be testing the resident
+         * path while claiming to test this one.
+         */
+        _vte_debug_print(vte::debug::category::RING,
+                         "Spilled image {} rows {}..{} at offset {}",
+                         priority, long(image->get_top()),
+                         long(image->get_bottom()), offset);
 }
 
 /*
@@ -798,7 +809,26 @@ Ring::restore_image(size_t priority) /* throws */
         auto const height_px = int(record.height_px);
         auto const left_cells = int(record.left_cells);
 
-        auto const top_cells = int(record.top_cells);
+        /* The row comes from the LIVE record, not from the disk one.
+         *
+         * record.top_cells was written at eviction and names the row the image
+         * had then. A rewrap renumbers the ring from zero and re-anchors the
+         * spill map with it, so after any reflow the disk copy names a row of a
+         * ring that no longer exists. The map entry is the one thing that has
+         * been kept current, and at eviction the two are equal by construction,
+         * so this is the same number until the moment it stops being.
+         *
+         * What this does NOT fix is where the picture is drawn, and saying so
+         * is the point of the note: the draw walks the cells that name an image
+         * and places each stripe from ITS row and column, so an image with a
+         * stale anchor still paints in the right place. The anchor is what the
+         * ring's own bookkeeping decides on: which images a row drop takes with
+         * it, what image_gc() and the by-top map see, and which rectangle an
+         * erase compares against. An anchor a hundred rows below the picture
+         * makes every one of those answer about a row the image does not
+         * occupy.
+         */
+        auto const top_cells = int(it->second.top);
         auto const cell_width = int(record.cell_width);
         auto const cell_height = int(record.cell_height);
 
@@ -822,6 +852,10 @@ Ring::restore_image(size_t priority) /* throws */
         m_image_map[priority] = std::move(image);
         m_image_by_top_map.emplace(raw->get_top(), raw);
         sync_has_images();
+
+        _vte_debug_print(vte::debug::category::RING,
+                         "Restored image {} at row {}",
+                         priority, long(raw->get_top()));
 
         /* Faulting an image back in from the scrollback ADDS to the budget, so
          * it has to be collected against like any other addition. Without this
