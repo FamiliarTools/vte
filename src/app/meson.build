@@ -306,13 +306,29 @@ if get_option('sixel') and get_option('sixel_display_tests')
       ],
       depends: [arm[1]],
       suite: 'sixel-display',
-      # Headroom for the readiness cap, not for the run. Six of this test's
-      # scenarios boot a terminal and STARVE one of the runner's readiness
-      # waits, and every OTHER wait in those runs still carries the runner's
-      # real 90 s cap - so a machine on which one of them is genuinely reached
-      # spends 90 s in a single scenario without anything being wrong with the
-      # gate. Three of those would outlast the 240 s this used to allow and
-      # report a TIMEOUT, which is the one verdict that says nothing.
+      # Headroom for the readiness cap, not for the run.
+      #
+      # This test boots a terminal once per starve scenario, and each of those
+      # runs starves ONE named wait while every OTHER wait in it still carries
+      # the runner's real cap - VTE_TEST_READY_TIMEOUT, 90 s by default in
+      # render-test.sh. So a machine on which one of those other waits is
+      # genuinely reached spends a whole cap inside a single scenario with
+      # nothing wrong with the gate, and what this test's budget has to cover
+      # is the cap times the number of starve scenarios. It is NOT a multiple
+      # of how long the test takes when it passes; sizing it from that gave
+      # 240 s, which a single such machine outlasts, and a TIMEOUT is the one
+      # verdict that says nothing.
+      #
+      # The scenario count is deliberately not written down here, because a
+      # number in this comment is falsified by the next scenario added to the
+      # runner and cannot announce it. Derive it:
+      #
+      #   LC_ALL=C git grep -c '^starve_says ' -- src/tests/sixel/render-gate-test.sh
+      #
+      # That counts the calls, not the file's VTE_TEST_STARVE_WAIT uses: the
+      # other one is the no-such-wait scenario, which render-test.sh refuses at
+      # the top, before mktemp and before an X server, so it boots no terminal
+      # and reaches no wait.
       timeout: 900,
     )
 
