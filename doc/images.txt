@@ -359,18 +359,45 @@ Sideways movement deletes the image
 ───────────────────────────────────
 
 Nothing in the ring can express "these cells and this bitmap move together".
-The rectangle index is updated only by whole-row moves. So every operation that
+The rectangle index is updated only by whole-row moves. So an operation that
 moves cells WITHIN a row erases the image over the affected region instead of
-following it:
+following it.
 
-	ICH, DCH		via scroll_text_right() / scroll_text_left()
-	SL, SR			via the same
-	insert mode		via scroll_text_right()
-	partial-width region scroll	scroll_text_up() / _down(), else branch
+The erasure hangs off the PRIMITIVES that move the cells, not off a list of
+control sequences, and that is the level to state it at: this section used to
+carry the list, and the list was wrong - it named ICH, DCH, SL, SR and insert
+mode, and had never heard of DECIC, DECDC or DECCRA. The primitives are the
+closed part, because each one calls erase_images_in_rect() over the region
+before it memmoves the cells:
 
-Each of those calls erase_images_in_rect() over the region before it memmoves
-the cells; see src/vte.cc. This is why the image position has a set_top() and
-no set_left(): the column is fixed at placement and never moves.
+	scroll_text_left(), scroll_text_right()	src/vte.cc, sideways scroll
+	scroll_text_up(), scroll_text_down()	src/vte.cc, else branch only -
+						a partial-width region
+	copy_rect()				src/vteseq.cc, over the
+						DESTINATION rectangle
+
+Which operations reach them is then a grep and not a memory. -W prints the
+enclosing function, so this ASKS THE TREE for the callers by name and carries
+no line numbers to rot when the file moves under it:
+
+	$ LC_ALL=C git grep -W -E '^ +scroll_text_(left|right)\(' -- src/vte.cc src/vteseq.cc | LC_ALL=C grep -E '=Terminal::'
+	src/vte.cc=Terminal::cursor_right_with_scrolling(bool fill)
+	src/vte.cc=Terminal::cursor_left_with_scrolling(bool fill)
+	src/vte.cc=Terminal::insert_char(gunichar c,
+	src/vteseq.cc=Terminal::DCH(vte::parser::Sequence const& seq)
+	src/vteseq.cc=Terminal::DECDC(vte::parser::Sequence const& seq)
+	src/vteseq.cc=Terminal::DECIC(vte::parser::Sequence const& seq)
+	src/vteseq.cc=Terminal::ICH(vte::parser::Sequence const& seq)
+	src/vteseq.cc=Terminal::SL(vte::parser::Sequence const& seq)
+	src/vteseq.cc=Terminal::SR(vte::parser::Sequence const& seq)
+
+So: insert mode via insert_char(), a cursor move that has run into a margin via
+the two cursor_*_with_scrolling(), and the sequences DCH, DECDC, DECIC, ICH, SL
+and SR. copy_rect() has the one caller DECCRA. Run the grep rather than
+trusting this paragraph - the paragraph is the part that decayed before.
+
+This is why the image position has a set_top() and no set_left(): the column is
+fixed at placement and never moves.
 
 A full-width row scroll is fine, and a whole-row insert or remove is fine.
 Running `ls` in a pane and having something ICH into the row an image sits on

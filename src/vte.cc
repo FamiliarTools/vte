@@ -3071,7 +3071,10 @@ Terminal::scroll_text_right(scrolling_region const& scrolling_region,
 
         const VteCell *cell = fill ? &m_color_defaults : &basic_cell;
 
-        /* As in scroll_text_left(): ICH, SR and insert mode move cells sideways. */
+        /* As in scroll_text_left(): whatever called this is moving cells
+         * sideways within their rows, and an image cannot follow them. Which
+         * sequences those are is a grep, not a list - see doc/images.txt,
+         * "Sideways movement deletes the image". */
         erase_images_in_rect(top, bottom, left, right);
 
         /* Scroll right in each row separately. */
