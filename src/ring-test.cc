@@ -2071,6 +2071,74 @@ test_ring_image_spill_is_reclaimed(void)
         g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 0);
 }
 
+/* A rewrap renumbers the ring's rows from zero. A spill record's rows are the
+ * key reclamation decides on, so they have to be renumbered with it.
+ *
+ * This is the mechanism underneath the soak arm below, asserted directly:
+ * whatever else a reflow does to a parked image, it must not leave the record
+ * naming a row outside the ring. A record that does is not merely stale - it
+ * compares as still-live against every row number the ring will ever have
+ * again, so it is never erased and the stream's tail never moves past it.
+ */
+static void
+test_ring_image_spill_rows_survive_rewrap(void)
+{
+        auto ring = Ring{64, true};
+        ring.set_visible_rows(24);
+
+        /* Put the image well down the ring, so that its row can still be inside
+         * the ring at the moment rows are dropping off the front. A record
+         * whose row had already left would be reclaimed on its own and would
+         * prove nothing about renumbering.
+         */
+        append_rows(ring, 40);
+        widen_row(ring, 30, 4);
+
+        place_image(ring, 30, 1);
+        auto* const image = ring.image_map().begin()->second.get();
+
+        ring.set_placing_image(image);
+        ring.stamp_image_row(30, 0, 4, 0);
+        ring.set_placing_image(nullptr);
+
+        /* Overfill the ring: rows now drop off the front, so m_start is above
+         * zero and the rewrap has something to renumber AWAY. With m_start
+         * still zero the old and new numbering coincide and the bug is
+         * invisible.
+         */
+        append_rows(ring, 30);
+        ring.evict_all_images_for_test();
+        ring.validate_images();
+
+        auto const shift = long(ring.delta());
+        g_assert_cmpint(shift, >, 0);
+
+        auto const before = ring.image_spill_rows_for_test();
+        g_assert_cmpuint(before.size(), ==, 1);
+        g_assert_cmpint(before[0].first, >=, shift);
+
+        /* A resize to the width it already has. Every row is four cells wide
+         * and hard wrapped, so no row is split or joined and the reflow moves
+         * each one down by exactly @shift - which makes the expected new row
+         * number arithmetic rather than a guess.
+         */
+        ring.rewrap_for_test(80);
+        ring.validate_images();
+
+        g_assert_cmpint(long(ring.delta()), ==, 0);
+
+        auto const after = ring.image_spill_rows_for_test();
+        g_assert_cmpuint(after.size(), ==, 1);
+        g_assert_cmpint(after[0].first, ==, before[0].first - shift);
+        g_assert_cmpint(after[0].second, ==, before[0].second - shift);
+
+        /* And the renumbering is what lets reclamation work: push that row out
+         * of the ring and the record has to go, which it cannot do while it is
+         * holding a number from a ring that no longer exists.
+         */
+        append_rows(ring, 4096);
+        g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 0);
+}
 
 static void
 test_ring_image_limit_is_enforced(void)
@@ -2881,7 +2949,8 @@ test_ring_image_soak_normal_screen(void)
  * over a working day is the whole of the user's /tmp.
  */
 static void
-test_ring_image_spill_stream_recycles(void)
+spill_stream_soak(char const* what,
+                  size_t reflow_every)
 {
         auto const cycles = soak_cycles(64);
         auto const per_cycle = 8;
@@ -2901,48 +2970,119 @@ test_ring_image_spill_stream_recycles(void)
                 for (auto i = 0; i < per_cycle; i++)
                         (void)ring.index(base + i);
 
+                /* A window resize. rewrap() renumbers every row of the ring
+                 * from zero, so anything that remembers a row number and is not
+                 * renumbered with it is left pointing at a row that no longer
+                 * exists - and the spill records are keyed on exactly that.
+                 */
+                if (reflow_every != 0 && (cycle % reflow_every) == 0) {
+                        ring.rewrap_for_test(40);
+                        ring.rewrap_for_test(80);
+                }
+
                 ring.validate_images();
                 samples.push_back(take_sample(ring, cycle));
         }
 
-        report("soak/spill", samples);
+        report(what, samples);
 
-        /* Past the first few cycles the ring is in steady state: the same
-         * number of images alive, the same number parked, the same bytes held.
-         * Take the bound from the run itself at that point rather than writing
-         * a number in, so that changing the image size or the cycle shape here
-         * does not silently turn the assertion off.
+        /* Past the first few cycles the ring is in steady state. Compare the
+         * MAXIMUM held over the first half of what is left against the maximum
+         * over the second half, rather than any single sample against any
+         * other: reclamation happens at particular moments in the cycle, so a
+         * single sample says only where in the cycle it landed, and taking the
+         * maxima of two equal stretches is the comparison that answers the
+         * actual question - does the amount held stop growing.
+         *
+         * The bound comes from the run itself so that changing the image size
+         * or the cycle shape here cannot silently turn the assertion off.
          */
         auto const warmup = size_t{8};
         g_assert_cmpuint(cycles, >, warmup * 2);
 
-        auto const settled = samples[warmup].spill_bytes;
-        g_assert_cmpuint(settled, >, 0);
+        auto const mid = warmup + (cycles - warmup) / 2;
 
-        auto worst = size_t{0};
-        auto worst_cycle = size_t{0};
-        for (auto i = warmup; i < cycles; i++) {
-                if (samples[i].spill_bytes > worst) {
-                        worst = samples[i].spill_bytes;
-                        worst_cycle = i;
+        auto peak = [&](size_t from, size_t to) {
+                auto worst = size_t{0};
+                auto worst_cycle = from;
+                for (auto i = from; i < to; i++) {
+                        if (samples[i].spill_bytes > worst) {
+                                worst = samples[i].spill_bytes;
+                                worst_cycle = i;
+                        }
+                }
+                return std::pair{worst, worst_cycle};
+        };
+
+        auto const [early, early_cycle] = peak(warmup, mid);
+        auto const [late, late_cycle] = peak(mid, cycles);
+
+        g_assert_cmpuint(early, >, 0);
+
+        /* The held bytes are a sawtooth, not a line: images are spilled every
+         * cycle and reclaimed in a batch when the rows naming them scroll out
+         * a few cycles later. So the slack has to be the height of one tooth -
+         * a cycle's worth of images - or the assertion is really testing where
+         * in the sawtooth each half's peak happened to land. Both terms are
+         * measured off this run rather than named, so neither decays.
+         */
+        auto per_image = size_t{0};
+        for (auto const& s : samples) {
+                if (s.spill_records > 0) {
+                        per_image = s.spill_bytes / s.spill_records;
+                        break;
                 }
         }
+        g_assert_cmpuint(per_image, >, 0);
 
-        g_test_message("soak/spill: settled at %zu bytes after %zu cycles, "
-                       "worst %zu at cycle %zu, total written %zu",
-                       settled, warmup, worst, worst_cycle,
-                       samples.back().spill_written);
+        auto const slack = size_t(per_cycle) * per_image;
 
-        /* The stream was genuinely used: far more was written than is held, so
-         * the flatness below is recycling and not simply an absence of spilling.
+        g_test_message("%s: first half peak %zu at cycle %zu, second half peak "
+                       "%zu at cycle %zu, one image %zu, slack %zu, total written %zu",
+                       what, early, early_cycle, late, late_cycle,
+                       per_image, slack, samples.back().spill_written);
+
+        /* It is flat.
+         *
+         * This is the assertion a reflow breaks. rewrap() renumbers every row
+         * of the ring, and reclaim_image_spill() decides what to free by
+         * comparing a spill record's remembered rows against a row number - so
+         * a record not renumbered with the ring compares as live forever, the
+         * stream's tail never moves again, and this peak climbs by the full
+         * pixel size of every image evicted for the rest of the session.
          */
-        g_assert_cmpuint(samples.back().spill_written, >, settled * 4);
+        g_assert_cmpuint(late, <=, early + slack);
 
-        /* And it is flat. One image's worth of slack, since where in its cycle
-         * the sample lands decides whether the newest spill is counted yet.
+        /* And the stream was genuinely used: far more was written than is ever
+         * held, so the flatness above is recycling and not simply an absence of
+         * spilling. Measured against the peak, and asserted AFTER the flatness,
+         * because a leak inflates the peak - checking this first would report a
+         * leak as an unused stream.
          */
-        auto const slack = settled;
-        g_assert_cmpuint(worst, <=, settled + slack);
+        g_assert_cmpuint(samples.back().spill_written, >, late * 4);
+}
+
+static void
+test_ring_image_spill_stream_recycles(void)
+{
+        spill_stream_soak("soak/spill", 0);
+}
+
+/* The same bound, with the window resized while the images churn.
+ *
+ * Scrolling and reflow are not the same test. Scrolling only ever moves
+ * m_start forward through a numbering that stays put, so a spill record's
+ * remembered rows keep meaning what they meant when it was written. rewrap()
+ * renumbers the whole ring from zero, and every structure that is keyed on a
+ * row number has to be renumbered with it or it is silently talking about rows
+ * that no longer exist. The arm above cannot see that, because it never
+ * reflows; without this one the reclamation rule is only ever asserted in the
+ * one case where the key it uses is stable.
+ */
+static void
+test_ring_image_spill_stream_recycles_across_reflow(void)
+{
+        spill_stream_soak("soak/spill-reflow", 4);
 }
 
 static void
@@ -3072,6 +3212,8 @@ main(int argc,
         g_test_add_func("/vte/ring/image/soak/normal-screen", test_ring_image_soak_normal_screen);
         g_test_add_func("/vte/ring/image/soak/alternate-screen", test_ring_image_soak_alternate_screen);
         g_test_add_func("/vte/ring/image/soak/spill-stream-recycles", test_ring_image_spill_stream_recycles);
+        g_test_add_func("/vte/ring/image/soak/spill-stream-recycles-across-reflow",
+                        test_ring_image_spill_stream_recycles_across_reflow);
 
         g_test_add_func("/vte/ring/attr-stream/rle-trap", test_attr_stream_rle_trap);
         g_test_add_func("/vte/ring/attr-stream/stripe-is-one-run", test_attr_stream_stripe_is_one_run);
@@ -3102,6 +3244,8 @@ main(int argc,
 
         g_test_add_func("/vte/ring/image/pixels-survive-eviction", test_ring_image_pixels_survive_eviction);
         g_test_add_func("/vte/ring/image/spill-is-reclaimed", test_ring_image_spill_is_reclaimed);
+        g_test_add_func("/vte/ring/image/spill-rows-survive-rewrap",
+                        test_ring_image_spill_rows_survive_rewrap);
 
         g_test_add_func("/vte/ring/image/limit-is-enforced", test_ring_image_limit_is_enforced);
         g_test_add_func("/vte/ring/image/limit-zero-disables", test_ring_image_limit_zero_disables);

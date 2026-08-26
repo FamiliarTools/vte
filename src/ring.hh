@@ -468,8 +468,28 @@ private:
         void validate_image_cells() const;
         void drop_images_before(row_t row) noexcept;
         void drop_images_after(row_t row) noexcept;
+        bool image_rows_survive_rewrap(long top,
+                                       long bottom,
+                                       column_t columns) noexcept;
         void drop_images_torn_by_rewrap(column_t columns) noexcept;
         void rewrap_images_in_range(image_by_top_map_type::iterator& it,
+                                    size_t text_start_ofs,
+                                    size_t text_end_ofs,
+                                    row_t new_row_index) noexcept;
+
+        /* One spilled image on its way through a rewrap: where its old top row
+         * lives in the text stream, which record it belongs to, and how many
+         * rows tall it is. The text offset is taken before the reflow starts,
+         * while the old row stream is still there to answer for it.
+         */
+        struct SpillRewrap {
+                gsize text_offset;
+                size_t priority;
+                long span;
+        };
+        std::vector<SpillRewrap> plan_spill_rewrap(column_t columns) noexcept;
+        void rewrap_spills_in_range(std::vector<SpillRewrap> const& plan,
+                                    size_t& cursor,
                                     size_t text_start_ofs,
                                     size_t text_end_ofs,
                                     row_t new_row_index) noexcept;
@@ -536,6 +556,22 @@ public:
         }
 
         auto image_spill_count_for_test() const noexcept { return m_image_spill.size(); }
+
+        /* For tests: the ring rows each parked spill still claims.
+         *
+         * These rows are not decoration - they are the key reclamation decides
+         * on - so a test has to be able to see that they still mean something
+         * in the ring's CURRENT numbering. Counting the records cannot show
+         * that: a record naming rows that no longer exist counts the same as
+         * one naming rows that do.
+         */
+        auto image_spill_rows_for_test() const
+        {
+                auto rows = std::vector<std::pair<long, long>>{};
+                for (auto const& [priority, spill] : m_image_spill)
+                        rows.emplace_back(spill.top, spill.bottom);
+                return rows;
+        }
 
         /* For tests: the first row still held in memory. A read below this is
          * the only one that thaws, so it is the only one that can fault an
