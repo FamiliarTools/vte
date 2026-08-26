@@ -2775,6 +2775,70 @@ test_ring_image_spill_is_reclaimed(void)
         g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 0);
 }
 
+/* A rewrap renumbers the ring's rows from zero. A spill record's rows are the
+ * key reclamation decides on, so they have to be renumbered with it.
+ *
+ * Whatever else a reflow does to a parked image, it must not leave the record
+ * naming a row outside the ring. A record that does is not merely stale - it
+ * compares as still-live against every row number the ring will ever have
+ * again, so it is never erased and the stream's tail never moves past it: a
+ * window resize turns the image stream into a leak for the rest of the
+ * session.
+ */
+static void
+test_ring_image_spill_rows_survive_rewrap(void)
+{
+        auto ring = Ring{64, true};
+        ring.set_visible_rows(24);
+
+        /* Put the image well down the ring, so that its row can still be inside
+         * the ring at the moment rows are dropping off the front. A record
+         * whose row had already left would be reclaimed on its own and would
+         * prove nothing about renumbering.
+         */
+        append_rows(ring, 40);
+        widen_row(ring, 30, 4);
+
+        place_image(ring, 30, 1);
+
+        /* Overfill the ring: rows now drop off the front, so m_start is above
+         * zero and the rewrap has something to renumber AWAY. With m_start
+         * still zero the old and new numbering coincide and the bug is
+         * invisible.
+         */
+        append_rows(ring, 30);
+        ring.evict_all_images_for_test();
+        ring.validate_images();
+
+        auto const shift = long(ring.delta());
+        g_assert_cmpint(shift, >, 0);
+
+        auto const before = ring.image_spill_rows_for_test();
+        g_assert_cmpuint(before.size(), ==, 1);
+        g_assert_cmpint(before[0].first, >=, shift);
+
+        /* A resize to the width it already has. Every row is four cells wide or
+         * less and hard wrapped, so no row is split or joined and the reflow
+         * moves each one down by exactly @shift - which makes the expected new
+         * row number arithmetic rather than a guess.
+         */
+        ring.rewrap_for_test(80);
+        ring.validate_images();
+
+        g_assert_cmpint(long(ring.delta()), ==, 0);
+
+        auto const after = ring.image_spill_rows_for_test();
+        g_assert_cmpuint(after.size(), ==, 1);
+        g_assert_cmpint(after[0].first, ==, before[0].first - shift);
+        g_assert_cmpint(after[0].second, ==, before[0].second - shift);
+
+        /* And the renumbering is what lets reclamation work: push that row out
+         * of the ring and the record has to go, which it cannot do while it is
+         * holding a number from a ring that no longer exists.
+         */
+        append_rows(ring, 4096);
+        g_assert_cmpuint(ring.image_spill_count_for_test(), ==, 0);
+}
 
 static void
 test_ring_image_limit_is_enforced(void)
@@ -3300,7 +3364,6 @@ test_ring_rewrap_needs_the_boundary_above_torn(void)
         }
 }
 
-
 static void
 test_ring_rewrap_drops_before_the_map_is_rebuilt(void)
 {
@@ -3586,6 +3649,8 @@ main(int argc,
         g_test_add_func("/vte/ring/image/unrecoverable-reads-back-where-it-froze",
                         test_ring_image_unrecoverable_still_reads_back_where_it_froze);
         g_test_add_func("/vte/ring/image/spill-is-reclaimed", test_ring_image_spill_is_reclaimed);
+        g_test_add_func("/vte/ring/image/spill-rows-survive-rewrap",
+                        test_ring_image_spill_rows_survive_rewrap);
 
         g_test_add_func("/vte/ring/image/limit-is-enforced", test_ring_image_limit_is_enforced);
         g_test_add_func("/vte/ring/image/limit-zero-disables", test_ring_image_limit_zero_disables);

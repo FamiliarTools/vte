@@ -797,6 +797,7 @@ Ring::restore_image(size_t priority) /* throws */
         auto const width_px = int(record.width_px);
         auto const height_px = int(record.height_px);
         auto const left_cells = int(record.left_cells);
+
         auto const top_cells = int(record.top_cells);
         auto const cell_width = int(record.cell_width);
         auto const cell_height = int(record.cell_height);
@@ -1066,6 +1067,148 @@ Ring::drop_images_after(row_t row) noexcept
         }
 }
 
+bool
+Ring::image_rows_survive_rewrap(long top,
+                                long bottom,
+                                column_t columns) noexcept
+{
+        /* Whether the physical rows [@top, @bottom] come through a reflow to
+         * @columns unchanged, which is the condition under which re-anchoring
+         * only the top row is a truthful description of what happened to the
+         * rectangle. The rule itself is spelled out at the caller below; it
+         * lives here because it has to be asked of images that are no longer
+         * resident too, where there is no Image object to ask.
+         */
+        auto record = RowRecord{};
+
+        if (top > long(m_start) &&
+            (!read_row_record(&record, row_t(top - 1)) ||
+             record.soft_wrapped))
+                return false;
+
+        for (auto row = top; row <= bottom; ++row) {
+                /* A row outside the ring has no record to judge it by, and
+                 * the image has already lost it in any case.
+                 */
+                if (row < long(m_start) || row >= long(m_end) ||
+                    !read_row_record(&record, row_t(row)) ||
+                    record.soft_wrapped ||
+                    column_t(record.width) > columns)
+                        return false;
+        }
+
+        return true;
+}
+
+/*
+ * Work out where each spilled image's rows are about to land, and drop the
+ * records that are not going to land anywhere.
+ *
+ * This is the spill's half of the reflow. A spill record remembers the ring
+ * rows its pixels covered, and those rows are what reclaim_image_spill()
+ * decides on: once every row naming an image is gone, its bytes can leave the
+ * stream. rewrap() renumbers the whole ring from zero, so a record left holding
+ * its old numbers describes rows that do not exist, compares as still-live
+ * against every future row number, and pins the stream's tail for the rest of
+ * the session.
+ *
+ * Renumbering is possible because a spilled image is keyed on the same thing a
+ * resident one is - a ring row - and that row still has a frozen record and a
+ * text offset right up until the new row stream replaces the old one. Nothing
+ * about the image's own storage is needed. So the mapping is taken here, before
+ * the reflow starts, and applied by rewrap_spills_in_range() as the new rows are
+ * produced.
+ *
+ * The alternative - dropping every spill record at a reflow - would be cheap and
+ * would also stop the growth, but it would throw away the pixels of images the
+ * user can still scroll back to, on every window resize. Renumbering costs one
+ * text-offset lookup per parked image and keeps them.
+ *
+ * Returns the plan in text-offset order. Must run after the freeze and before
+ * the new row stream is installed.
+ */
+std::vector<Ring::SpillRewrap>
+Ring::plan_spill_rewrap(column_t columns) noexcept
+{
+        auto plan = std::vector<SpillRewrap>{};
+
+        for (auto it = m_image_spill.begin(); it != m_image_spill.end(); ) {
+                auto const& spill = it->second;
+                auto ofs = CellTextOffset{};
+
+                /* The same delete-on-tear rule the resident images get: an
+                 * image whose covered rows the reflow rewrites no longer lines
+                 * up with the text it was emitted beside, and restoring it later
+                 * would paint it across whatever moved underneath.
+                 */
+                if (!image_rows_survive_rewrap(spill.top, spill.bottom, columns) ||
+                    spill.top < long(m_start) ||
+                    spill.top >= long(m_end) ||
+                    !frozen_row_column_to_text_offset(spill.top, 0, &ofs)) {
+                        it = m_image_spill.erase(it);
+                        continue;
+                }
+
+                plan.push_back(SpillRewrap{ofs.text_offset,
+                                           it->first,
+                                           spill.bottom - spill.top});
+                ++it;
+        }
+
+        std::sort(plan.begin(), plan.end(),
+                  [](SpillRewrap const& a, SpillRewrap const& b) {
+                          return a.text_offset < b.text_offset;
+                  });
+
+        return plan;
+}
+
+/*
+ * Re-anchor the spilled images whose old top row falls in [@text_start_ofs,
+ * @text_end_ofs), the same range and the same forward pass that
+ * rewrap_images_in_range() uses for the resident ones. @cursor is carried across
+ * the calls of one rewrap.
+ *
+ * Only the top moves, and the height comes along with it: the reflow does not
+ * change the picture, and the records that get this far are exactly the ones
+ * whose rows the reflow leaves alone.
+ */
+void
+Ring::rewrap_spills_in_range(std::vector<SpillRewrap> const& plan,
+                             size_t& cursor,
+                             size_t text_start_ofs,
+                             size_t text_end_ofs,
+                             row_t new_row_index) noexcept
+{
+        while (cursor < plan.size()) {
+                auto const& entry = plan[cursor];
+
+                /* Not this new row's text yet; a later call will place it. */
+                if (entry.text_offset >= text_end_ofs)
+                        return;
+
+                ++cursor;
+
+                /* Before the range: the ranges tile the whole text stream and
+                 * this pass runs in offset order, so this is unreachable. Drop
+                 * rather than skip, so that no record can survive holding a row
+                 * number from the old ring - which is the whole failure this
+                 * function exists to prevent.
+                 */
+                if (entry.text_offset < text_start_ofs) {
+                        m_image_spill.erase(entry.priority);
+                        continue;
+                }
+
+                auto const it = m_image_spill.find(entry.priority);
+                if (it == m_image_spill.end())
+                        continue;
+
+                it->second.top = long(new_row_index);
+                it->second.bottom = long(new_row_index) + entry.span;
+        }
+}
+
 void
 Ring::drop_images_torn_by_rewrap(column_t columns) noexcept
 {
@@ -1107,26 +1250,8 @@ Ring::drop_images_torn_by_rewrap(column_t columns) noexcept
                 auto const image = it->second;
                 auto const top = long(image->get_top());
                 auto const bottom = long(image->get_bottom());
-                auto record = RowRecord{};
-                auto survives = true;
 
-                if (top > long(m_start) &&
-                    (!read_row_record(&record, row_t(top - 1)) ||
-                     record.soft_wrapped))
-                        survives = false;
-
-                for (auto row = top; survives && row <= bottom; ++row) {
-                        /* A row outside the ring has no record to judge it by, and
-                         * the image has already lost it in any case.
-                         */
-                        if (row < long(m_start) || row >= long(m_end) ||
-                            !read_row_record(&record, row_t(row)) ||
-                            record.soft_wrapped ||
-                            column_t(record.width) > columns)
-                                survives = false;
-                }
-
-                if (survives) {
+                if (image_rows_survive_rewrap(top, bottom, columns)) {
                         ++it;
                         continue;
                 }
@@ -3157,6 +3282,13 @@ Ring::rewrap(column_t columns,
 	drop_images_torn_by_rewrap(columns);
 
 	auto image_it = m_image_by_top_map.begin();
+
+	/* The spilled images get the same treatment, from the same row records.
+	   They are not in the by-top map - being spilled is precisely being out
+	   of it - so they need their own plan, taken here while the old row
+	   stream can still answer where their rows are. */
+	auto spill_plan = plan_spill_rewrap(columns);
+	auto spill_cursor = size_t{0};
 #endif
 
 	/* For markers given as (row,col) pairs find their offsets in the text stream.
@@ -3314,6 +3446,11 @@ Ring::rewrap(column_t columns,
                                                                        new_record.text_start_offset,
                                                                        text_offset,
                                                                        new_row_index);
+						rewrap_spills_in_range(spill_plan,
+                                                                       spill_cursor,
+                                                                       new_record.text_start_offset,
+                                                                       text_offset,
+                                                                       new_row_index);
 #endif
 
 						new_row_index++;
@@ -3370,6 +3507,11 @@ Ring::rewrap(column_t columns,
 
 #if WITH_SIXEL
 		rewrap_images_in_range(image_it,
+                                       new_record.text_start_offset,
+                                       paragraph_end_text_offset,
+                                       new_row_index);
+		rewrap_spills_in_range(spill_plan,
+                                       spill_cursor,
                                        new_record.text_start_offset,
                                        paragraph_end_text_offset,
                                        new_row_index);
@@ -3431,6 +3573,22 @@ Ring::rewrap(column_t columns,
          * entry. /vte/ring/rewrap-drops-before-the-map-is-rebuilt holds the order.
          */
         drop_images_before(m_start);
+
+        /* Any planned record the pass never reached has no new row: its old top
+         * mapped past the end of the text the reflow produced, so there is no
+         * row left to name it. Drop it rather than leave it holding an old
+         * number, which is what would pin the stream.
+         */
+        for (auto unplaced = spill_cursor; unplaced < spill_plan.size(); unplaced++)
+                m_image_spill.erase(spill_plan[unplaced].priority);
+
+        /* And now that every surviving record is in the new numbering, the same
+         * rule that runs when a row scrolls out can be asked again - this time
+         * about rows it can actually compare against. Without this the bytes of
+         * everything just dropped stay in the stream until some later scroll
+         * happens to move the tail.
+         */
+        reclaim_image_spill(m_start);
 #endif
 
 	_vte_debug_print(vte::debug::category::RING, "Ring after rewrapping:");
