@@ -43,10 +43,14 @@
 # the file was ignored.
 #
 # The verdict is the reported geometry itself, compared against the geometry a
-# clean run reports, rather than the tested script's own pass or fail. A leak
-# that moves the cell without moving it far enough to cross
-# VTE_SIXEL_MAX_WIDTH leaves that script passing while it is no longer
-# measuring what it thinks it is, and this file is here to see exactly that.
+# clean run reports, rather than the tested script's own pass or fail. That cuts
+# both ways. A leak that moves the cell without moving it far enough to cross
+# VTE_SIXEL_MAX_WIDTH leaves that script passing while it is no longer measuring
+# what it thinks it is, and this file is here to see exactly that; and in the
+# other direction a non-zero exit is not evidence that anything was planted at
+# all, since a missing binary or a dead display produces one just as readily.
+# Both directions are answered from the same observable - the window CSI 14t
+# measured, which the tested script prints whether it passes or fails.
 #
 # usage: xtsmgraphics-isolation-test.sh <vte-app> <srcdir>
 
@@ -121,9 +125,26 @@ run_tested() {
         STATUS=$?
 }
 
-# The geometry the last run reported, or nothing when it reported none.
+# The geometry the last run reported, or nothing when it reported none. This is
+# the AGREED geometry, so it exists only on a run where the two channels agreed.
 reported_geometry() {
         awk '/agrees with CSI 14t at/ { print $NF }' "$WORK/out"
+}
+
+# The window as CSI 14t measured it on the last run, whether or not
+# XTSMGRAPHICS agreed with it.
+#
+# This is what a planted file MOVES, and it survives the tested script failing:
+# a leak large enough to push the width past VTE_SIXEL_MAX_WIDTH makes
+# XTSMGRAPHICS clamp while CSI 14t reports the window unclamped, so the script
+# reports the disagreement and exits non-zero - and the CSI 14t figure is still
+# there, at the end of that line. Both lines end in the number, and a run that
+# produced neither - no reply parsed, no app, no display - yields nothing here,
+# which is the whole reason the potency probes read this and not the exit
+# status.
+window_geometry() {
+        awk '/agrees with CSI 14t at/ { print $NF }
+             /but CSI 14t says/       { print $NF }' "$WORK/out"
 }
 
 skip_if_skipped() {
@@ -138,17 +159,38 @@ bail() { echo "FAIL: $1"; sed 's/^/  /' "$WORK/out"; exit 1; }
 # The last run must have reported the same geometry the clean run did. Both the
 # status and the number are checked: a script that fell over reports no
 # geometry at all, and an empty string must never read as agreement.
+#
+# The two are reported apart. They are different events - one says the tested
+# script did not pass under the planted file, the other says it passed while
+# measuring a cell that had moved - and a single message for both leaves a red
+# run saying which file leaked but not what the leak did.
 require_same_geometry() {
-        [ "$STATUS" = 0 ] || bail "$1"
-        [ "$(reported_geometry)" = "$CLEAN" ] || bail "$1"
+        [ "$STATUS" = 0 ] ||
+                bail "$1 made the XTSMGRAPHICS test fail, so it reached the app"
+        [ "$(reported_geometry)" = "$CLEAN" ] ||
+                bail "$1 moved the reported geometry to $(reported_geometry), where the clean run reported $CLEAN"
 }
 
-# The last run must NOT have come out where the clean run did - either it
-# reported a different geometry, or the leak moved the cell far enough that the
-# two channels stopped agreeing and it failed outright. Both mean the planted
-# file reached the app.
+# The last run must have MEASURED A DIFFERENT WINDOW than the clean run did.
+#
+# That is the observable, and nothing weaker will do. This used to accept any
+# non-zero exit as proof the planted file had reached the app, which is a claim
+# about the file made from a number that says nothing about it: a missing
+# binary, an Xvfb that would not start, a wrapper with a typo in it all exit
+# non-zero, and every probe standing on this one would then be measuring
+# isolation from a file that never got anywhere near the terminal.
+#
+# So read the geometry CSI 14t reported - which the tested script prints
+# whether it passed or failed - and require it to exist and to have moved.
+#   $1 what was planted, as the subject of a sentence
+#   $2 what goes vacuous if it turns out to be inert
 require_moved() {
-        [ "$STATUS" = 0 ] && [ "$(reported_geometry)" = "$CLEAN" ] && bail "$1"
+        local moved
+        moved=$(window_geometry)
+        [ -n "$moved" ] ||
+                bail "$1 produced no window geometry at all, so nothing was measured about it and $2"
+        [ "$moved" = "$CLEAN_WINDOW" ] &&
+                bail "$1 left the window at $moved, exactly where the clean run had it, so $2"
         return 0
 }
 
@@ -160,6 +202,9 @@ skip_if_skipped
 CLEAN=$(reported_geometry)
 [ -n "$CLEAN" ] ||
         bail "the clean run reported no geometry, so there is nothing to compare against"
+# The same window read off the channel that survives a failing run; see
+# window_geometry. On the clean run the two channels agree, so this is $CLEAN.
+CLEAN_WINDOW=$(window_geometry)
 
 # ---------------------------------------------------------------- guard B ---
 
@@ -178,7 +223,7 @@ chmod +x "$WORK/app-with-config"
 
 run_tested "$WORK/app-with-config"
 skip_if_skipped
-require_moved "the planted vteapp.ini does not change the geometry, so the guard B probe is vacuous"
+require_moved "the forced vteapp.ini" "the guard B probe below it is vacuous"
 
 # Guard B itself. The wrapper puts the vteapp.ini back where the app looks for
 # it, so the scratch home cannot be what saves this run; --no-load-config is
@@ -191,7 +236,7 @@ make_home_wrapper "$INI_HOME" "$WORK/app-in-ini-home"
 
 run_tested "$WORK/app-in-ini-home"
 skip_if_skipped
-require_same_geometry "a vteapp.ini in the app's own config dir changed the reported geometry"
+require_same_geometry "a vteapp.ini in the app's own config dir"
 
 # ---------------------------------------------------------------- guard A ---
 
@@ -204,7 +249,7 @@ make_home_wrapper "$FC_HOME" "$WORK/app-in-fc-home"
 
 run_tested "$WORK/app-in-fc-home"
 skip_if_skipped
-require_moved "the planted fontconfig does not change the geometry, so the guard A probes are vacuous"
+require_moved "the forced fontconfig" "the guard A probes below it are vacuous"
 
 # Guard A, on each of the two paths the config dir resolves from. No vteapp.ini
 # is planted under either, so removing --no-load-config from the tested script
@@ -216,7 +261,7 @@ plant_fontconfig "$XDG"
 
 run_tested "$APP" "HOME=$EMPTY_HOME" "XDG_CONFIG_HOME=$XDG"
 skip_if_skipped
-require_same_geometry "a fontconfig in \$XDG_CONFIG_HOME changed the reported geometry"
+require_same_geometry "a fontconfig in \$XDG_CONFIG_HOME"
 
 FC_ONLY_HOME="$WORK/home"
 mkdir -p "$FC_ONLY_HOME/.config"
@@ -224,7 +269,7 @@ plant_fontconfig "$FC_ONLY_HOME/.config"
 
 run_tested "$APP" -u XDG_CONFIG_HOME "HOME=$FC_ONLY_HOME"
 skip_if_skipped
-require_same_geometry "a fontconfig in \$HOME/.config changed the reported geometry"
+require_same_geometry "a fontconfig in \$HOME/.config"
 
 echo "PASS: the planted vteapp.ini and fontconfig each do change the geometry when they reach the app"
 echo "PASS: a vteapp.ini in the app's own config dir does not reach the XTSMGRAPHICS test"

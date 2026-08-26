@@ -400,6 +400,17 @@ AE=$(tail -n 1 "$WORK/im.log" | awk '{print $1}')
         broken_comparison "the count of differing pixels came back as '$AE'"
 
 # Compared as numbers: the count arrives in whatever notation the build uses.
+#
+# The two cross-checks below are the two ways the count and the exit status can
+# contradict each other, and they are not worth the same. The first decides the
+# VERDICT: a count of zero is the only thing that prints PASS here, so without
+# it a comparator that never agreed with the golden passes the case. The second
+# decides only WHICH FAILURE IS NAMED - the count is non-zero either way, so the
+# run fails either way; what the check stops is that failure reading as "the
+# frame differs from the golden" and sending a reader after a rendering bug
+# nothing has established. render-gate-test.sh drives one scenario at each,
+# asserting the verdict and the words for the first and the words for the
+# second.
 if awk -v ae="$AE" 'BEGIN { exit !(ae == 0) }'; then
         [ "$CMP" = 0 ] ||
                 broken_comparison "compare found no differing pixel yet exited $CMP"
@@ -416,6 +427,12 @@ echo "FAIL: $CASE differs from the golden (AE=$AE)"
 # tree is writable, and is simply refused on the out-of-tree, read-only-srcdir
 # builds distributors use. The working directory meson gives the test is in
 # the build tree; VTE_TEST_ARTIFACT_DIR overrides it.
+#
+# Keeping the frame at all is the point - a pixel failure is unreadable without
+# it - so the build tree accumulating one per failing case is the intended
+# outcome, not litter to be suppressed. render-gate-test.sh holds both halves:
+# that the override is honoured, and that neither path lands among the
+# fixtures.
 ARTIFACT_DIR=${VTE_TEST_ARTIFACT_DIR:-$PWD}
 ACTUAL="$ARTIFACT_DIR/$CASE-$ARM.actual.png"
 if cp "$WORK/crop.png" "$ACTUAL" 2>/dev/null; then
