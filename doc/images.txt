@@ -95,20 +95,27 @@ Those three are not the whole of it. m_image_map owns the Images (it is the
 only map of unique_ptr; m_image_by_top_map holds bare pointers), so every free
 is an erase or a clear on it, and there are five such sites:
 
-    $ grep -n 'm_image_map\.\(erase\|clear\)' src/*.cc src/*.hh
-    src/ring.cc:507   image_gc_region()
-    src/ring.cc:990   image_gc()
-    src/ring.cc:1010  erase_image()
-    src/ring.cc:2127  reset()
-    src/ring.cc:3265  append_image(), pool-allocation-failure path
+    $ grep -h 'm_image_map\.\(erase\|clear\)' src/*.cc src/*.hh
+                            rit = image_map_type::reverse_iterator{m_image_map.erase(std::next(rit).base())};
+                    m_image_map.erase(victim);
+            m_image_map.erase(priority);
+            m_image_map.clear();
+                    m_image_map.erase(it);
 
-erase_image() is a helper rather than a policy. That grep returns nine call
-sites, in seven functions:
+In source order those sit in image_gc_region(), image_gc(), erase_image(),
+reset(), and append_image()'s pool-allocation-failure path. Re-run the grep
+with -n for the current line numbers; they are deliberately not written down
+here, because a line number is stale the moment anything above it moves.
 
-    $ grep -n '= erase_image(it)' src/ring.cc
-    drop_images_before(), drop_images_after(), drop_images_torn_by_rewrap(),
-    erase_images_in_rect(), shift_images_for_insert(),
-    shift_images_for_remove(), rewrap_images_in_range() (three sites)
+erase_image() is a helper rather than a policy, and it has nine call sites:
+
+    $ grep -c '= erase_image(it)' src/ring.cc
+    9
+
+They live in seven functions - drop_images_before(), drop_images_after(),
+drop_images_torn_by_rewrap(), erase_images_in_rect(),
+shift_images_for_insert(), shift_images_for_remove(), and
+rewrap_images_in_range() (three of the nine).
 
 So the policies that decide an image should go are: the memory and count budget
 (image_gc()), rows leaving either end of the ring (drop_images_before(),
@@ -126,10 +133,18 @@ contained in that union - an image drawn completely over by later ones.
 The pixels are spilled first on exactly two of those paths, and it is a shorter
 list than the freeing one:
 
-    $ grep -n 'spill_image(' src/*.cc src/*.hh
-    src/ring.cc:677   the definition
-    src/ring.cc:985   image_gc()
-    src/ring.cc:1042  drop_images_before()
+    $ grep 'spill_image(' src/*.cc src/*.hh
+    src/ring.cc:Ring::spill_image(vte::image::Image const* image) noexcept
+    src/ring.cc: * Rebuild an image previously written by spill_image(), or nullptr if it was
+    src/ring.cc: * same eviction; spill_image() is idempotent so that cycle is stable.
+    src/ring.cc:                spill_image(image.get());
+    src/ring.cc:                spill_image(image);
+    src/ring.hh:        void spill_image(vte::image::Image const* image) noexcept;
+    src/ring-test.cc:         * Held: guarding the spill_image() call in image_gc() with
+
+Seven lines, of which exactly two are calls: the fourth is in image_gc() and
+the fifth is in drop_images_before(). The rest are the definition, its
+declaration, and prose.
 
 Every other path above frees without spilling, image_gc_region() among them.
 What image_gc() and drop_images_before() have in common is that the row may yet

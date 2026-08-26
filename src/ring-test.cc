@@ -1054,8 +1054,10 @@ test_attr_stream_stripe_is_one_run(void)
          * from the run-length key must collapse the whole row to a constant
          * number of records - the same as a row with no image at all.
          *
-         * Without this, a single max-size image would cost one 26-byte record
-         * per cell in the encrypted append-only scrollback stream.
+         * Without this, a single max-size image would cost one record per
+         * cell in the encrypted append-only scrollback stream. The byte
+         * figures are not written down here; the g_test_message below prints
+         * what they actually are on every run.
          */
         auto const uniform = freeze_cost_of_row(LinkPattern::Uniform);
         auto const stripe = freeze_cost_of_row(LinkPattern::TileColumn);
@@ -1493,9 +1495,6 @@ test_ring_image_emitted_at_the_bottom_survives(void)
          * makes each of them the red run for exactly one guard, and the last
          * block is the control for the third. The test's name is the
          * trajectory they are all cut from, not the whole of what it checks.
-         *
-         * The figures are the bands fixture's, measured: a 4-row image at row
-         * 0 of a 1-row ring, inserts at 1, 2 and 3 while it still straddles.
          */
 
         /* The emission itself, both guards in place. Green either way; it is
@@ -1516,9 +1515,9 @@ test_ring_image_emitted_at_the_bottom_survives(void)
         }
 
         /* The exemption's own half: an image straddling the END of the ring
-         * that is NOT the one being placed. Measured: with the exemption taken
-         * out this goes red (image_map().size() == 1: (0 == 1)), and with the
-         * placing check taken out instead it stays green.
+         * that is NOT the one being placed. Delete the `position == m_end`
+         * early return and this block goes red; delete the destroying walk's
+         * placing check instead and it stays green.
          *
          * Nothing in the terminal is known to reach this state - see the note
          * in shift_images_for_insert(). This says what the guard DOES, not
@@ -1540,10 +1539,10 @@ test_ring_image_emitted_at_the_bottom_survives(void)
         }
 
         /* The marker's own half: the image being placed, at a seam that is NOT
-         * the end of the ring, so the exemption is not taken. Measured: with
-         * the placing check taken out this goes red (image_map().size() == 1:
-         * (0 == 1)), and with the exemption taken out instead it stays green.
-         * The control below says the destroying rule really does apply at this
+         * the end of the ring, so the exemption is not taken. Delete the
+         * destroying walk's placing check and this block goes red; delete the
+         * `position == m_end` early return instead and it stays green. The
+         * control below says the destroying rule really does apply at this
          * seam, rather than it being one the walk never looks at.
          */
         {
@@ -1574,6 +1573,69 @@ test_ring_image_emitted_at_the_bottom_survives(void)
 
                 g_assert_cmpuint(ring.image_map().size(), ==, 0);
                 g_assert_cmpuint(ring.image_pool().live_count(), ==, 0);
+        }
+}
+
+static void
+test_ring_image_placing_image_is_not_reanchored(void)
+{
+        /* shift_images_for_insert() reads the placing marker in BOTH of its
+         * walks, and the two reads cover different things. The destroying walk
+         * only ever sees an image whose top is strictly ABOVE the seam, and
+         * /vte/ring/image/emitted-at-the-bottom-survives holds that read. This
+         * is the other one: an image whose top is at or BELOW the seam, which
+         * the destroying walk's loop condition never reaches at all, and which
+         * the reanchoring walk would otherwise push one row down with its rows.
+         *
+         * What the marker means is the same in both places - an image being
+         * placed is held out of the shifting rules, and its anchor is the
+         * emitter's to set until the PlacingGuard drops - but nothing in the
+         * destroying walk's read implies this one, so it needs its own case.
+         *
+         * As with the exemption's half above, no terminal path is known to
+         * reach this state - the emission trajectory's seams are all below the
+         * image's top, not above it. This says what the guard does, not that a
+         * sixel depends on it.
+         */
+
+        /* Seam above the placing image's top. It must not move. */
+        {
+                auto ring = Ring{24, false};
+                ring.set_visible_rows(24);
+                append_rows(ring, 4);
+
+                anchor_straddling_image(ring, 2);
+                g_assert_nonnull(ring.placing_image());
+
+                /* 1 <= top 2, and 1 is not the end (4). */
+                ring.insert(1, 0);
+
+                g_assert_cmpuint(ring.image_map().size(), ==, 1);
+
+                auto const* const image = ring.image_map().begin()->second.get();
+                g_assert_cmpint(long(image->get_top()), ==, 2);
+
+                ring.set_placing_image(nullptr);
+        }
+
+        /* The control: the same seam and the same image, unmarked. It moves -
+         * so the walk really does reach this entry, and the block above is not
+         * green merely because nothing looked at it.
+         */
+        {
+                auto ring = Ring{24, false};
+                ring.set_visible_rows(24);
+                append_rows(ring, 4);
+
+                anchor_straddling_image(ring, 2);
+                ring.set_placing_image(nullptr);
+
+                ring.insert(1, 0);
+
+                g_assert_cmpuint(ring.image_map().size(), ==, 1);
+
+                auto const* const image = ring.image_map().begin()->second.get();
+                g_assert_cmpint(long(image->get_top()), ==, 3);
         }
 }
 
@@ -3039,6 +3101,8 @@ main(int argc,
 
         g_test_add_func("/vte/ring/image/emitted-at-the-bottom-survives",
                         test_ring_image_emitted_at_the_bottom_survives);
+        g_test_add_func("/vte/ring/image/placing-image-is-not-reanchored",
+                        test_ring_image_placing_image_is_not_reanchored);
         g_test_add_func("/vte/ring/image/pixels-survive-eviction", test_ring_image_pixels_survive_eviction);
         g_test_add_func("/vte/ring/image/unrecoverable-reads-back-where-it-froze",
                         test_ring_image_unrecoverable_still_reads_back_where_it_froze);

@@ -1314,10 +1314,10 @@ Ring::image_has_any_cell(vte::image::Image const* image) const noexcept
  * append_image() anchors the image at the cursor BEFORE the rows it covers
  * exist, and erase_image_rect() then appends those rows one at a time; every
  * one of those appends inserts at m_end with the image's bottom already at or
- * past it. Measured on the bands render fixture: a 4-row image anchored at row
- * 0 of a 1-row ring sees inserts at 1, 2 and 3 while it is still straddling,
- * and is the image being placed at each of them. From row 4 on its bottom is
- * behind the seam and it is an ordinary resident.
+ * past it, and the image is the one being placed at each of them. Once the
+ * last of its rows exists its bottom is behind the seam and it is an ordinary
+ * resident. /vte/ring/image/emitted-at-the-bottom-survives replays that
+ * trajectory row by row rather than describing it.
  *
  * TWO guards spare it, and they are kept as a pair on purpose. The exemption
  * above returns before the walks whenever the insert is at the end of the
@@ -1325,21 +1325,27 @@ Ring::image_has_any_cell(vte::image::Image const* image) const noexcept
  * image out of its own emission - is read by both walks below. What is known
  * about them, and it is only this:
  *
- *  - Each alone holds the whole suite green. Removing only the exemption,
- *    gtk3 Ok:34 Fail:0; removing only the placing check, gtk3 Ok:34 Fail:0;
- *    removing both, gtk3 Fail:10, every sixel render golden.
- *  - They do NOT cover the same set. The exemption spares every image
- *    straddling the end of the ring, whoever it belongs to; the marker spares
- *    only the one image being placed, at any seam. So neither is a restatement
- *    of the other, and dropping either is a behaviour change rather than a
- *    tidy-up.
+ *  - They are keyed on different things, so neither contains the other. The
+ *    exemption is keyed on the SEAM: it spares every image the insert at the
+ *    end of the ring would otherwise touch, whoever the image belongs to and
+ *    marked or not. The marker is keyed on the IMAGE: it spares the one image
+ *    being placed, at any seam, including seams that are not the end of the
+ *    ring. An unmarked straddler at the end of the ring is in the exemption's
+ *    set alone; the placing image at an interior seam is in the marker's set
+ *    alone. Dropping either is a behaviour change rather than a tidy-up.
  *  - Which of the two actually carries the emission case in the terminal is
  *    NOT established here. On the trajectory above they both apply to every
- *    one of the three appends.
+ *    one of the three appends, which is why the emission alone cannot hold
+ *    either of them and the tests named below reach for the halves instead.
  *
- * /vte/ring/image/emitted-at-the-bottom-survives holds each of them by the
- * half of the set the other does not reach, so either one taken out of this
- * function on its own goes red.
+ * /vte/ring/image/emitted-at-the-bottom-survives holds the exemption and the
+ * destroying walk's marker read, each by the part of the set the other does
+ * not reach. /vte/ring/image/placing-image-is-not-reanchored holds the
+ * reanchoring walk's marker read, at a seam the destroying walk's loop
+ * condition never reaches. Take any one of the three out on its own and the
+ * corresponding test goes red; the tests carry those measurements so this
+ * comment does not have to, and so a change that invalidates them cannot pass
+ * silently.
  *
  * The keys of m_image_by_top_map are the images' top rows, and no image can be
  * above row 0: the rules only ever move an image between existing rows, and
@@ -1978,7 +1984,8 @@ Ring::thaw_row(row_t position,
                 /* Recover this cell's tile column by counting from the run's
                  * first cell. The column is not stored per cell on purpose:
                  * doing so would make the run-length key vary per cell and
-                 * cost one 26-byte record each, measured.
+                 * cost one record each. /vte/ring/attr-stream/stripe-is-one-run
+                 * holds that, and prints both rows' actual byte costs.
                  */
                 if (G_UNLIKELY (cell.attr.image())) {
                         auto const base = cell.attr.image_ref();
