@@ -951,9 +951,20 @@ Ring::image_gc(vte::image::Image const* exempt) noexcept
 
                 auto& image = victim->second;
 
-                /* Evicted for memory, not erased by the user: rows naming it
-                 * can still be thawed, so keep the pixels where they cost
-                 * disk instead of RAM.
+                /* Evicted for memory, not erased by the user, so keep the
+                 * pixels where they cost disk instead of RAM.
+                 *
+                 * Unconditional, and deliberately not read as "rows naming it
+                 * can still be thawed" - that is true of the recoverable victim
+                 * the loop prefers, and false of the unrecoverable one it falls
+                 * back on when nothing recoverable is left. That fallback's
+                 * pixels go to the stream as well and no read ever comes for
+                 * them: its rows have not frozen yet, and the reference they
+                 * freeze after note_image_freed() below retires the pool id
+                 * resolves to an image no longer in the pool. The waste is
+                 * bounded, not leaked - reclaim_image_spill() drops the record
+                 * and advances the tail past it once the image's bottom row has
+                 * left the ring.
                  */
                 spill_image(image.get());
 

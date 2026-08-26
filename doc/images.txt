@@ -88,8 +88,18 @@ The stripe is the unit of a RUN, in two places:
     on GTK3, a GdkTexture on GTK4.
 
 The stripe is NOT the unit of lifetime. Lifetime is per IMAGE: m_image_map,
-image_gc() and drop_images_before() all work on whole Images. Nothing in the
-tree frees one tile row of an image and keeps another.
+image_gc(), image_gc_region() and drop_images_before() all work on whole
+Images. Nothing in the tree frees one tile row of an image and keeps another.
+
+Those three are the whole of it, and each answers to a different thing:
+image_gc() to the memory and count budget, drop_images_before() to rows leaving
+the ring, and image_gc_region() (src/ring.cc) to being invisible. The last is
+the one easily missed: append_image() runs it on every placement, and it walks
+m_image_map newest-first accumulating a cairo_region_t of the rectangles it has
+seen, freeing any image whose own rectangle is already contained in that union
+- an image drawn completely over by later ones. It is also the only one of the
+three that does not spill the pixels first, because an image nothing can see is
+not one anybody scrolls back to.
 
 
 Where the bytes live
@@ -321,6 +331,14 @@ would raise the limit to whatever it happened to need
 image's pixels are gone for good, and gone for the scrollback too: the
 reference the row freezes later resolves through the pool to an image that is
 no longer in it, and the cells draw as background.
+
+The pixels are written out anyway. image_gc() calls spill_image() on every
+victim it takes, without asking image_is_recoverable() first, so the
+unrecoverable one's bytes are appended to m_image_stream too - and no read ever
+comes for them, for the reason just given. They are bounded rather than leaked:
+reclaim_image_spill() drops the record, and advances the stream's tail past it,
+once the image's bottom row has left the ring. Until then they are disk spent
+on a picture nothing can reach.
 
 vte_terminal_set_image_limit()'s documentation does state this.
 
