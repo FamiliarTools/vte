@@ -1394,6 +1394,314 @@ test_ring_image_torn_by_horizontal_scroll(void)
         }
 }
 
+/* Move the cells of the inclusive rectangle [@top, @bottom] x [@left, @right]
+ * to the rectangle of the same size whose top left corner is (@dest_top,
+ * @dest_left), exactly as Terminal::copy_rect() does for DECCRA: the whole
+ * destination is detached from its images FIRST, and only then is the source
+ * read row by row and written over the destination.
+ *
+ * The source is not destroyed, and the two rectangles may overlap. As with
+ * scroll_row_cells() the ring does not do this itself - the terminal does - so
+ * a test of what the ring owes the copy has to perform the copy, in the order
+ * the terminal performs it, or it is not testing the terminal's problem.
+ */
+static void
+copy_rect_cells(Ring& ring,
+                long top,
+                long bottom,
+                long left,
+                long right,
+                long dest_top,
+                long dest_left,
+                std::vector<vte::image::Image*> const& exempt)
+{
+        auto const span = right - left + 1;
+        auto const row_delta = dest_top - top;
+        auto const col_delta = dest_left - left;
+
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+        ring.erase_images_in_rect(dest_top, dest_top + (bottom - top),
+                                  dest_left, dest_left + span - 1,
+                                  &damage_top, &damage_bottom, exempt);
+
+        auto rows = std::vector<std::vector<VteCell>>{};
+        for (auto r = top; r <= bottom; r++) {
+                auto* const src = ring.index_writable(r);
+                auto v = std::vector<VteCell>{};
+                for (auto c = left; c <= right; c++)
+                        v.push_back(c < long(src->len) ? src->cells[c] : basic_cell);
+                rows.push_back(std::move(v));
+        }
+
+        for (auto i = 0u; i < rows.size(); i++) {
+                auto* const dst = ring.index_writable(top + long(i) + row_delta);
+                g_assert_cmpint(long(dst->len), >=, left + col_delta + span);
+                memcpy(dst->cells + left + col_delta,
+                       rows[i].data(),
+                       span * sizeof(VteCell));
+        }
+}
+
+/* Count every cell in the ring that still names SOME image, whichever one. A
+ * copy legitimately spreads a picture over two images, so a count against one
+ * pool id cannot say whether the pixels survived.
+ */
+static int
+image_cell_count(Ring& ring)
+{
+        auto n = 0;
+
+        for (auto r = long(ring.delta()); r < long(ring.next()); r++) {
+                auto const* const row = ring.index(r);
+                if (row == nullptr)
+                        continue;
+
+                for (auto c = 0; c < row->len; c++) {
+                        if (row->cells[c].attr.image())
+                                n++;
+                }
+        }
+
+        return n;
+}
+
+/* DECCRA copies a rectangle of cells to another rectangle without destroying
+ * the source. The cells carry their own tiles and the draw reads the picture
+ * off the cells, so the copy already PAINTS at the destination for free - but
+ * the copied cells name an image anchored at the source, and
+ * validate_image_cells() requires a cell's column and row to agree with the
+ * image's own left and top. So the copy needs an image of its own: the source
+ * image translated by the rectangles' displacement, sharing its pixels.
+ */
+static void
+test_ring_image_copy_rect_duplicates_the_picture(void)
+{
+        auto const top = long{5};
+        auto const left = long{4};
+        auto const rows_tall = 2;
+        auto const cols_wide = 4;
+        auto const width = long{40};
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+        for (auto r = long{0}; r < 24; r++)
+                widen_row(ring, r, width);
+
+        auto* const image = place_and_stamp(ring, top, rows_tall, left, width);
+        auto const id = image->get_pool_id();
+
+        /* A copy that moves in BOTH axes at once and touches neither the
+         * source rows nor the source columns.
+         */
+        auto const dest_top = long{12};
+        auto const dest_left = long{20};
+
+        auto plan = ring.plan_image_copy(top, top + rows_tall - 1,
+                                         left, left + cols_wide - 1,
+                                         dest_top - top, dest_left - left);
+        copy_rect_cells(ring, top, top + rows_tall - 1,
+                        left, left + cols_wide - 1,
+                        dest_top, dest_left, plan.duplicates);
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+        g_assert_true(ring.apply_image_copy(plan, &damage_top, &damage_bottom));
+
+        ring.validate_images();
+
+        /* Two images now, sharing one set of pixels. */
+        g_assert_cmpuint(ring.image_map().size(), ==, 2);
+        g_assert_cmpint(image_cell_count(ring), ==, 2 * rows_tall * cols_wide);
+
+        /* The original did not move. */
+        g_assert_cmpint(image->get_top(), ==, top);
+        g_assert_cmpint(image->get_left(), ==, left);
+        auto const src_cells = image_cell_positions(ring, id);
+        g_assert_cmpuint(src_cells.size(), ==, rows_tall * cols_wide);
+
+        /* And the copy is the same picture, translated by the rectangles'
+         * displacement - which is what makes its cells legal where they are.
+         */
+        auto* const copy = ring.image_map().rbegin()->second.get();
+        g_assert_true(copy != image);
+        g_assert_cmpint(copy->get_top(), ==, dest_top);
+        g_assert_cmpint(copy->get_left(), ==, dest_left);
+        g_assert_true(copy->get_surface() == image->get_surface());
+
+        auto const dst_cells = image_cell_positions(ring, copy->get_pool_id());
+        g_assert_cmpuint(dst_cells.size(), ==, rows_tall * cols_wide);
+        for (auto r = 0; r < rows_tall; r++) {
+                for (auto c = 0; c < cols_wide; c++) {
+                        auto const it = dst_cells.find({uint32_t(r), uint32_t(c)});
+                        g_assert_true(it != dst_cells.end());
+                        g_assert_cmpint(it->second.first, ==, dest_top + r);
+                        g_assert_cmpint(it->second.second, ==, dest_left + c);
+                }
+        }
+}
+
+/* The two rectangles may overlap, and the destination is detached from its
+ * images before the source is read. When the overlap falls on the picture,
+ * that order took the very cells the copy was about to read: the source was
+ * holed and the copy carried the hole with it.
+ *
+ * Nothing about the model required that, because what the copy needs from the
+ * source is known before a single cell is written. The picture the copy will
+ * carry is decided up front, and the erase can then take whatever it likes.
+ */
+static void
+test_ring_image_copy_rect_overlapping_keeps_the_source(void)
+{
+        auto const top = long{5};
+        auto const left = long{4};
+        auto const rows_tall = 2;
+        auto const cols_wide = 4;
+        auto const width = long{40};
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+        for (auto r = long{0}; r < 24; r++)
+                widen_row(ring, r, width);
+
+        auto* const image = place_and_stamp(ring, top, rows_tall, left, width);
+        auto const id = image->get_pool_id();
+
+        /* Source cols 6..9, destination cols 8..11 on the same rows: the
+         * destination covers the source's last two columns, which hold the
+         * image's tiles 2 and 3.
+         */
+        auto const src_left = left + 2;
+        auto const dest_left = src_left + 2;
+
+        auto plan = ring.plan_image_copy(top, top + rows_tall - 1,
+                                         src_left, src_left + cols_wide - 1,
+                                         0, dest_left - src_left);
+        copy_rect_cells(ring, top, top + rows_tall - 1,
+                        src_left, src_left + cols_wide - 1,
+                        top, dest_left, plan.duplicates);
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+        g_assert_true(ring.apply_image_copy(plan, &damage_top, &damage_bottom));
+
+        ring.validate_images();
+
+        /* The source kept all four of its columns - the destination did not
+         * overwrite them - and the copy added the two it carried.
+         */
+        auto const src_cells = image_cell_positions(ring, id);
+        g_assert_cmpuint(src_cells.size(), ==, rows_tall * cols_wide);
+        for (auto r = 0; r < rows_tall; r++) {
+                for (auto c = 0; c < cols_wide; c++) {
+                        auto const it = src_cells.find({uint32_t(r), uint32_t(c)});
+                        g_assert_true(it != src_cells.end());
+                        g_assert_cmpint(it->second.second, ==, left + c);
+                }
+        }
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 2);
+        auto* const copy = ring.image_map().rbegin()->second.get();
+        g_assert_cmpint(copy->get_left(), ==, left + 2);
+        g_assert_cmpint(copy->get_top(), ==, top);
+
+        auto const dst_cells = image_cell_positions(ring, copy->get_pool_id());
+        g_assert_cmpuint(dst_cells.size(), ==, rows_tall * 2);
+        for (auto r = 0; r < rows_tall; r++) {
+                for (auto c = 2; c < cols_wide; c++) {
+                        auto const it = dst_cells.find({uint32_t(r), uint32_t(c)});
+                        g_assert_true(it != dst_cells.end());
+                        g_assert_cmpint(it->second.first, ==, top + r);
+                        g_assert_cmpint(it->second.second, ==, left + 2 + c);
+                }
+        }
+
+        g_assert_cmpint(image_cell_count(ring), ==, rows_tall * (cols_wide + 2));
+}
+
+/* The copy shares the source's pixels, so the lifetime rule has to hold in
+ * both directions: erasing either one whole must free that one and leave the
+ * other drawable. If the reference were not taken, erasing the source would
+ * take the copy's pixels out from under it.
+ */
+static void
+test_ring_image_copy_rect_outlives_its_source(void)
+{
+        auto const top = long{5};
+        auto const left = long{4};
+        auto const rows_tall = 2;
+        auto const cols_wide = 4;
+        auto const width = long{40};
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+        for (auto r = long{0}; r < 24; r++)
+                widen_row(ring, r, width);
+
+        auto* const image = place_and_stamp(ring, top, rows_tall, left, width);
+        auto* const surface = image->get_surface();
+
+        auto plan = ring.plan_image_copy(top, top + rows_tall - 1,
+                                         left, left + cols_wide - 1,
+                                         7, 10);
+        copy_rect_cells(ring, top, top + rows_tall - 1,
+                        left, left + cols_wide - 1,
+                        top + 7, left + 10, plan.duplicates);
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+        g_assert_true(ring.apply_image_copy(plan, &damage_top, &damage_bottom));
+        g_assert_cmpuint(ring.image_map().size(), ==, 2);
+
+        auto* const copy = ring.image_map().rbegin()->second.get();
+        auto const copy_id = copy->get_pool_id();
+
+        /* Take the source back, cell by cell, as a producer would. */
+        g_assert_true(ring.erase_images_in_rect(top, top + rows_tall - 1,
+                                                left, left + cols_wide - 1,
+                                                &damage_top, &damage_bottom));
+
+        ring.validate_images();
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_true(ring.image_map().begin()->second.get() == copy);
+
+        /* Same pixels, still there, still reachable from the copy's cells. */
+        g_assert_true(copy->get_surface() == surface);
+        g_assert_cmpint(cairo_surface_status(copy->get_surface()), ==, CAIRO_STATUS_SUCCESS);
+        g_assert_cmpuint(image_cell_positions(ring, copy_id).size(), ==,
+                         rows_tall * cols_wide);
+        g_assert_cmpint(image_cell_count(ring), ==, rows_tall * cols_wide);
+}
+
+/* A copy whose source rectangle holds no image at all must not manufacture
+ * one, and must leave the fast path alone.
+ */
+static void
+test_ring_image_copy_rect_without_an_image(void)
+{
+        auto const width = long{40};
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+        for (auto r = long{0}; r < 24; r++)
+                widen_row(ring, r, width);
+
+        auto* const image = place_and_stamp(ring, 5, 1, 4, width);
+        (void)image;
+
+        auto plan = ring.plan_image_copy(10, 11, 0, 3, 5, 5);
+        g_assert_true(plan.empty());
+
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+        g_assert_false(ring.apply_image_copy(plan, &damage_top, &damage_bottom));
+
+        ring.validate_images();
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+}
+
 /* The vertical sibling. With DECSLRM margins set, scroll_text_up() and
  * scroll_text_down() memcpy cells from row to row inside a sub-rectangle while
  * the rows themselves stay put, so the picture can go with its cells - but only
@@ -3472,6 +3780,14 @@ main(int argc,
         g_test_add_func("/vte/ring/image-pool/follows-horizontal-scroll", test_ring_image_follows_horizontal_scroll);
         g_test_add_func("/vte/ring/image-pool/clipped-by-horizontal-scroll", test_ring_image_clipped_by_horizontal_scroll);
         g_test_add_func("/vte/ring/image-pool/torn-by-horizontal-scroll", test_ring_image_torn_by_horizontal_scroll);
+        g_test_add_func("/vte/ring/image-pool/copy-rect-duplicates-the-picture",
+                        test_ring_image_copy_rect_duplicates_the_picture);
+        g_test_add_func("/vte/ring/image-pool/copy-rect-overlapping-keeps-the-source",
+                        test_ring_image_copy_rect_overlapping_keeps_the_source);
+        g_test_add_func("/vte/ring/image-pool/copy-rect-outlives-its-source",
+                        test_ring_image_copy_rect_outlives_its_source);
+        g_test_add_func("/vte/ring/image-pool/copy-rect-without-an-image",
+                        test_ring_image_copy_rect_without_an_image);
         g_test_add_func("/vte/ring/image-pool/follows-vertical-scroll", test_ring_image_follows_vertical_scroll);
         g_test_add_func("/vte/ring/image-pool/cropped-by-vertical-scroll-is-taken", test_ring_image_cropped_by_vertical_scroll_is_taken);
         g_test_add_func("/vte/ring/image-pool/torn-by-vertical-scroll", test_ring_image_torn_by_vertical_scroll);

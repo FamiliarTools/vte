@@ -3422,6 +3422,288 @@ Ring::write_contents(GOutputStream* stream,
 
 #if WITH_SIXEL
 
+/*
+ * Ring::duplicate_image:
+ * @source: the image to copy
+ * @left, @top: where the copy is anchored, in cell units
+ *
+ * A second image over the SAME pixels, anchored somewhere else. Returns it, or
+ * nullptr if it could not be given an id, in which case nothing was added.
+ *
+ * The surface is shared rather than copied: it is immutable once decoded, both
+ * the cairo draw and the gtk4 texture only read it, and the reference keeps it
+ * alive for exactly as long as either image needs it. Every OTHER part of an
+ * image is per-placement - its rectangle, its pool id, its priority, its entry
+ * in the by-top map, its spill record - so the copy is an image in its own
+ * right and every rule that moves, erases, evicts or restores one applies to it
+ * unchanged.
+ *
+ * The budget therefore counts these pixels twice, once per placement, and that
+ * is the direction to be wrong in: the GC would rather evict a picture that is
+ * cheaper than it looks than let one that is dearer than it looks stay.
+ *
+ * Unlike append_image() this does not become m_placing_image and does not run
+ * the GC. The copy has no cells until apply_image_copy() stamps them, and a
+ * collector run in that window would take it for retention with nothing to
+ * draw.
+ */
+vte::image::Image*
+Ring::duplicate_image(vte::image::Image const* source,
+                      int left,
+                      int top) noexcept
+try
+{
+        auto* const surface = source->get_surface();
+        if (surface == nullptr ||
+            cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS)
+                return nullptr;
+
+        auto const priority = m_next_image_priority;
+        auto [it, success] = m_image_map.try_emplace
+                (priority,
+                 std::make_unique<vte::image::Image>
+                 (vte::take_freeable(cairo_surface_reference(surface)),
+                  priority,
+                  source->get_width_px(),
+                  source->get_height_px(),
+                  left,
+                  top,
+                  source->get_cell_width(),
+                  source->get_cell_height()));
+        if (!success)
+                return nullptr;
+
+        auto* const image = it->second.get();
+
+        auto pool_id = m_image_pool.allocate(image);
+        if (pool_id == vte::image::k_ref_pool_id_none) {
+                sweep_image_pool();
+                pool_id = m_image_pool.allocate(image);
+        }
+
+        /* As in append_image(): an image no cell can name is retention with no
+         * way to draw it and no way to erase it.
+         */
+        if (pool_id == vte::image::k_ref_pool_id_none) {
+                m_image_map.erase(it);
+                return nullptr;
+        }
+
+        image->set_pool_id(pool_id);
+        ++m_next_image_priority;
+
+        m_image_by_top_map.emplace(std::piecewise_construct,
+                                   std::forward_as_tuple(image->get_top()),
+                                   std::forward_as_tuple(image));
+
+        m_image_fast_memory_used += image_cost(image);
+        sync_has_images();
+
+        return image;
+}
+catch (...)
+{
+        return nullptr;
+}
+
+/*
+ * Ring::plan_image_copy:
+ * @top, @bottom, @left, @right: the inclusive source rectangle, in ring
+ *   coordinates
+ * @row_delta, @col_delta: how far the destination rectangle sits from it
+ *
+ * The first half of what a rectangular copy (DECCRA) owes the images, and it
+ * must run BEFORE the copy touches anything.
+ *
+ * A copy is not a move. The source keeps its cells, so a picture inside the
+ * source rectangle has to end up in two places at once, and an image is one
+ * rectangle: there is no anchor that describes both. So the copy gets an image
+ * of its own - the source image translated by the rectangles' displacement,
+ * over the same pixels - and the destination cells name that one. Its tile
+ * coordinates are unchanged, which is what keeps them legal: a cell holding
+ * tile @t sat at source_left + t and lands at source_left + col_delta + t,
+ * while the copy's left edge is image_left + col_delta, so
+ * validate_image_cells() still finds cell_column == left + tile_col with the
+ * same arithmetic on both sides. A copy that takes only PART of a picture
+ * needs no cropping for this: the tiles it did not take simply have no cells,
+ * which is a state the model already allows for a partially overwritten image.
+ *
+ * Running first is the point, not an implementation detail. The destination is
+ * detached from its own images before the source is read, and when the two
+ * rectangles overlap that erase reaches cells the copy has not read yet. Once
+ * the plan is taken, it can no longer cost the copy anything.
+ *
+ * Deciding from the CELLS rather than from the images' rectangles, as the
+ * scroll rules do: a picture whose lower rows have been written over keeps a
+ * rectangle reaching down to where they were, and the copy carries what is
+ * actually there.
+ */
+Ring::ImageCopyPlan
+Ring::plan_image_copy(long top,
+                      long bottom,
+                      long left,
+                      long right,
+                      long row_delta,
+                      long col_delta) noexcept
+{
+        auto plan = ImageCopyPlan{};
+
+        if (top > bottom || left > right)
+                return plan;
+        if (row_delta == 0 && col_delta == 0)
+                return plan; /* the copy is its own source; nothing changes */
+
+        auto const first = std::max(top, long(m_writable));
+        auto const last = std::min(bottom, long(m_end) - 1);
+
+        /* Source pool id to the image made for it, nullptr once one has failed
+         * to be made - so a failure is not retried per cell.
+         */
+        auto copies = std::map<uint32_t, vte::image::Image*>{};
+
+        for (auto r = first; r <= last; r++) {
+                auto const* const row = get_writable_index(r);
+
+                auto const from = std::max(left, long{0});
+                auto const to = std::min(right, long(row->len) - 1);
+
+                for (auto c = from; c <= to; c++) {
+                        auto const& cell = row->cells[c];
+                        if (!cell.attr.image())
+                                continue;
+
+                        auto const ref = cell.attr.image_ref();
+                        auto* const source = m_image_pool.lookup(ref);
+
+                        /* A cell that outlived its image carries nothing. */
+                        if (source == nullptr)
+                                continue;
+
+                        /* An image whose own emission burst is still running
+                         * has a rectangle deliberately behind its cells, so
+                         * the displacement below would not describe it. It is
+                         * held out of every other rule for the same reason.
+                         */
+                        if (source == m_placing_image)
+                                continue;
+
+                        auto it = copies.find(ref.pool_id());
+                        if (it == copies.end()) {
+                                auto* const copy =
+                                        duplicate_image(source,
+                                                        source->get_left() + int(col_delta),
+                                                        source->get_top() + int(row_delta));
+                                it = copies.emplace(ref.pool_id(), copy).first;
+                                if (copy != nullptr)
+                                        plan.duplicates.push_back(copy);
+                        }
+
+                        if (it->second == nullptr)
+                                continue;
+
+                        auto const id = it->second->get_pool_id();
+                        if (!vte::image::Ref::fits(id, ref.tile_row(), ref.tile_col()))
+                                continue;
+
+                        plan.cells.push_back
+                                (CopiedImageCell{r + row_delta,
+                                                 c + col_delta,
+                                                 vte::image::Ref{id,
+                                                                 ref.tile_row(),
+                                                                 ref.tile_col()}});
+                }
+        }
+
+        return plan;
+}
+
+/*
+ * Ring::apply_image_copy:
+ * @plan: what plan_image_copy() decided
+ * @damage_top, @damage_bottom: out, the rows that need repainting
+ *
+ * The second half, run once the cells have been copied. Returns whether
+ * anything was stamped.
+ *
+ * The copied cells arrive naming the SOURCE image, because a cell copies whole
+ * and its reference copies with it, so each is re-pointed at the image the plan
+ * made for it. They are re-pointed rather than merely fixed up: the destination
+ * erase may have blanked the source cell before it was read, in which case what
+ * arrived is not an image cell at all, and the plan is the only surviving
+ * record of what belonged there.
+ *
+ * A copy that ends up with no cells - its destination rows were too short, or
+ * its references would not fit - is freed here rather than left resident. That
+ * is the same rule erase_images_in_rect() applies, and it is what keeps the
+ * budget honest about a copy that never happened.
+ */
+bool
+Ring::apply_image_copy(ImageCopyPlan const& plan,
+                       long* damage_top,
+                       long* damage_bottom) noexcept
+{
+        auto damaged = false;
+
+        auto note_damage = [&](long t, long b) noexcept {
+                if (!damaged) {
+                        *damage_top = t;
+                        *damage_bottom = b;
+                        damaged = true;
+                } else {
+                        *damage_top = std::min(*damage_top, t);
+                        *damage_bottom = std::max(*damage_bottom, b);
+                }
+        };
+
+        for (auto const& cc : plan.cells) {
+                if (cc.row < long(m_writable) || cc.row >= long(m_end))
+                        continue;
+
+                auto* const row = get_writable_index(cc.row);
+                if (cc.col < 0 || cc.col >= long(row->len))
+                        continue;
+
+                auto& cell = row->cells[cc.col];
+
+                /* The cell is the copy's now, as one whole cell holding the
+                 * object replacement character - the shape validate_image_cells()
+                 * requires of every cell that names an image.
+                 */
+                cell.attr.set_columns(1);
+                cell.attr.set_fragment(false);
+                cell.attr.set_image_ref(cc.ref);
+                cell.c = VTE_OBJECT_REPLACEMENT_CHARACTER;
+
+                note_damage(cc.row, cc.row);
+        }
+
+        for (auto* const copy : plan.duplicates) {
+                if (image_has_any_cell(copy)) {
+                        note_damage(long(copy->get_top()), long(copy->get_bottom()));
+                        continue;
+                }
+
+                auto const [begin, end] = m_image_by_top_map.equal_range(copy->get_top());
+                for (auto it = begin; it != end; ++it) {
+                        if (it->second == copy) {
+                                erase_image(it);
+                                break;
+                        }
+                }
+        }
+
+        if (damaged)
+                m_images_changed = true;
+
+        /* Only now, when the copies hold cells: the budget has grown by a
+         * whole image and this is what brings it back under the limit.
+         */
+        image_gc();
+        sync_has_images();
+
+        return damaged;
+}
+
 /**
  * Ring::append_image:
  * @surface: A Cairo surface object

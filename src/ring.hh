@@ -493,6 +493,9 @@ private:
                                     size_t text_start_ofs,
                                     size_t text_end_ofs,
                                     row_t new_row_index) noexcept;
+        vte::image::Image* duplicate_image(vte::image::Image const* source,
+                                           int left,
+                                           int top) noexcept;
         void shift_images_for_insert(row_t position) noexcept;
         void shift_images_for_remove(row_t position) noexcept;
         bool erase_images_in_rect_except(long top,
@@ -733,6 +736,52 @@ public:
                                       long amount,
                                       long* damage_top,
                                       long* damage_bottom) noexcept;
+
+        /* One destination cell a rectangular copy will re-stamp: where it
+         * lands, and which tile of which image it will name there.
+         */
+        struct CopiedImageCell {
+                long row;
+                long col;
+                vte::image::Ref ref;
+        };
+
+        /* What a rectangular copy (DECCRA) has decided to do about the images
+         * it is carrying, taken before the copy touches a single cell.
+         *
+         * @duplicates are the images made for the copy. They have no cells
+         * yet, so the caller must hold them out of the erase it does over the
+         * destination or that erase will collect them as unreferenced.
+         */
+        struct ImageCopyPlan {
+                std::vector<vte::image::Image*> duplicates;
+                std::vector<CopiedImageCell> cells;
+
+                inline bool empty() const noexcept { return cells.empty(); }
+        };
+
+        ImageCopyPlan plan_image_copy(long top,
+                                      long bottom,
+                                      long left,
+                                      long right,
+                                      long row_delta,
+                                      long col_delta) noexcept;
+
+        bool apply_image_copy(ImageCopyPlan const& plan,
+                              long* damage_top,
+                              long* damage_bottom) noexcept;
+
+        bool erase_images_in_rect(long top,
+                                  long bottom,
+                                  long left,
+                                  long right,
+                                  long* damage_top,
+                                  long* damage_bottom,
+                                  std::vector<vte::image::Image*> const& exempt) noexcept
+        {
+                return erase_images_in_rect_except(top, bottom, left, right,
+                                                   damage_top, damage_bottom, exempt);
+        }
 
         void append_image(vte::Freeable<cairo_surface_t> surface,
                           int pixelwidth,

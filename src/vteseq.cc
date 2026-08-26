@@ -1044,6 +1044,14 @@ try
             !screen_rect.contains(dest_rect))
                 return;
 
+        /* A copy onto itself changes nothing, and saying so here is not just an
+         * optimisation: the path below detaches the destination from its images
+         * before reading the source, which for these two rectangles means
+         * erasing the very cells it is about to copy.
+         */
+        if (dest_rect == source_rect)
+                return;
+
         auto const dest_width = dest_rect.right() - dest_rect.left() + 1;
 
         // Ensure all used rows exist
@@ -1059,11 +1067,43 @@ try
         }
 
         /* Only the destination is written; the source is read, so the images
-         * over it stay. */
+         * over it stay - and a copy of each goes with the cells, since the
+         * cells carry the picture and the source is not destroyed.
+         *
+         * The plan is taken BEFORE the erase because the two rectangles may
+         * overlap, and then the erase reaches source cells the copy has not
+         * read yet. The copies it makes have no cells until apply below, so
+         * they must be held out of that erase or it collects them.
+         * See Ring::plan_image_copy().
+         */
+#if WITH_SIXEL
+        auto image_plan = vte::base::Ring::ImageCopyPlan{};
+        if (m_screen->row_data->has_images()) [[unlikely]] {
+                image_plan = m_screen->row_data->plan_image_copy
+                        (m_screen->insert_delta + source_rect.top(),
+                         m_screen->insert_delta + source_rect.bottom(),
+                         source_rect.left(),
+                         source_rect.right(),
+                         dest_rect.top() - source_rect.top(),
+                         dest_rect.left() - source_rect.left());
+
+                auto damage_top = long{};
+                auto damage_bottom = long{};
+                if (m_screen->row_data->erase_images_in_rect
+                    (m_screen->insert_delta + dest_rect.top(),
+                     m_screen->insert_delta + dest_rect.bottom(),
+                     dest_rect.left(),
+                     dest_rect.right(),
+                     &damage_top, &damage_bottom,
+                     image_plan.duplicates))
+                        invalidate_rows(damage_top, damage_bottom);
+        }
+#else
         erase_images_in_rect(m_screen->insert_delta + dest_rect.top(),
                              m_screen->insert_delta + dest_rect.bottom(),
                              dest_rect.left(),
                              dest_rect.right());
+#endif
 
         // Buffer to simplify copying when source and dest overlap
         auto vec = std::vector<VteCell>{};
@@ -1157,6 +1197,20 @@ try
                         copy_row(srow, drow);
                 }
         }
+
+#if WITH_SIXEL
+        /* The copied cells arrived naming the source image; point them at the
+         * copy the plan made, which is anchored where they now sit.
+         */
+        if (!image_plan.empty()) {
+                auto damage_top = long{};
+                auto damage_bottom = long{};
+                if (m_screen->row_data->apply_image_copy(image_plan,
+                                                         &damage_top,
+                                                         &damage_bottom))
+                        invalidate_rows(damage_top, damage_bottom);
+        }
+#endif
 
         /* We modified the display, so make a note of it for completeness. */
         m_text_modified_flag = true;
