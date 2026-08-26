@@ -46,6 +46,8 @@
 #     fixtures;
 #   - an app whose sixel default is off still renders, because the runner asks
 #     for --sixel;
+#   - a run that timed out waiting for the TERMINAL says so, and is not
+#     reported as a difference from the golden;
 #   - the case the build documentation points a builder at as its font sentinel
 #     really is font-invariant, under fonts the run itself proves reached the
 #     terminal.
@@ -691,6 +693,41 @@ for ALT_FONT in "$ALT_FONT_A" "$ALT_FONT_B"; do
                 verdict_failed "the font sentinel $CASE is not font-invariant under $ALT_FONT after all"
 done
 
+# Scenario: a run that TIMED OUT waiting for the terminal is never reported as
+# a rendering difference.
+#
+# The runner's readiness gate is three waits on the terminal - that it answered
+# DSR-5 at all, that it painted its window, that it drew the fixture. Each can
+# be reached by a machine too slow rather than by a renderer drawing the wrong
+# thing, and the whole point of the gate is that those two are told apart. A
+# runner that let a timeout fall through to the comparison would report the
+# frame it happened to hold, which is the mid-paint red this gate exists to
+# stop.
+#
+# Driven with VTE_TEST_READY_TIMEOUT=0, so the first wait's deadline is already
+# past when it is reached. No shim is needed and no terminal has to be
+# starved: the run reaches the same code an exhausted deadline reaches.
+#
+# Asserted in both directions, because only the pair is the claim: the words
+# have to name the TERMINAL, and they must not be the words a wrong frame gets.
+VTE_TEST_READY_TIMEOUT=0 VTE_TEST_ARTIFACT_DIR="$WORK" \
+        "$RUNNER" "$APP" "$FIXTURES" "$CASE" "$ARM" >"$WORK/out" 2>&1
+STATUS=$?
+skip_if_skipped
+
+[ "$STATUS" != 0 ] ||
+        verdict_failed "the render test passed without ever waiting for the terminal"
+
+case "$(cat "$WORK/out")" in
+        *"differs from the golden"*)
+                verdict_failed "a run that never waited for the terminal was reported as a rendering difference" ;;
+esac
+
+case "$(cat "$WORK/out")" in
+        *"the terminal never answered DSR-5"*) ;;
+        *) verdict_failed "a run that timed out waiting for the terminal did not say so" ;;
+esac
+
 echo "PASS: the frame the render test captures itself passes it"
 echo "PASS: a frame with one changed pixel fails the render test"
 echo "PASS: a frame with every pixel inverted fails the render test"
@@ -702,4 +739,5 @@ echo "PASS: a comparator contradicting its own non-zero count is named as one, n
 echo "PASS: a failing frame is kept out of the fixture directory, in the artifact directory or the working one"
 echo "PASS: the runner's --sixel turns images back on for an app whose default is off"
 echo "PASS: $CASE is font-invariant under two fonts that move $SENSITIVE by different amounts, so the font sentinel holds"
+echo "PASS: a run that timed out waiting for the terminal says so, and is not reported as a rendering difference"
 exit 0

@@ -167,21 +167,41 @@ export LIBGL_ALWAYS_SOFTWARE=1
 # heights stop far above the parked row, which the measurement below puts at
 # y=381.
 #
-# It bit: raster-opaque and raster-transparent failed together on two full
-# gtk3 suite runs and passed when re-run on their own, unchanged, and the
-# pixels that differed on one of those failures were the single box
-# 10x19+1+381 - the parked row, nowhere near the image.
+# What this rests on is the direct measurement below, and not on the pair of
+# whole-suite reds it was first written from. Those said only that
+# raster-opaque and raster-transparent failed under parallel load and passed on
+# their own, which is a symptom the mid-paint capture diagnosed at the
+# readiness gate below produces just as well; one of the two did differ in
+# exactly the parked row, and one is not two. So the anecdote is left here as
+# what it is - a symptom, since retired at its own cause - and the reason the
+# DECTCEM stays is the measurement:
 #
-# Then measured directly, gtk3, raster-opaque, eight 400x400 crops taken 0.35s
+# gtk3, raster-opaque, eight 400x400 crops taken 0.35s
 # apart: with the cursor merely parked, consecutive crops differ in exactly
 # 10x19+1+381; with the DECTCEM below, all eight crops are byte-identical.
 # The park stays, now only to keep the terminal's idea of the cursor away from
 # the image.
 #
-# The child ends by touching $WORK/fed, which is the first half of the
-# readiness handshake below; see wait_until_fed.
-CHILD="printf '\\033[?25l\\033[H'; cat '$SIX'; printf '\\033[20;1H'; touch '$WORK/fed'; sleep 30"
+# The child runs in three parts, and the runner drives the joins between them;
+# see the handshake below for what each one establishes.
+#
+#   prologue  turn the cursor off, ask DSR-5, and then BLOCK on $WORK/go.
+#             The block is what lets the runner learn the terminal's own empty
+#             screen before a single byte of the fixture has been sent.
+#   fixture   released by $WORK/go: home the cursor, write the sixel, park.
+#   epilogue  ask DSR-5 again, so the runner has the TERMINAL's word that the
+#             fixture was parsed, and then stay alive to be photographed.
+#
+# The child reads its replies rather than leaving them in the pty, and `stty
+# raw -echo` is what makes that possible: without -echo the reply would be
+# echoed back and drawn into the frame under test.
+CHILD_PROLOGUE="stty raw -echo; printf '\\033[?25l\\033[5n'; dd bs=1 count=4 of='$WORK/alive' 2>/dev/null; while [ ! -e '$WORK/go' ]; do sleep 0.02; done"
+
+CHILD="$CHILD_PROLOGUE; printf '\\033[H'; cat '$SIX'; printf '\\033[20;1H\\033[5n'; dd bs=1 count=4 of='$WORK/answered' 2>/dev/null; sleep 30"
 KEEP=()
+# Whether the terminal is asked to speak again AFTER the fixture. The .eof
+# case below cannot be, so it says so here rather than the wait guessing.
+ANSWER_AFTER=1
 
 # A case whose fixture is a sixel with NO TERMINATOR has to be run
 # differently, and an empty <case>.eof next to the fixture says so - the flag
@@ -196,11 +216,16 @@ KEEP=()
 # Nothing may follow the fixture on the way out either. The cursor park is an
 # ESC, and an ESC reaching the sixel parser mid-sequence is a CANCEL, which
 # deliberately does not draw. Measured with the park still in place: three
-# runs, two blank frames and one image. So this case drops the park and keeps
-# only the DECTCEM the child above already begins with.
+# runs, two blank frames and one image. So this case drops the park - and the
+# DSR-5 that follows it, which is an ESC too, so this is the one case whose
+# terminal cannot be asked to confirm the parse. It is still gated on the
+# terminal rather than on the child: the whole of the prologue handshake below
+# runs BEFORE the fixture, and what follows it is the wait for the picture to
+# change, which only the terminal can satisfy.
 if [ -r "$SRCDIR/$CASE.eof" ]; then
         KEEP=(--keep)
-        CHILD="printf '\\033[?25l\\033[H'; cat '$SIX'; touch '$WORK/fed'"
+        CHILD="$CHILD_PROLOGUE; printf '\\033[H'; cat '$SIX'"
+        ANSWER_AFTER=
 fi
 
 # Pin the font, because some of the compared regions move with the cell.
@@ -264,78 +289,170 @@ FONT=${VTE_TEST_FONT:-Monospace 12}
 # right into the one gboolean - is an app whose effective default is off. The
 # flag below is then the only thing putting the images back, and deleting it
 # turns that scenario red.
+#
+# Photograph the BARE ROOT first, before the app exists. Nothing else draws on
+# this display - it was booted here, for this run, with no window manager and
+# no other client - so the first frame that differs from this one is the app's
+# own first paint and cannot be anything else. Every wait below is anchored on
+# a frame the terminal itself produced, and this is the first link in the
+# chain.
+capture() {
+        import -window root "$1" 2>"$WORK/im.log"
+}
+
+capture "$WORK/bare.png" || { echo "FAIL: could not capture the window"; exit 1; }
+
 "$APP" --sixel "${KEEP[@]}" --no-load-config --no-decorations --geometry 80x24 --font "$FONT" \
         -- sh -c "$CHILD" >"$WORK/app.log" 2>&1 &
 APID=$!
 
-# Wait for the terminal to have CONSUMED the fixture, rather than for a number
-# of seconds.
+# Wait for the TERMINAL, rather than for the child or for a number of seconds.
 #
-# This used to be `sleep 6`. A fixed sleep is not a wait: when it is short of
-# what the machine needs, the capture lands before the image is on screen and
-# the runner does not skip or say "not ready" - it compares an early frame
-# against the golden and reports the mismatch as a VERDICT, which on a pixel
-# gate is a flaky red indistinguishable from a real regression. The display
-# these tests run on is already handshaken (Xvfb -displayfd), so the harness
-# knew how to do this.
+# What this replaced was a flag the CHILD touched after `cat` returned. That is
+# a fact about the child: `cat` returning means the fixture is in the pty
+# buffer, and says nothing about whether vte has read it, parsed it or drawn
+# it. Its own failure message admitted as much - it spoke about the child never
+# finishing writing. So the capture could and did land mid-paint, and the
+# runner reported the resulting frame as a VERDICT on the pixels.
 #
-# Measured, gtk3/bands, this runner against a copy of it whose only difference
-# is `sleep 6` in place of this block, both run inside a systemd scope with
-# -p CPUQuota=2% -p AllowedCPUs=0 to stand in for a loaded builder, three runs
-# each:
+# Reproduced, gtk3/raster-opaque, this runner unchanged but given an $APP that
+# execs the real one inside `systemd-run --user --scope -p CPUQuota=1%
+# -p AllowedCPUs=0` - the asymmetry a loaded parallel builder produces, where
+# the process taking the photograph is scheduled and the terminal is not. Six
+# runs, six reds, none of them a rendering difference:
 #
-#   sleep 6        FAIL: bands differs from the golden (AE=38144), all three
-#   this block     ready after 23s, 22s, 19s; PASS, all three
+#   FAIL: raster-opaque differs from the golden (AE=40755.3)   x5
+#   FAIL: raster-opaque differs from the golden (AE=119145)    x1
 #
-# That is the whole case for the change: the sleep did not report a slow
-# machine, it reported a rendering defect that was not there.
+# The kept frames say what they were. AE=40755.3 is the crop entirely BLACK -
+# the app had not painted its window at all. AE=119145 is the terminal's empty
+# white screen with the cursor cell in it and NO IMAGE - parsed or not, not yet
+# drawn. The golden is a solid red square, so neither is a near miss the way a
+# font difference is a near miss; they are frames from before the paint.
 #
-# The signal is the child's own word. It touches $WORK/fed as its last act, so
-# the flag appearing means the app booted, the pty was spawned, the child ran
-# and `cat` returned with the whole fixture written. Nothing about it is a
-# guess, and it has no lower bound - unthrottled, the same case reports "ready
-# after 0s" where the sleep spent 6.
+# So the readiness signal has to come from the terminal, and it takes two
+# different kinds of signal, because a terminal can answer for bytes it has not
+# yet drawn:
 #
-# There is deliberately NO second wait here for the painting to settle. One was
-# written and then removed, because it could not be shown to observe anything:
-# instrumented to capture the screen at the moment the flag appears and again
-# once two consecutive captures agreed, the two frames were identical on all
-# twelve runs measured - bands and bands-truncated, unthrottled and at the 2%
-# quota above, including the .eof case whose image is only drawn at eos. A
-# guard that never observes the state it exists to catch is a guard nothing
-# holds, so what is left is the one mechanism with a red run behind it.
+#   PARSED   the terminal's own reply to DSR-5. A reply cannot be emitted
+#            before everything queued ahead of the query has been parsed, so
+#            the reply arriving is the fixture having reached the model.
 #
-# The cap is a last resort, not the mechanism: reaching it is reported and
-# fails the run, so a capture taken from a terminal that never read the fixture
-# is never quietly turned into a verdict about pixels.
+#   DRAWN    the picture on the screen having CHANGED from the frame the
+#            terminal drew before the fixture was released to it.
+#
+# The second is not redundant, and this is the measurement that says so rather
+# than an argument. The same 1% scope, the same case, the readiness flag moved
+# to the DSR reply and the screen then sampled every ~90ms, six runs: the reply
+# arrived after 12.8s to 14.3s, and in ALL SIX the first capture after it was
+# still AE=119145 - the empty screen. In three of the six the SECOND capture was
+# too. Parsed is not painted, and a gate that stopped at the reply would have
+# been a mechanism named for what it was wanted to do.
+#
+# That also rules out settling alone, by the same six runs: two consecutive
+# equal captures is satisfied by the empty screen, which held across two
+# samples half the time. Stability is only a signal where the input stream is
+# QUIESCENT, and the handshake below is arranged so that it only ever is asked
+# at such a point: the child blocks on $WORK/go, and the terminal has already
+# answered for everything sent before it, so once a frame repeats there is
+# nothing left in flight that could change it. That is a structural quiescence,
+# not a duration.
+#
+# The cap is a last resort and not the mechanism. Reaching any of the three
+# waits is reported in the terminal's terms - it never painted, it never
+# answered, it never drew - and never as a difference from the golden, so a
+# machine too slow to photograph can never be read as a renderer that draws the
+# wrong thing.
 READY_TIMEOUT=${VTE_TEST_READY_TIMEOUT:-90}
 
-wait_until_fed() {
-        local started=$SECONDS
+# DSR-5 is asked rather than DSR-6/CPR because its reply has NO variable field:
+# ECMA-48 makes the operating-status answer CSI 0 n, four bytes, whatever the
+# terminal is doing. CPR carries the cursor row and column, so its length moves
+# with them, and a fixed-count read of one CPR would leave the tail of it in the
+# pty for the next read to pick up as the next reply. Two reads are made here,
+# so that mattered.
+DSR_REPLY=$'\033[0n'
+
+# All four bytes, not merely a file with something in it: `dd bs=1` writes them
+# one at a time, so a length test is the only way to tell a whole reply from a
+# reply the runner has caught halfway.
+reply_complete() { [ -e "$1" ] && [ "$(wc -c <"$1")" = 4 ]; }
+
+# Wait for those four bytes to have come back, and require them to BE those
+# bytes. A reply of some other shape means this no longer knows what it is
+# being told, which is not a thing to photograph and report on.
+wait_for_reply() {
+        local flag=$1 what=$2
+        local deadline=$((SECONDS + READY_TIMEOUT))
+        local got=
+
+        while [ "$SECONDS" -lt "$deadline" ]; do
+                reply_complete "$flag" && break
+                sleep 0.05
+        done
+
+        reply_complete "$flag" || {
+                echo "FAIL: $CASE was never captured: $what"
+                [ -s "$WORK/app.log" ] && sed 's/^/  /' "$WORK/app.log"
+                exit 1
+        }
+
+        got=$(cat "$flag")
+        [ "$got" = "$DSR_REPLY" ] || {
+                echo "FAIL: $CASE was never captured: the terminal answered DSR-5 with $(cat -v "$flag"), not ESC[0n"
+                exit 1
+        }
+}
+
+# Wait until the picture has CHANGED from $1 and then stayed put for one
+# further capture, and leave that settled frame in $2.
+#
+# Both halves are needed and neither substitutes for the other: the change is
+# what makes it the terminal's signal rather than a duration, and the repeat is
+# what keeps a frame caught between two paints from being the one compared.
+wait_for_frame() {
+        local from=$1 into=$2 what=$3
         local deadline=$((SECONDS + READY_TIMEOUT))
 
         while [ "$SECONDS" -lt "$deadline" ]; do
-                [ -e "$WORK/fed" ] && { echo "ready after $((SECONDS - started))s"; return 0; }
-                sleep 0.1
+                capture "$into" || { echo "FAIL: could not capture the window"; exit 1; }
+
+                if cmp -s "$from" "$into"; then
+                        sleep 0.05
+                        continue
+                fi
+
+                cp "$into" "$WORK/settling.png"
+                capture "$into" || { echo "FAIL: could not capture the window"; exit 1; }
+                cmp -s "$WORK/settling.png" "$into" && return 0
         done
 
-        echo "NOT READY: the child never finished writing $CASE to the terminal"
-        return 1
-}
-
-# A terminal that never read the fixture is not evidence about the renderer
-# either way, so it is reported as the machine being too slow rather than as a
-# verdict on the pixels - the same distinction broken_comparison draws below.
-wait_until_fed || {
-        echo "FAIL: $CASE was never ready to be captured"
+        echo "FAIL: $CASE was never captured: $what"
         [ -s "$WORK/app.log" ] && sed 's/^/  /' "$WORK/app.log"
         exit 1
 }
 
-import -window root "$WORK/shot.png" 2>/dev/null || {
-        echo "FAIL: could not capture the window"
-        exit 1
-}
+# 1. The terminal is alive and has parsed the cursor-off the child opens with.
+#    Nothing visible has been sent yet, so nothing that follows can be mistaken
+#    for the fixture.
+wait_for_reply "$WORK/alive" "the terminal never answered DSR-5, so it never read anything the child wrote"
+
+# 2. The terminal's own empty screen. The child is blocked on $WORK/go and has
+#    answered for everything before it, so this frame is the whole of what the
+#    terminal has to show until the fixture is released.
+wait_for_frame "$WORK/bare.png" "$WORK/empty.png" "the terminal never painted its window"
+
+# 3. Release the fixture.
+touch "$WORK/go"
+
+# 4. The terminal has parsed it. Not asked of the .eof case, whose fixture
+#    nothing may follow; see the .eof note above.
+[ -n "$ANSWER_AFTER" ] &&
+        wait_for_reply "$WORK/answered" "the terminal never answered DSR-5 after $CASE, so it never finished parsing the fixture"
+
+# 5. And has drawn it. The only thing sent since the empty frame is the
+#    fixture, so a picture that differs from it is the fixture on screen.
+wait_for_frame "$WORK/empty.png" "$WORK/shot.png" "the terminal parsed $CASE but never drew it"
 
 # Crop a box that is DELIBERATELY WIDER AND TALLER than the image.
 #
