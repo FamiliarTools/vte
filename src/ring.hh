@@ -156,9 +156,14 @@ private:
                 uint32_t ref_bits;      /* tile coordinates; pool id ignored */
         } StreamImageRef;
 
-        /* The stride of one CellAttrChange record in the attr stream: the
-         * fixed part, then the hyperlink target and its two terminating
-         * bytes.
+        /* The stride of one CellAttrChange record in the attr stream, in the
+         * order the freeze path appends them: the fixed part, then the
+         * hyperlink target, then the image reference when the record carries
+         * one, then the two terminating bytes.
+         *
+         * The image reference sits BEFORE the trailer rather than after it for
+         * the reason spelled out below - the trailer has to stay last for
+         * thaw_row's backwards walk.
          *
          * Centralised because the freeze, thaw, truncate and rewrap paths
          * each walk these records independently, over the lines of ring.cc
