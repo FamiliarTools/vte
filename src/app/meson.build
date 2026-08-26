@@ -353,6 +353,24 @@ if get_option('sixel') and get_option('sixel_display_tests')
       timeout: 420,
     )
 
+    # An image under a SELECTION. Not one of the render cases above: a
+    # selection cannot be asked for over a pty, so this one drives the
+    # pointer, and its verdict is a comparison between two frames of the
+    # same terminal rather than against a golden. It needs xdotool and
+    # xclip on top of what the others need, and says so when it skips.
+    test(
+      'sixel-render-selection-' + arm[0],
+      files(sixel_test_dir / 'selection-render-test.sh'),
+      args: [
+        arm[1].full_path(),
+        sixel_test_dir,
+        arm[0],
+      ],
+      depends: [arm[1]],
+      suite: 'sixel-display',
+      timeout: 180,
+    )
+
     foreach case: sixel_render_cases
       test(
         'sixel-render-' + case + '-' + arm[0],

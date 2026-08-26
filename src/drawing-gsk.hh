@@ -144,13 +144,17 @@ public:
         inline void fill_cell_background(size_t column,
                                          size_t row,
                                          size_t n_columns,
-                                         vte::color::rgb const* color) override {
+                                         vte::color::rgb const* color,
+                                         double alpha) override {
                 assert(column + n_columns <= m_background_cols);
 
+                // GDK_MEMORY_R8G8B8A8 is straight (non-premultiplied) alpha,
+                // so the colour channels are stored unscaled.
+                auto const a = CLAMP(alpha, 0.0, 1.0) * 0xffu;
                 auto const fill = r8g8b8a8{uint8_t(color->red >> 8),
                                            uint8_t(color->green >> 8),
                                            uint8_t(color->blue >> 8),
-                                           uint8_t(0xffu)};
+                                           uint8_t(a + 0.5)};
                 std::fill_n(m_background_data.get() + (row * m_background_cols + column),
                             n_columns,
                             fill);
