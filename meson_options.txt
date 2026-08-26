@@ -131,9 +131,13 @@ option(
                'the sentinel below is. To tell a foreign font from a real regression, ' +
                'read the FAILURE LINE first and then the sentinel. A run that never ' +
                'got a frame at all reports itself in the terminal\'s own terms - it ' +
-               'never answered, never painted, never drew - and never as a difference ' +
-               'from the golden, so those two are already separate outcomes and not one ' +
-               'signature - the sixel-render-gate case holds both halves of that. ' +
+               'never answered, never painted, never finished parsing, never drew - ' +
+               'and never as a difference from the golden, so those two are already ' +
+               'separate outcomes and not one signature. The sixel-render-gate case ' +
+               'holds both halves of that, and holds each of the four waits ' +
+               'SEPARATELY, by starving one at a time and requiring the run to name ' +
+               'the wait it stopped at - the claim being made here is exactly the one ' +
+               'that is tested, rather than one wait standing in for four. ' +
                'Only a line saying "differs from the golden" is a statement ' +
                'about pixels. Among those, sixel-render-bands is the discriminator: ' +
                'bands compares nothing but the image, which is drawn at its own pixel ' +

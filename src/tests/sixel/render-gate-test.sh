@@ -46,8 +46,14 @@
 #     fixtures;
 #   - an app whose sixel default is off still renders, because the runner asks
 #     for --sixel;
-#   - a run that timed out waiting for the TERMINAL says so, and is not
-#     reported as a difference from the golden;
+#   - EACH of the four readiness waits, starved one at a time so the terminal
+#     really is working up to it, says which wait it was and is not reported as
+#     a difference from the golden - including the .eof case's, which reaches
+#     the last wait through different code;
+#   - a starve target the runner does not implement is refused, so the four
+#     above cannot pass on a typo;
+#   - no golden holds a paint-sentinel colour, which is what makes a sentinel
+#     pixel mean the terminal drew past the fixture;
 #   - the case the build documentation points a builder at as its font sentinel
 #     really is font-invariant, under fonts the run itself proves reached the
 #     terminal.
@@ -126,6 +132,16 @@ GOLDEN_PIXELS=$("$REAL_CONVERT" "$GOLDEN" -format '%[fx:w*h]' info: 2>/dev/null)
 # every count here is compared as a number and never as a string.
 is_number() { awk -v x="$1" -v y="$2" 'BEGIN { exit !(x == y) }'; }
 
+# The runner's two paint-sentinel colours, read OUT of the runner rather than
+# restated here. A sentinel recoloured there and not here would otherwise turn
+# every scenario below into a readiness timeout, and the golden scenario at the
+# end into a search for two colours nobody uses.
+SENTINEL_HEXES=$(LC_ALL=C sed -n "s/^\(PRE\|POST\)_SENTINEL_HEX='\(#[0-9A-F]*\)'.*/\2/p" "$RUNNER")
+[ "$(printf '%s\n' "$SENTINEL_HEXES" | wc -l)" = 2 ] ||
+        { echo "FAIL: could not read both paint-sentinel colours out of $RUNNER"; exit 1; }
+PRE_HEX=$(printf '%s\n' "$SENTINEL_HEXES" | sed -n 1p)
+POST_HEX=$(printf '%s\n' "$SENTINEL_HEXES" | sed -n 2p)
+
 # Build a PATH directory whose `import` captures the screen for real and then
 # damages the capture in a defined way, so the runner reaches its verdict on a
 # frame that is wrong by a KNOWN amount.
@@ -135,6 +151,20 @@ is_number() { awk -v x="$1" -v y="$2" 'BEGIN { exit !(x == y) }'; }
 # operator ImageMagick declined, a pixel outside the compared region - looks
 # exactly like a runner that cannot fail, which is the failure this whole file
 # exists to keep out.
+#
+# After damaging, the shim STAMPS both paint sentinels back along the bottom
+# edge, and it has to. What these scenarios model is a RENDERER that drew the
+# wrong thing, not a terminal that never drew; but the runner reads its
+# readiness signal out of the same captures, so a whole-frame -negate leaves no
+# #DE12FE anywhere and a narrowed frame cuts the columns the sentinels stand in
+# clean off. Measured before the stamp existed: the negate scenario came out as
+# "bands was never captured: the terminal never painted its window", a
+# readiness timeout standing in for the verdict the scenario exists to take.
+#
+# The stamp cannot reach a crop it should not: every crop in the tree is at
+# +0+0 and at most 400 rows tall, and this puts the sentinels in the bottom ten
+# rows of a 600-row frame. The runner's own assert_sentinel_clear re-checks
+# that against the actual crop on every run, stamped or not.
 #
 #   $1 marker file to write
 #   $2 directory to build, created here
@@ -154,6 +184,21 @@ set -e
 for shot; do :; done
 cp "\$shot" "\$shot.as-captured"
 $damage
+# -colorspace sRGB going in and PNG24 coming out, because the frame being
+# stamped is often GREY and both ends of that drop the colour. The terminal's
+# empty screen is a black text area on white, and import writes it as an 8-bit
+# Grayscale PNG; compositing an sRGB swatch onto a grayscale image converts the
+# SWATCH to grey, and PNG's encoder then re-detects grayscale on the way out
+# even when it did not. Either alone leaves the stamp as invisible to a colour
+# search as no stamp at all. Measured without them: 442 captures in one
+# narrowed-frame run, every one reporting 0 pixels of $PRE_HEX, and the
+# scenario failing as a readiness timeout rather than taking its verdict.
+# -type TrueColor alone does NOT do it - tried, and the composite still came
+# out "8-bit Grayscale Gray 256c" with 0 pixels of either colour.
+"$REAL_CONVERT" "\$shot" -colorspace sRGB -type TrueColor \\
+        \( -size 10x10 xc:'$PRE_HEX' \) -gravity SouthWest -composite \\
+        \( -size 10x10 xc:'$POST_HEX' \) -gravity SouthEast -composite \\
+        "PNG24:\$shot"
 {
         "$REAL_CONVERT" "\$shot" -format 'geometry %wx%h\n' info:
         # A difference is only countable where the two agree on a shape.
@@ -693,40 +738,111 @@ for ALT_FONT in "$ALT_FONT_A" "$ALT_FONT_B"; do
                 verdict_failed "the font sentinel $CASE is not font-invariant under $ALT_FONT after all"
 done
 
-# Scenario: a run that TIMED OUT waiting for the terminal is never reported as
-# a rendering difference.
+# Scenario: EACH of the readiness waits, reached, says which one it was, and
+# none of them is ever reported as a rendering difference.
 #
-# The runner's readiness gate is three waits on the terminal - that it answered
-# DSR-5 at all, that it painted its window, that it drew the fixture. Each can
-# be reached by a machine too slow rather than by a renderer drawing the wrong
-# thing, and the whole point of the gate is that those two are told apart. A
-# runner that let a timeout fall through to the comparison would report the
-# frame it happened to hold, which is the mid-paint red this gate exists to
-# stop.
+# The runner's readiness gate is four waits on the terminal - that it answered
+# DSR-5 at all, that it painted its window, that it finished parsing the
+# fixture, that it drew it. Each can be reached by a machine too slow rather
+# than by a renderer drawing the wrong thing, and the whole point of the gate
+# is that those two are told apart. A runner that let a timeout fall through to
+# the comparison would report the frame it happened to hold, which is the
+# mid-paint red this gate exists to stop.
 #
-# Driven with VTE_TEST_READY_TIMEOUT=0, so the first wait's deadline is already
-# past when it is reached. No shim is needed and no terminal has to be
-# starved: the run reaches the same code an exhausted deadline reaches.
+# This used to be ONE run driven with VTE_TEST_READY_TIMEOUT=0, and that is a
+# gate that could not see three quarters of what it claimed to hold: a global
+# zero exhausts the FIRST wait, the run ends there, and the other three had
+# never been executed by this file in their lives - while meson_options.txt
+# tells a builder all of them report themselves in the terminal's own terms.
+# The runner therefore takes VTE_TEST_STARVE_WAIT, which starves ONE named wait
+# and leaves the rest their real deadline, so each is reached in turn with the
+# terminal genuinely working up to that point.
 #
-# Asserted in both directions, because only the pair is the claim: the words
-# have to name the TERMINAL, and they must not be the words a wrong frame gets.
-VTE_TEST_READY_TIMEOUT=0 VTE_TEST_ARTIFACT_DIR="$WORK" \
+# Each is asserted in both directions, because only the pair is the claim: the
+# words have to name the TERMINAL and that wait, and they must not be the words
+# a wrong frame gets.
+#
+# 'drawn' is not driven against $CASE alone. $CASE has a post-sentinel and the
+# .eof case does not, so the two reach that wait through different code - a
+# sentinel search and a frame comparison - and driving only the first would
+# leave the .eof path's timeout unexercised. Whether an .eof fixture is present
+# to drive it with is a property of the tree, so it is looked for rather than
+# assumed, and its absence is reported instead of silently skipped.
+starve_says() {
+        local wait_name=$1 case_name=$2 phrase=$3
+
+        VTE_TEST_STARVE_WAIT="$wait_name" VTE_TEST_ARTIFACT_DIR="$WORK" \
+                "$RUNNER" "$APP" "$FIXTURES" "$case_name" "$ARM" >"$WORK/out" 2>&1
+        STATUS=$?
+        skip_if_skipped
+
+        [ "$STATUS" != 0 ] ||
+                verdict_failed "the render test passed $case_name without ever reaching the '$wait_name' wait"
+
+        case "$(cat "$WORK/out")" in
+                *"differs from the golden"*)
+                        verdict_failed "the '$wait_name' wait timing out was reported as a rendering difference" ;;
+        esac
+
+        case "$(cat "$WORK/out")" in
+                *"$phrase"*) ;;
+                *) verdict_failed "the '$wait_name' wait timed out without saying so - expected '$phrase', got: $(cat "$WORK/out")" ;;
+        esac
+}
+
+# A name the runner does not know must be REFUSED, not quietly ignored. Without
+# this, every assertion above would still pass on a typo - the run would simply
+# starve nothing, fail for some other reason or not at all - and the whole
+# scenario would be measuring the empty string.
+VTE_TEST_STARVE_WAIT=no-such-wait VTE_TEST_ARTIFACT_DIR="$WORK" \
         "$RUNNER" "$APP" "$FIXTURES" "$CASE" "$ARM" >"$WORK/out" 2>&1
 STATUS=$?
-skip_if_skipped
-
 [ "$STATUS" != 0 ] ||
-        verdict_failed "the render test passed without ever waiting for the terminal"
-
+        verdict_failed "the runner accepted a starve target it does not implement"
 case "$(cat "$WORK/out")" in
-        *"differs from the golden"*)
-                verdict_failed "a run that never waited for the terminal was reported as a rendering difference" ;;
+        *"names no wait"*) ;;
+        *) verdict_failed "the runner did not refuse an unknown starve target by name" ;;
 esac
 
-case "$(cat "$WORK/out")" in
-        *"the terminal never answered DSR-5"*) ;;
-        *) verdict_failed "a run that timed out waiting for the terminal did not say so" ;;
-esac
+starve_says alive "$CASE" "the terminal never answered DSR-5, so it never read anything the child wrote"
+starve_says painted "$CASE" "the terminal never painted its window"
+starve_says parsed "$CASE" "the terminal never answered DSR-5 after $CASE, so it never finished parsing the fixture"
+starve_says drawn "$CASE" "the terminal parsed $CASE but never drew it"
+
+EOF_CASE=
+for f in "$SRCDIR"/*.eof; do
+        [ -r "$f" ] || continue
+        EOF_CASE=$(basename "$f" .eof)
+        break
+done
+[ -n "$EOF_CASE" ] ||
+        { echo "FAIL: no .eof fixture in $SRCDIR to drive the .eof readiness path with"; exit 1; }
+
+cp "$SRCDIR/$EOF_CASE.six" "$SRCDIR/$EOF_CASE.eof" "$FIXTURES/" || exit 1
+[ -r "$SRCDIR/$EOF_CASE.crop" ] && { cp "$SRCDIR/$EOF_CASE.crop" "$FIXTURES/" || exit 1; }
+cp "$SRCDIR/$EOF_CASE.golden-$ARM.png" "$FIXTURES/" || exit 1
+starve_says drawn "$EOF_CASE" "the terminal parsed $EOF_CASE but never drew it"
+
+# Scenario: no golden contains a paint-sentinel colour.
+#
+# The sentinels are only a readiness signal while they are colours no correct
+# frame can hold. That was true when they were chosen - 85 distinct colours
+# across the 18 goldens, neither among them - and it is exactly the shape of
+# claim that a golden regenerated next year falsifies without anyone noticing,
+# so it is re-measured here instead of being left as a sentence in a comment.
+#
+# The colours come from $SENTINEL_HEXES, read out of the runner at the top.
+for hex in $SENTINEL_HEXES; do
+        for golden in "$SRCDIR"/*.golden-*.png; do
+                found=$("$REAL_CONVERT" "$golden" -fuzz 0 \
+                        -fill '#000000' +opaque "$hex" \
+                        -fill '#FFFFFF' -opaque "$hex" \
+                        -format '%[fx:mean*w*h]' info: 2>/dev/null) ||
+                        { echo "FAIL: could not search $golden for $hex"; exit 1; }
+                is_number "$found" 0 ||
+                        { echo "FAIL: $(basename "$golden") contains $found pixels of the paint sentinel $hex, which the readiness gate reads as the terminal having drawn"; exit 1; }
+        done
+done
 
 echo "PASS: the frame the render test captures itself passes it"
 echo "PASS: a frame with one changed pixel fails the render test"
@@ -739,5 +855,8 @@ echo "PASS: a comparator contradicting its own non-zero count is named as one, n
 echo "PASS: a failing frame is kept out of the fixture directory, in the artifact directory or the working one"
 echo "PASS: the runner's --sixel turns images back on for an app whose default is off"
 echo "PASS: $CASE is font-invariant under two fonts that move $SENSITIVE by different amounts, so the font sentinel holds"
-echo "PASS: a run that timed out waiting for the terminal says so, and is not reported as a rendering difference"
+echo "PASS: each of the four readiness waits, reached, names itself and is not reported as a rendering difference"
+echo "PASS: the .eof case's readiness wait is reached and names itself too"
+echo "PASS: the runner refuses a starve target it does not implement"
+echo "PASS: no golden holds a paint-sentinel colour, so neither sentinel can be read off a correct frame"
 exit 0

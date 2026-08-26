@@ -85,6 +85,35 @@ done
 [ -x "$APP" ] || { echo "SKIP: $APP not executable"; exit 77; }
 [ -r "$SIX" ] || { echo "FAIL: no fixture $SIX"; exit 1; }
 
+# Starve ONE named readiness wait, leaving the others their real deadline; see
+# the four wait sites near the bottom of the file for what each one is.
+#
+# This exists because render-gate-test.sh could not otherwise see three of the
+# four. Driven the way it used to be - VTE_TEST_READY_TIMEOUT=0 - the FIRST
+# wait's deadline is already past when it is reached, so the run ends there and
+# the other three had never been executed by the gate in their lives, while
+# meson_options.txt tells a builder all of them report themselves in the
+# terminal's own terms. A gate that cannot reach a wait cannot hold it.
+#
+# An unknown name is REFUSED rather than silently starving nothing - a typo in
+# the gate would otherwise turn its scenario into a normal run asserting the
+# wrong words - and it is refused HERE, at the top, with the other argument
+# checks and before an X server or an app exists.
+#
+# Where it is checked is not a matter of taste. This block first sat below,
+# past the Xvfb and app launches, and rejecting a name there means exiting
+# between starting the background jobs and reaching the waits, which hangs:
+# cleanup's `wait` blocks on a job that has been forked and has not yet exec'd,
+# and it never returns. Measured - two gate runs in parallel, one of them stuck
+# 500 s and still going, `ps` showing the runner in do_wait over a spinning
+# bash child with no Xvfb and no app under it - and under meson it came out as
+# "sixel-render-gate-gtk3 TIMEOUT 900.08s killed by signal 15 SIGTERM".
+STARVE=${VTE_TEST_STARVE_WAIT:-}
+case "$STARVE" in
+        ''|alive|painted|parsed|drawn) ;;
+        *) echo "FAIL: VTE_TEST_STARVE_WAIT names no wait: '$STARVE'"; exit 1 ;;
+esac
+
 WORK=$(mktemp -d)
 cleanup() {
         [ -n "${APID:-}" ] && kill "$APID" 2>/dev/null
@@ -182,26 +211,182 @@ export LIBGL_ALWAYS_SOFTWARE=1
 # The park stays, now only to keep the terminal's idea of the cursor away from
 # the image.
 #
+# The terminal's size in cells, in one place because three things below are
+# derived from it: the --geometry the app is given, the size the child waits to
+# see before it addresses a cell, and the row the paint sentinels are printed
+# on.
+ROWS=24
+COLS=80
+
+# Two PAINT SENTINELS: a cell of a colour that appears in no golden, printed at
+# a known place, and waited for as a PIXEL.
+#
+# This is what the readiness gate's "the picture changed" step became, and the
+# reason it had to is a measurement. That step said: the only thing sent since
+# the empty frame is the fixture, so a picture that differs from it is the
+# fixture on screen. That sentence is false, and here is the frame that
+# falsifies it. gtk3, raster-opaque, the runner given an $APP that execs the
+# real one inside `systemd-run --user --scope -p CPUQuota=1% -p AllowedCPUs=0`,
+# every capture the run made kept, two reds out of six:
+#
+#   empty.png   800x600, 385400 px white and 94600 px black
+#   shot.png    800x600, 385600 px white and 94400 px black
+#   difference  200 px, trim box 10x20+1+1
+#   that cell   in empty.png 200 px of #000000; in shot.png 200 px of #FFFFFF
+#
+# 10x20 at +1+1 is ONE CELL at the terminal origin, and it went from solid
+# black to solid white. That is the BLOCK CURSOR being erased. The child's
+# first act is DECTCEM off, and the terminal answers DSR-5 for it long before
+# the repaint that takes the cursor off the screen; under load that repaint
+# lands after the empty frame has been captured and has settled. So the picture
+# changed, the change was accepted as the fixture having been drawn, and the
+# frame handed to the comparison was the whole 400x400 crop white - 160000 px
+# of #FFFFFF, no image anywhere in it - reported as AE=119245 against a golden
+# that is a solid red square.
+#
+# A difference proves only that SOMETHING was painted. So do not infer; look
+# for a pixel that can only have got there one way:
+#
+#   pre-sentinel   printed by the prologue. The empty frame is not taken until
+#                  this is on screen, so the empty frame is one the terminal
+#                  painted AFTER the prologue - the cursor already gone.
+#   post-sentinel  printed after the fixture. Its arrival proves the paint
+#                  reached PAST the fixture in the byte stream.
+#
+# Why the post-sentinel carries the image with it, rather than merely following
+# it: the child writes the fixture and then the sentinel down ONE pty, and the
+# parser consumes a byte stream in order, so insert_image() has run before the
+# sentinel cell exists in the model. A frame is painted from the model, so any
+# frame holding the sentinel is painted from a model that already holds the
+# image.
+#
+# What that leaves open is a frame whose damage region covers the sentinel's
+# cell and not the image's. The reason to think it cannot happen is that the
+# image's invalidation is still outstanding when the sentinel's arrives, so the
+# region GTK hands the next draw is the union of the two, and Terminal::draw()
+# repaints every image intersecting the region it is given (vte.cc, the
+# `if (m_images_enabled)` block). But that is an argument about GTK's damage
+# accumulation and NOTHING HERE PROVES IT. It was surveyed instead, on this
+# arm, with every capture of every run kept:
+#
+#   12 runs of raster-opaque under the 1% scope above, 62 captured frames.
+#   24 of the 62 held the post-sentinel. All 24 also held the image
+#   (#C00000 present). Frames holding the sentinel and not the image: 0.
+#
+# Zero counterexamples in 24 opportunities is a survey, not a demonstration.
+# So the settle wait below is KEPT as belt-and-braces rather than retired on
+# the strength of it: what is PROVED here is the ordering - the sentinel cannot
+# be in the model before the image is - and the union is only observed.
+#
+# The colours are checked against the goldens rather than chosen and hoped for.
+# Run in this directory, this enumerates every colour in every golden of every
+# arm and looks for the two:
+#
+#   $ export LC_ALL=C
+#   $ for f in *.golden-*.png; do
+#         magick "$f" txt:- | sed 1d | awk '{print $3}'
+#     done | sort -u >/tmp/allcolours
+#   $ wc -l </tmp/allcolours; ls *.golden-*.png | wc -l
+#   85
+#   18
+#   $ grep -E '#(12FE34|DE12FE)' /tmp/allcolours; echo "exit: $?"
+#   exit: 1
+#
+# 85 distinct colours across 18 goldens and neither sentinel among them, so a
+# sentinel pixel inside a compared crop could not be mistaken for a golden
+# pixel - it would fail the case.
+#
+# Both halves of that are held rather than left to decay. A golden regenerated
+# tomorrow could introduce the colour, so render-gate-test.sh re-runs this
+# enumeration over the real goldens on every green run; and that a sentinel
+# never reaches a crop in the first place is asserted per run rather than
+# assumed, by assert_sentinel_clear below, which measures each sentinel's
+# bounding box in the captured frame and refuses to reach a verdict if any of
+# it is inside the crop.
+PRE_SENTINEL=$'\033[38;2;18;254;52m\033[48;2;18;254;52m \033[m'
+PRE_SENTINEL_HEX='#12FE34'
+POST_SENTINEL=$'\033[38;2;222;18;254m\033[48;2;222;18;254m \033[m'
+POST_SENTINEL_HEX='#DE12FE'
+
+# Both are printed on the LAST row at the LEFT-HAND end, two columns apart so
+# neither overwrites the other.
+#
+# Left rather than right, because the right-hand end of a row is not reliably
+# on the screen. The capture is `import -window root` of an 800x600 display,
+# and 80 columns only fit in it while the cell is narrow enough. Measured, one
+# cell printed at row 24 column 1 and one at row 24 column 77, then located in
+# the captured root:
+#
+#   font                column 1         column 77
+#   Monospace 12        10x20+1+461      10x20+761+461
+#   DejaVu Serif 12     17x20+1+461      NOT IN THE FRAME - 0 pixels
+#   Liberation Mono 8    7x14+1+323       7x14+533+323
+#
+# DejaVu Serif 12 puts the cell at 17 px, so 80 of them is 1360 px and column
+# 77 is off the right of the screen entirely. A sentinel there is one the
+# runner can never see, and render-gate-test.sh runs that very font: the whole
+# font scenario came out as "bands-margin was never captured: the terminal
+# never painted its window" while column 77 was where the sentinels stood.
+# Column 1 is in the frame at all three.
+#
+# The other thing the position has to survive is SCROLLING, and the pre-sentinel
+# does not - it is on screen before the fixture, and a fixture can scroll it.
+# Measured, gtk3/raster-opaque, three runs identical: a pre-sentinel printed on
+# row 24 ended up on row 17, because raster-opaque declares "1;1;600;600 - a
+# 600 px raster, 30 rows at the pinned 20 px cell - into a 24-row screen. Seven
+# rows up from the bottom-left is inside the 400x400 crop that case compares.
+#
+# So the pre-sentinel is not left there to be scrolled: the child ERASES the
+# screen as its first act after the fixture is released, before a byte of the
+# fixture is written. That is an ESC, but it is ahead of the fixture rather
+# than after it, so even the .eof case can take it. The frame under test
+# therefore holds the post-sentinel only, which is printed after everything
+# that could scroll it.
+#
+# What remains font-dependent is whether row 24 is above a crop's bottom edge.
+# At the pinned font it is not close - y=461 against crops at most 400 tall. At
+# Liberation Mono 8 the terminal is only 338 px tall, so row 24 is at y=323 and
+# the two 400x400 crops would reach it. That is an honest limit of an
+# overriding VTE_TEST_FONT, not a silent one: assert_sentinel_clear measures it
+# per run and stops, naming the sentinel, rather than comparing a crop with a
+# colour this test put in it.
+PRE_AT=$'\033['"$ROWS;3"'H'
+POST_AT=$'\033['"$ROWS;1"'H'
+
 # The child runs in three parts, and the runner drives the joins between them;
 # see the handshake below for what each one establishes.
 #
-#   prologue  turn the cursor off, ask DSR-5, and then BLOCK on $WORK/go.
-#             The block is what lets the runner learn the terminal's own empty
-#             screen before a single byte of the fixture has been sent.
-#   fixture   released by $WORK/go: home the cursor, write the sixel, park.
-#   epilogue  ask DSR-5 again, so the runner has the TERMINAL's word that the
-#             fixture was parsed, and then stay alive to be photographed.
+#   prologue  turn the cursor off, wait for the terminal to have taken the
+#             geometry it was asked for, print the pre-sentinel, ask DSR-5, and
+#             then BLOCK on $WORK/go. The block is what lets the runner learn
+#             the terminal's own empty screen before a single byte of the
+#             fixture has been sent.
+#   fixture   released by $WORK/go: ERASE THE SCREEN, taking the pre-sentinel
+#             with it before anything can scroll it into a compared crop, then
+#             home the cursor, write the sixel, park.
+#   epilogue  print the post-sentinel, re-park, ask DSR-5 again so the runner
+#             has the TERMINAL's word that the fixture was parsed, and then
+#             stay alive to be photographed.
+#
+# The `stty size` loop is what makes addressing a cell mean anything. Measured
+# without it: the pre-sentinel printed at row 24 landed at y=321, which is row
+# 17 - the child had reached its first printf before the widget's allocation
+# had reached the pty, so row 24 clamped to the bottom of a 17-row screen. A
+# terminal that never reaches $ROWS x $COLS never answers DSR-5, and wait 1
+# below reports that in the terminal's own terms.
 #
 # The child reads its replies rather than leaving them in the pty, and `stty
 # raw -echo` is what makes that possible: without -echo the reply would be
 # echoed back and drawn into the frame under test.
-CHILD_PROLOGUE="stty raw -echo; printf '\\033[?25l\\033[5n'; dd bs=1 count=4 of='$WORK/alive' 2>/dev/null; while [ ! -e '$WORK/go' ]; do sleep 0.02; done"
+CHILD_PROLOGUE="stty raw -echo; printf '\\033[?25l'; while [ \"\$(stty size)\" != '$ROWS $COLS' ]; do sleep 0.02; done; printf '%s%s\\033[H\\033[5n' '$PRE_AT' '$PRE_SENTINEL'; dd bs=1 count=4 of='$WORK/alive' 2>/dev/null; while [ ! -e '$WORK/go' ]; do sleep 0.02; done"
 
-CHILD="$CHILD_PROLOGUE; printf '\\033[H'; cat '$SIX'; printf '\\033[20;1H\\033[5n'; dd bs=1 count=4 of='$WORK/answered' 2>/dev/null; sleep 30"
+CHILD="$CHILD_PROLOGUE; printf '\\033[H\\033[2J'; cat '$SIX'; printf '\\033[20;1H%s%s\\033[20;1H\\033[5n' '$POST_AT' '$POST_SENTINEL'; dd bs=1 count=4 of='$WORK/answered' 2>/dev/null; sleep 30"
 KEEP=()
-# Whether the terminal is asked to speak again AFTER the fixture. The .eof
-# case below cannot be, so it says so here rather than the wait guessing.
+# Whether the terminal is asked to speak again AFTER the fixture, and whether a
+# post-sentinel is printed after it. The .eof case below can take neither, so it
+# says so here rather than the waits guessing.
 ANSWER_AFTER=1
+SENTINEL_AFTER=1
 
 # A case whose fixture is a sixel with NO TERMINATOR has to be run
 # differently, and an empty <case>.eof next to the fixture says so - the flag
@@ -218,14 +403,24 @@ ANSWER_AFTER=1
 # deliberately does not draw. Measured with the park still in place: three
 # runs, two blank frames and one image. So this case drops the park - and the
 # DSR-5 that follows it, which is an ESC too, so this is the one case whose
-# terminal cannot be asked to confirm the parse. It is still gated on the
-# terminal rather than on the child: the whole of the prologue handshake below
-# runs BEFORE the fixture, and what follows it is the wait for the picture to
-# change, which only the terminal can satisfy.
+# terminal cannot be asked to confirm the parse.
+#
+# The post-sentinel is an ESC as well, so this case does not get one either,
+# and it is the one case whose readiness is still an inference rather than a
+# pixel. Say exactly what it is left with, because it is weaker: the picture
+# having CHANGED from the empty frame, and then repeated. What that no longer
+# admits is the cursor erasure documented at the sentinels above - the empty
+# frame is not taken until the PRE-sentinel is on screen, and the pre-sentinel
+# is printed after the DECTCEM, so a frame carrying it was painted with the
+# cursor already gone. What it still admits in principle is any OTHER paint the
+# terminal makes on its own between the empty frame and the fixture's. None is
+# known; none was seen in the throttled runs; and unlike the other eight cases
+# that is a survey rather than a proof.
 if [ -r "$SRCDIR/$CASE.eof" ]; then
         KEEP=(--keep)
-        CHILD="$CHILD_PROLOGUE; printf '\\033[H'; cat '$SIX'"
+        CHILD="$CHILD_PROLOGUE; printf '\\033[H\\033[2J'; cat '$SIX'"
         ANSWER_AFTER=
+        SENTINEL_AFTER=
 fi
 
 # Pin the font, because some of the compared regions move with the cell.
@@ -290,19 +485,11 @@ FONT=${VTE_TEST_FONT:-Monospace 12}
 # flag below is then the only thing putting the images back, and deleting it
 # turns that scenario red.
 #
-# Photograph the BARE ROOT first, before the app exists. Nothing else draws on
-# this display - it was booted here, for this run, with no window manager and
-# no other client - so the first frame that differs from this one is the app's
-# own first paint and cannot be anything else. Every wait below is anchored on
-# a frame the terminal itself produced, and this is the first link in the
-# chain.
 capture() {
         import -window root "$1" 2>"$WORK/im.log"
 }
 
-capture "$WORK/bare.png" || { echo "FAIL: could not capture the window"; exit 1; }
-
-"$APP" --sixel "${KEEP[@]}" --no-load-config --no-decorations --geometry 80x24 --font "$FONT" \
+"$APP" --sixel "${KEEP[@]}" --no-load-config --no-decorations --geometry "${COLS}x${ROWS}" --font "$FONT" \
         -- sh -c "$CHILD" >"$WORK/app.log" 2>&1 &
 APID=$!
 
@@ -338,8 +525,8 @@ APID=$!
 #            before everything queued ahead of the query has been parsed, so
 #            the reply arriving is the fixture having reached the model.
 #
-#   DRAWN    the picture on the screen having CHANGED from the frame the
-#            terminal drew before the fixture was released to it.
+#   DRAWN    a paint SENTINEL - a cell of a colour no golden contains, printed
+#            after the fixture - being on the screen at all.
 #
 # The second is not redundant, and this is the measurement that says so rather
 # than an argument. The same 1% scope, the same case, the readiness flag moved
@@ -349,21 +536,37 @@ APID=$!
 # too. Parsed is not painted, and a gate that stopped at the reply would have
 # been a mechanism named for what it was wanted to do.
 #
-# That also rules out settling alone, by the same six runs: two consecutive
-# equal captures is satisfied by the empty screen, which held across two
-# samples half the time. Stability is only a signal where the input stream is
-# QUIESCENT, and the handshake below is arranged so that it only ever is asked
-# at such a point: the child blocks on $WORK/go, and the terminal has already
-# answered for everything sent before it, so once a frame repeats there is
-# nothing left in flight that could change it. That is a structural quiescence,
-# not a duration.
+# What DRAWN must not be is "the picture changed". That was the previous
+# version of this gate and the sentinels above carry the frame that falsified
+# it: a 400x400 crop of 160000 white pixels, no image, admitted because the
+# block cursor had been erased between the empty frame and this one. A
+# difference says something was painted; it does not say WHAT.
 #
-# The cap is a last resort and not the mechanism. Reaching any of the three
-# waits is reported in the terminal's terms - it never painted, it never
-# answered, it never drew - and never as a difference from the golden, so a
-# machine too slow to photograph can never be read as a renderer that draws the
-# wrong thing.
+# Settling is kept under both, and it is not the mechanism either. By the same
+# six runs, two consecutive equal captures is satisfied by the empty screen,
+# which held across two samples half the time. Stability is only a signal where
+# the input stream is QUIESCENT, and the handshake is arranged so that it is
+# only ever asked at such a point: the child blocks on $WORK/go, and the
+# terminal has already answered for everything sent before it, so once a frame
+# repeats there is nothing left in flight that could change it. That is a
+# structural quiescence, not a duration.
+#
+# The cap is a last resort and not the mechanism. Reaching any of the four
+# waits is reported in the terminal's terms - it never answered, it never
+# painted, it never finished parsing, it never drew - and never as a difference
+# from the golden, so a machine too slow to photograph can never be read as a
+# renderer that draws the wrong thing.
 READY_TIMEOUT=${VTE_TEST_READY_TIMEOUT:-90}
+
+# The deadline a wait gets: none at all when it is the starved one. $STARVE is
+# read and validated at the top of the file, before anything is launched.
+deadline_for() {
+        if [ "$1" = "$STARVE" ]; then
+                echo "$SECONDS"
+        else
+                echo "$((SECONDS + READY_TIMEOUT))"
+        fi
+}
 
 # DSR-5 is asked rather than DSR-6/CPR because its reply has NO variable field:
 # ECMA-48 makes the operating-status answer CSI 0 n, four bytes, whatever the
@@ -382,8 +585,9 @@ reply_complete() { [ -e "$1" ] && [ "$(wc -c <"$1")" = 4 ]; }
 # bytes. A reply of some other shape means this no longer knows what it is
 # being told, which is not a thing to photograph and report on.
 wait_for_reply() {
-        local flag=$1 what=$2
-        local deadline=$((SECONDS + READY_TIMEOUT))
+        local name=$1 flag=$2 what=$3
+        local deadline
+        deadline=$(deadline_for "$name")
         local got=
 
         while [ "$SECONDS" -lt "$deadline" ]; do
@@ -404,15 +608,59 @@ wait_for_reply() {
         }
 }
 
+# How many pixels of colour $2 the frame $1 holds.
+#
+# Every pixel that is not the colour is painted black, then every pixel that IS
+# it is painted white, and the mean of the result times the pixel count is the
+# tally. -fuzz 0 makes it an exact match, so a cell antialiased against its
+# neighbours contributes only the pixels that really are the colour - and the
+# sentinel is a filled cell whose foreground and background are both set to it,
+# so there is no glyph edge inside it to antialias.
+sentinel_pixels() {
+        convert "$1" -fuzz 0 -fill '#000000' +opaque "$2" \
+                -fill '#FFFFFF' -opaque "$2" \
+                -format '%[fx:mean*w*h]' info: 2>"$WORK/im.log"
+}
+
+# Wait until the sentinel colour $2 is ON the screen and the frame has then
+# stayed put for one further capture, and leave that settled frame in $3.
+#
+# The sentinel is the signal; the repeat is belt-and-braces. See the sentinel
+# block near the top for which of the two is proved and which is measured.
+wait_for_sentinel() {
+        local name=$1 hex=$2 into=$3 what=$4
+        local deadline seen
+        deadline=$(deadline_for "$name")
+
+        while [ "$SECONDS" -lt "$deadline" ]; do
+                capture "$into" || { echo "FAIL: could not capture the window"; exit 1; }
+
+                seen=$(sentinel_pixels "$into" "$hex") ||
+                        broken_comparison "could not look for the paint sentinel $hex"
+                if awk -v n="$seen" 'BEGIN { exit !(n > 0) }'; then
+                        cp "$into" "$WORK/settling.png"
+                        capture "$into" || { echo "FAIL: could not capture the window"; exit 1; }
+                        cmp -s "$WORK/settling.png" "$into" && return 0
+                        continue
+                fi
+
+                sleep 0.05
+        done
+
+        echo "FAIL: $CASE was never captured: $what"
+        [ -s "$WORK/app.log" ] && sed 's/^/  /' "$WORK/app.log"
+        exit 1
+}
+
 # Wait until the picture has CHANGED from $1 and then stayed put for one
 # further capture, and leave that settled frame in $2.
 #
-# Both halves are needed and neither substitutes for the other: the change is
-# what makes it the terminal's signal rather than a duration, and the repeat is
-# what keeps a frame caught between two paints from being the one compared.
+# Only the .eof case is left on this, and only because nothing may follow its
+# fixture; see the .eof block above for what that costs it.
 wait_for_frame() {
-        local from=$1 into=$2 what=$3
-        local deadline=$((SECONDS + READY_TIMEOUT))
+        local name=$1 from=$2 into=$3 what=$4
+        local deadline
+        deadline=$(deadline_for "$name")
 
         while [ "$SECONDS" -lt "$deadline" ]; do
                 capture "$into" || { echo "FAIL: could not capture the window"; exit 1; }
@@ -432,15 +680,18 @@ wait_for_frame() {
         exit 1
 }
 
-# 1. The terminal is alive and has parsed the cursor-off the child opens with.
-#    Nothing visible has been sent yet, so nothing that follows can be mistaken
-#    for the fixture.
-wait_for_reply "$WORK/alive" "the terminal never answered DSR-5, so it never read anything the child wrote"
+# 1. The terminal is alive, has taken its geometry, and has parsed the
+#    cursor-off and the pre-sentinel the child opens with. Nothing of the
+#    FIXTURE has been sent yet, so nothing that follows can be mistaken for it.
+wait_for_reply alive "$WORK/alive" "the terminal never answered DSR-5, so it never read anything the child wrote"
 
-# 2. The terminal's own empty screen. The child is blocked on $WORK/go and has
-#    answered for everything before it, so this frame is the whole of what the
-#    terminal has to show until the fixture is released.
-wait_for_frame "$WORK/bare.png" "$WORK/empty.png" "the terminal never painted its window"
+# 2. The terminal's own empty screen, and the pre-sentinel is what says this
+#    frame is one the terminal painted after the prologue rather than before
+#    it - which is where the erased block cursor used to hide. The child is
+#    blocked on $WORK/go and has answered for everything before it, so this
+#    frame is the whole of what the terminal has to show until the fixture is
+#    released.
+wait_for_sentinel painted "$PRE_SENTINEL_HEX" "$WORK/empty.png" "the terminal never painted its window"
 
 # 3. Release the fixture.
 touch "$WORK/go"
@@ -448,11 +699,46 @@ touch "$WORK/go"
 # 4. The terminal has parsed it. Not asked of the .eof case, whose fixture
 #    nothing may follow; see the .eof note above.
 [ -n "$ANSWER_AFTER" ] &&
-        wait_for_reply "$WORK/answered" "the terminal never answered DSR-5 after $CASE, so it never finished parsing the fixture"
+        wait_for_reply parsed "$WORK/answered" "the terminal never answered DSR-5 after $CASE, so it never finished parsing the fixture"
 
-# 5. And has drawn it. The only thing sent since the empty frame is the
-#    fixture, so a picture that differs from it is the fixture on screen.
-wait_for_frame "$WORK/empty.png" "$WORK/shot.png" "the terminal parsed $CASE but never drew it"
+# 5. And has drawn it: the post-sentinel, printed after the fixture on the same
+#    pty, is on the screen. The .eof case cannot have one and falls back to the
+#    picture having changed; see the .eof note above for what that is worth.
+if [ -n "$SENTINEL_AFTER" ]; then
+        wait_for_sentinel drawn "$POST_SENTINEL_HEX" "$WORK/shot.png" "the terminal parsed $CASE but never drew it"
+else
+        wait_for_frame drawn "$WORK/empty.png" "$WORK/shot.png" "the terminal parsed $CASE but never drew it"
+fi
+
+# The sentinels must be nowhere near the region the verdict comes from, and
+# that is asserted on the frame in hand rather than reasoned about. A font
+# other than the pinned one moves every cell, so the row they sit on is not a
+# fixed pixel coordinate; if one ever lands inside the crop this stops, in the
+# runner's own terms, instead of failing the case for a colour the test put
+# there itself.
+assert_sentinel_clear() {
+        local hex=$1 what=$2 box=
+
+        convert "$WORK/shot.png" -fuzz 0 -fill '#000000' +opaque "$hex" \
+                "$WORK/sentinel.png" 2>"$WORK/im.log" ||
+                broken_comparison "could not locate the $what paint sentinel"
+
+        box=$(convert "$WORK/sentinel.png" -trim -format '%wx%h+%X+%Y' info: 2>"$WORK/im.log") ||
+                broken_comparison "could not measure the $what paint sentinel"
+
+        convert "$WORK/shot.png" -crop "$CROP" +repage "$WORK/croptest.png" 2>"$WORK/im.log" ||
+                broken_comparison "could not crop $CROP out of the captured frame"
+
+        local inside
+        inside=$(sentinel_pixels "$WORK/croptest.png" "$hex") ||
+                broken_comparison "could not look for the $what paint sentinel in the crop"
+
+        awk -v n="$inside" 'BEGIN { exit !(n > 0) }' && {
+                echo "FAIL: $CASE could not be compared: the $what paint sentinel $hex is at $box, inside the compared crop $CROP"
+                exit 1
+        }
+        return 0
+}
 
 # Crop a box that is DELIBERATELY WIDER AND TALLER than the image.
 #
@@ -472,6 +758,12 @@ if [ -r "$SRCDIR/$CASE.crop" ]; then
 else
         CROP=${VTE_TEST_CROP:-320x130+0+0}
 fi
+
+# Only the post-sentinel, because only it is still on the screen. The child
+# erased the pre-sentinel before writing the fixture, so on a real run there is
+# none to find; asking after it would be a check that cannot fail.
+[ -n "$SENTINEL_AFTER" ] && assert_sentinel_clear "$POST_SENTINEL_HEX" post
+
 # Every ImageMagick step from here on reports its own failure and stops.
 # A step that did not run has produced no evidence about the rendering, and
 # the one thing it must never do is let the run continue to a verdict; see

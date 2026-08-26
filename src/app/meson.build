@@ -306,7 +306,12 @@ if get_option('sixel') and get_option('sixel_display_tests')
       ],
       depends: [arm[1]],
       suite: 'sixel-display',
-      timeout: 240,
+      # Five of this test's scenarios each boot a terminal and then STARVE one
+      # of the runner's readiness waits, so each is a whole app start-up on top
+      # of the ten that were here before. Measured unloaded on gtk3: the run
+      # takes a little over three minutes, against the 240 s this used to
+      # allow, and meson runs these in parallel with the nine render cases.
+      timeout: 900,
     )
 
     # And they are only worth their runtime if they measure the code rather
