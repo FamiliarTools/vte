@@ -257,6 +257,11 @@ if get_option('sixel') and get_option('sixel_display_tests')
     # the family that is not a pure translation, so it carries its own
     # golden.
     'strip-dch',
+    # SD one row inside a DECSLRM region narrower than the screen, which is
+    # the branch that copies cells between rows while the rows stay put.
+    # Golden shared with, and captured from, strip-region-placed.
+    'strip-region-scroll',
+    'strip-region-placed',
   ]
 
   # The case the isolation test runs, which cannot be sixel_render_cases[0].

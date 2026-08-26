@@ -1836,6 +1836,11 @@ public:
                                           vte::grid::column_t left,
                                           vte::grid::column_t right,
                                           long amount);
+        void shift_images_for_vscroll_slow(vte::grid::row_t top,
+                                           vte::grid::row_t bottom,
+                                           vte::grid::column_t left,
+                                           vte::grid::column_t right,
+                                           long amount);
 #endif
 
         /* Repaint after the ring's own rules have moved or deleted an image
@@ -1908,6 +1913,24 @@ public:
 
 #if WITH_SIXEL
                 shift_images_for_scroll_slow(top, bottom, left, right, amount);
+#endif
+        }
+
+        /* The vertical sibling of the above, for the partial-rows branch of a
+         * scroll inside DECSLRM margins, where the cells move between rows and
+         * the rows themselves stay put. @amount is in rows, positive downwards.
+         */
+        inline void shift_images_for_vscroll(vte::grid::row_t top,
+                                             vte::grid::row_t bottom,
+                                             vte::grid::column_t left,
+                                             vte::grid::column_t right,
+                                             long amount)
+        {
+                if (!m_screen->row_data->has_images()) [[likely]]
+                        return;
+
+#if WITH_SIXEL
+                shift_images_for_vscroll_slow(top, bottom, left, right, amount);
 #endif
         }
 

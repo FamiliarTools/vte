@@ -373,20 +373,44 @@ with a cell OUTSIDE the rectangle would be torn - part moved, part standing
 still, and no single left edge describing the result - so that one still loses
 the cells the move takes.
 
+The partial-region VERTICAL scroll is the same shape and takes the same rule.
+With DECSLRM margins narrowing the region, scroll_text_up() and
+scroll_text_down() memcpy cells from row to row while the rows themselves stay
+put - so the cells carry the picture there too.
+Ring::shift_images_for_vscroll() moves such a follower, and it has one thing
+more to move than the horizontal rule does: the image's top row is stored
+TWICE, as its anchor and as its key in m_image_by_top_map, so a follower is
+moved through reanchor_image(), which is the ring's one mover that keeps those
+two in step. Skipping the re-key trips image_invariant_violation() with "an
+image is filed under a top row it does not start at".
+
+What the vertical rule does NOT do is crop. Sideways, a cell pushed off the end
+is dropped and the rest follows clipped, the image's left going to -1.
+Vertically that would have to move the top OUT of the region, and two things
+forbid it: the FULL-width scroll of the same region goes through
+ring_remove()/ring_insert(), where shift_images_for_remove() destroys a
+straddler rather than cropping it - so cropping here would make a picture live
+or die by whether the margins happened to be full width; and row_t is unsigned,
+so an image cropped up past row 0 is filed under a key near ULONG_MAX, which
+every ordered walk over m_image_by_top_map steps straight past. So a picture the
+region would crop is taken, as before.
+
 The rule hangs off the PRIMITIVES that move the cells, not off a list of
 control sequences, and that is the level to state it at: this section used to
 carry the list, and the list was wrong - it named ICH, DCH, SL, SR and insert
 mode, and had never heard of DECIC, DECDC or DECCRA. The primitives are the
-closed part. scroll_text_left() and scroll_text_right() now call
-shift_images_for_scroll() over the region before they memmove the cells; the
-other two still erase over it:
+closed part. Three of the four now hand the region to a shift rule before they
+move the cells; the fourth still erases over it:
 
 	scroll_text_left(), scroll_text_right()	src/vte.cc, sideways scroll -
 						the picture FOLLOWS
 	scroll_text_up(), scroll_text_down()	src/vte.cc, else branch only -
-						a partial-width region
+						a partial-width region; the
+						picture FOLLOWS, but is never
+						cropped
 	copy_rect()				src/vteseq.cc, over the
-						DESTINATION rectangle
+						DESTINATION rectangle - still
+						an erase
 
 Which operations reach them is then a grep and not a memory. -W prints the
 enclosing function, so this ASKS THE TREE for the callers by name and carries
