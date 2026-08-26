@@ -47,14 +47,15 @@
 #   - an app whose sixel default is off still renders, because the runner asks
 #     for --sixel;
 #   - the case the build documentation points a builder at as its font sentinel
-#     really is font-invariant, while a case known to move really moves.
+#     really is font-invariant, under fonts the run itself proves reached the
+#     terminal.
 #
 # The first is not a duplicate of the render cases. The failing ones all read
 # "the runner said no", and a runner that said no to everything would satisfy
 # every one of them; the passing run is what makes their agreement mean
 # anything.
 #
-# usage: render-gate-test.sh <vte-app> <srcdir> <case> <gtk-arm> [font-sensitive-case]
+# usage: render-gate-test.sh <vte-app> <srcdir> <case> <gtk-arm> <font-sensitive-case>
 
 set -u
 
@@ -62,6 +63,11 @@ APP=${1:?vte app binary}
 SRCDIR=${2:?source dir}
 CASE=${3:?case name}
 ARM=${4:?gtk arm}
+# Required, like the four above it. This was once read as ${5:-} with the whole
+# font scenario inside an `if`, which meant a caller that stopped passing it -
+# an edited meson.build, a hand invocation - would lose that scenario in
+# silence while the run still printed PASS for the ten around it.
+SENSITIVE=${5:?font-sensitive case name}
 
 # Resolved absolutely. One scenario below runs the runner from a different
 # working directory - that is the whole of what it measures - and a relative
@@ -564,52 +570,126 @@ skip_if_skipped
 # in a comment, and a case whose crop grew to take in a cell would go on being
 # quoted as font-invariant.
 #
-# So run the pair under an alternate font: this case must still be
-# byte-identical, and the font-sensitive one handed in beside it must not - the
-# second half being what stops the first from passing for the trivial reason
-# that the font was ignored.
+# So run the sentinel under an alternate font and require it byte-identical.
+# What makes that PASS mean anything is the harder half, and it is NOT "the
+# font-sensitive case handed in beside it also fails", which is what stood here
+# before. That case fails under any font that is not the goldens' Monospace 12,
+# the app's own built-in default included, so it goes red exactly the same on a
+# --font that never reached the terminal at all - measured on gtk3 through an
+# app shim that strips --font from the argv, bands-margin still FAILs, at
+# AE=19053. The half meant to rule out an ignored font was satisfied by one.
 #
-# Both halves are held, one red run each, measured on gtk3. Putting the
-# sensitive case in the sentinel's place, so the run required to be invariant
-# compares a crop holding the right margin: "FAIL: the font sentinel
-# bands-margin is not font-invariant after all", under it the runner's own
-# "FAIL: bands-margin differs from the golden (AE=1764)". And with the halves
-# swapped, so the case required to move is the sentinel: "FAIL: the alternate
-# font changed nothing, so this scenario is not measuring a font", under it
-# "PASS: bands renders identically to the golden".
-if [ -n "${5:-}" ]; then
-        SENSITIVE=$5
-        SENSITIVE_FIXTURES="$WORK/sensitive"
-        mkdir "$SENSITIVE_FIXTURES"
-        cp "$SRCDIR/$SENSITIVE.six" \
-           "$SRCDIR/$SENSITIVE.golden-$ARM.png" "$SENSITIVE_FIXTURES/" || exit 1
-        [ -r "$SRCDIR/$SENSITIVE.crop" ] &&
-                { cp "$SRCDIR/$SENSITIVE.crop" "$SENSITIVE_FIXTURES/" || exit 1; }
-        [ -r "$SRCDIR/$SENSITIVE.eof" ] &&
-                { cp "$SRCDIR/$SENSITIVE.eof" "$SENSITIVE_FIXTURES/" || exit 1; }
+# What an ignored font cannot fake is a DIFFERENT amount per font. So drive the
+# sensitive case under TWO alternate fonts and require the two counts to
+# disagree: a --font that is dropped renders the same frame twice and answers
+# the same number twice. Measured on gtk3, same shim:
+#
+#   alternate font       --font honoured   --font stripped
+#   DejaVu Serif 12      AE=1764           AE=19053
+#   Liberation Mono 8    AE=29273          AE=19053
+#
+# Neither count is pinned, only their disagreement, so a host resolving these
+# families elsewhere still measures the same thing. Two families that collapse
+# to ONE font on such a host make this scenario fail loudly instead of passing
+# emptily, which is the right way round.
+#
+# The sentinel is then required invariant under BOTH of them, since the claim
+# meson_options.txt makes is about any foreign Monospace and not about one.
+#
+# Every guard here is held, one red run each, measured on gtk3:
+#
+#   - the sensitive case moving: hand the sentinel in as the sensitive case, so
+#     the run required to move compares nothing but the image. "FAIL: bands
+#     under DejaVu Serif 12 rendered identically to its golden, so the
+#     font-sensitive case does not move", under it "PASS: bands renders
+#     identically to the golden".
+#   - moving because the FRAME differs: drop the golden from the sensitive
+#     fixtures, so the runner exits non-zero without ever comparing. "FAIL:
+#     bands-margin under DejaVu Serif 12 failed for something other than a
+#     difference from its golden", under it the runner's "FAIL: no golden
+#     .../bands-margin.golden-gtk3.png". The bare status check this pairs with
+#     was satisfied by that run and said nothing, which is the whole reason the
+#     words are matched - as they are at every other non-zero status in this
+#     file. The check is applied to both fonts; it is one guard read twice, not
+#     a second guard.
+#   - the two counts disagreeing: run the gate against an app shim that strips
+#     --font from the argv. "FAIL: DejaVu Serif 12 and Liberation Mono 8 moved
+#     bands-margin by the same 19053 pixels, so the alternate font is not
+#     reaching the terminal".
+#   - the sentinel's invariance: hand the sensitive case in as the sentinel, so
+#     the run required to be invariant compares a crop holding the right
+#     margin. "FAIL: the font sentinel bands-margin is not font-invariant under
+#     DejaVu Serif 12 after all", under it "FAIL: bands-margin differs from the
+#     golden (AE=1764)".
+#   - the argument being required: invoke with four arguments.
+#     "render-gate-test.sh: line 70: 5: font-sensitive case name", exit 1,
+#     before any scenario runs.
+SENSITIVE_FIXTURES="$WORK/sensitive"
+mkdir "$SENSITIVE_FIXTURES"
+cp "$SRCDIR/$SENSITIVE.six" \
+   "$SRCDIR/$SENSITIVE.golden-$ARM.png" "$SENSITIVE_FIXTURES/" || exit 1
+[ -r "$SRCDIR/$SENSITIVE.crop" ] &&
+        { cp "$SRCDIR/$SENSITIVE.crop" "$SENSITIVE_FIXTURES/" || exit 1; }
+[ -r "$SRCDIR/$SENSITIVE.eof" ] &&
+        { cp "$SRCDIR/$SENSITIVE.eof" "$SENSITIVE_FIXTURES/" || exit 1; }
 
-        # Not "Monospace something": the point is a font family fontconfig
-        # resolves differently from the goldens' Monospace, which is what a
-        # foreign build host has.
-        ALT_FONT='DejaVu Serif 12'
+# Not "Monospace something": the point is font families fontconfig resolves
+# differently from the goldens' Monospace, which is what a foreign build host
+# has. Two of them, for the reason above, and they have to differ from each
+# other in CELL METRICS and not merely in glyph shape, or the amount they move
+# the sensitive case by could legitimately coincide.
+ALT_FONT_A='DejaVu Serif 12'
+ALT_FONT_B='Liberation Mono 8'
 
-        VTE_TEST_FONT=$ALT_FONT VTE_TEST_ARTIFACT_DIR="$WORK" \
-                "$RUNNER" "$APP" "$SENSITIVE_FIXTURES" "$SENSITIVE" "$ARM" \
-                >"$WORK/out" 2>&1
+# Run the real runner under $1 as the font, over $2 as the fixture directory and
+# $3 as the case. Same contract as run_runner: output in $WORK/out, status in
+# $STATUS.
+run_runner_with_font() {
+        VTE_TEST_FONT="$1" VTE_TEST_ARTIFACT_DIR="$WORK" \
+                "$RUNNER" "$APP" "$2" "$3" "$ARM" >"$WORK/out" 2>&1
         STATUS=$?
+}
+
+# The count the runner reported, or nothing when it never got as far as one.
+runner_ae() { sed -n 's/.*(AE=\([^)]*\)).*/\1/p' "$WORK/out"; }
+
+# The sensitive case under each font: it has to move, and to move because the
+# frame differed rather than because the run fell over.
+SENSITIVE_AE=()
+for ALT_FONT in "$ALT_FONT_A" "$ALT_FONT_B"; do
+        run_runner_with_font "$ALT_FONT" "$SENSITIVE_FIXTURES" "$SENSITIVE"
         skip_if_skipped
 
         [ "$STATUS" != 0 ] ||
-                verdict_failed "the alternate font changed nothing, so this scenario is not measuring a font"
+                verdict_failed "$SENSITIVE under $ALT_FONT rendered identically to its golden, so the font-sensitive case does not move"
 
-        VTE_TEST_FONT=$ALT_FONT VTE_TEST_ARTIFACT_DIR="$WORK" \
-                "$RUNNER" "$APP" "$FIXTURES" "$CASE" "$ARM" >"$WORK/out" 2>&1
-        STATUS=$?
+        case "$(cat "$WORK/out")" in
+                *"differs from the golden"*) ;;
+                *) verdict_failed "$SENSITIVE under $ALT_FONT failed for something other than a difference from its golden" ;;
+        esac
+
+        AE=$(runner_ae)
+        [ -n "$AE" ] ||
+                verdict_failed "$SENSITIVE under $ALT_FONT reported a difference without a count to compare"
+        SENSITIVE_AE+=("$AE")
+done
+
+# The whole non-vacuity of the sentinel runs below: a font that never arrived
+# moves the case by the same amount whichever font was asked for.
+! is_number "${SENSITIVE_AE[0]}" "${SENSITIVE_AE[1]}" ||
+        verdict_failed "$ALT_FONT_A and $ALT_FONT_B moved $SENSITIVE by the same ${SENSITIVE_AE[0]} pixels, so the alternate font is not reaching the terminal"
+
+# The sentinel itself. Only the status is read: render-test.sh prints its PASS
+# on the one path that exits zero, and scenario 1 above already reads the two
+# together on an undamaged run, so matching the words here as well would be a
+# second copy of that guard with no red run of its own.
+for ALT_FONT in "$ALT_FONT_A" "$ALT_FONT_B"; do
+        run_runner_with_font "$ALT_FONT" "$FIXTURES" "$CASE"
         skip_if_skipped
 
         [ "$STATUS" = 0 ] ||
-                verdict_failed "the font sentinel $CASE is not font-invariant after all"
-fi
+                verdict_failed "the font sentinel $CASE is not font-invariant under $ALT_FONT after all"
+done
 
 echo "PASS: the frame the render test captures itself passes it"
 echo "PASS: a frame with one changed pixel fails the render test"
@@ -621,6 +701,5 @@ echo "PASS: a comparator counting no difference while exiting as though it found
 echo "PASS: a comparator contradicting its own non-zero count is named as one, not blamed on the renderer"
 echo "PASS: a failing frame is kept out of the fixture directory, in the artifact directory or the working one"
 echo "PASS: the runner's --sixel turns images back on for an app whose default is off"
-[ -n "${5:-}" ] &&
-        echo "PASS: $CASE is font-invariant where $5 moves, so the font sentinel holds"
+echo "PASS: $CASE is font-invariant under two fonts that move $SENSITIVE by different amounts, so the font sentinel holds"
 exit 0

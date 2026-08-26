@@ -298,9 +298,10 @@ if get_option('sixel') and get_option('sixel_display_tests')
         sixel_test_dir,
         sixel_render_cases[0],
         arm[0],
-        # The font sentinel's counterpart: a case that must MOVE under the
-        # alternate font, so the sentinel's invariance is not the alternate
-        # font having been ignored.
+        # The font sentinel's counterpart: a case that must MOVE, and move by
+        # DIFFERENT amounts under the two alternate fonts, which is what shows
+        # the sentinel's invariance is not simply the font having been ignored.
+        # Required, not optional - see the scenario for what its absence cost.
         sixel_isolation_case,
       ],
       depends: [arm[1]],
