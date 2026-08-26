@@ -9628,6 +9628,7 @@ Terminal::draw_rows(VteScreen *screen_,
         gboolean hilite = FALSE, nhilite;        /* hovered explicit hyperlink or regex match, needs continuous underlining */
         gboolean selected;
         gboolean nrtl = FALSE, rtl;  /* for debugging */
+        bool image = false, nimage;  /* the cell belongs to an image */
         uint32_t attr = 0, nattr;
 	guint item_count;
 	const VteCell *cell;
@@ -9718,6 +9719,7 @@ Terminal::draw_rows(VteScreen *screen_,
                         selected = cell_is_selected_vis(i, row);
                         determine_colors(cell, selected, &fore, &back, &deco);
                         rtl = bidirow->vis_is_rtl(i);
+                        image = cell && cell->attr.image();
 
                         while (++j < column_count) {
                                 /* Retrieve the next cell. */
@@ -9728,14 +9730,23 @@ Terminal::draw_rows(VteScreen *screen_,
                                 selected = cell_is_selected_vis(j, row);
                                 determine_colors(cell, selected, &nfore, &nback, &ndeco);
                                 nrtl = bidirow->vis_is_rtl(j);
-                                if (nback != back || (vte::debug::check_categories(vte::debug::category::BIDI) && nrtl != rtl)) {
+                                nimage = cell && cell->attr.image();
+                                if (nback != back || nimage != image ||
+                                    (vte::debug::check_categories(vte::debug::category::BIDI) && nrtl != rtl)) {
                                         break;
                                 }
                         }
                         if (back != VTE_DEFAULT_BG) {
                                 vte::color::rgb bg;
                                 rgb_from_index<8, 8, 8>(back, bg);
-                                m_draw.fill_cell_background(i, row - start_row, (j - i), &bg);
+                                /* The image was painted below the cell
+                                 * backgrounds, so an opaque fill here would
+                                 * hide it. A cell the image owns gets a
+                                 * translucent fill instead: the background
+                                 * (a selection, or SGR) still reads, and the
+                                 * image still shows through it. */
+                                m_draw.fill_cell_background(i, row - start_row, (j - i), &bg,
+                                                            image ? VTE_IMAGE_CELL_BACKGROUND_ALPHA : 1.0);
                         }
 
 #if VTE_GTK == 3

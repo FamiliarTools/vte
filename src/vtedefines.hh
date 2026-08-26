@@ -194,6 +194,15 @@
  */
 #define VTE_IMAGE_MEMORY_MAX_DEFAULT (35 * 1024 * 1024)
 
+/* Opacity of a cell background painted over an image.
+ *
+ * The image is drawn below the cell backgrounds, so a cell the image owns can
+ * only keep both its background (a selection, or SGR) and its pixels if that
+ * background is translucent. Two things have to remain legible through the
+ * result: the image, and the fact that the cell is selected.
+ */
+#define VTE_IMAGE_CELL_BACKGROUND_ALPHA (0.5)
+
 /* The SMALLEST cell an image may be laid out against.
  *
  * This is the real invariant behind vte::image::Ref's 9-bit tile fields:

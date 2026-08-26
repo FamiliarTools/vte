@@ -105,12 +105,14 @@ public:
         inline void fill_cell_background(size_t column,
                                          size_t row,
                                          size_t n_colums,
-                                         vte::color::rgb const* color) override {
+                                         vte::color::rgb const* color,
+                                         double alpha) override {
                 fill_rectangle(column * cell_width(),
                                row * cell_height(),
                                cell_width() * n_colums,
                                cell_height(),
-                               color);
+                               color,
+                               alpha);
         }
         inline void begin_background(Rectangle const& rect,
                                      size_t columns,
