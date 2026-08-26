@@ -845,6 +845,12 @@ output += '  GIR:          ' + get_option('gir').to_string() + '\n'
 output += '  systemd:      ' + systemd_dep.found().to_string() + '\n'
 output += '  Terminfo:     ' + get_option('terminfo').to_string() + '\n'
 output += '  SIXEL:        ' + get_option('sixel').to_string() + '\n'
+output += '  SIXEL display tests: ' + get_option('sixel_display_tests').to_string() + '\n'
+if get_option('sixel_display_tests')
+  output += '    (needs Xvfb and ImageMagick; the golden PNGs were captured\n'
+  output += '     against the author\'s fontconfig, so a different "Monospace"\n'
+  output += '     makes the golden-frame tests fail on font metrics alone)\n'
+endif
 output += '  Glade:        ' + get_option('glade').to_string() + '\n'
 output += '  Vala:         ' + get_option('vapi').to_string() + '\n'
 output += '\n'

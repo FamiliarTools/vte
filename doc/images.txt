@@ -91,15 +91,51 @@ The stripe is NOT the unit of lifetime. Lifetime is per IMAGE: m_image_map,
 image_gc(), image_gc_region() and drop_images_before() all work on whole
 Images. Nothing in the tree frees one tile row of an image and keeps another.
 
-Those three are the whole of it, and each answers to a different thing:
-image_gc() to the memory and count budget, drop_images_before() to rows leaving
-the ring, and image_gc_region() (src/ring.cc) to being invisible. The last is
-the one easily missed: append_image() runs it on every placement, and it walks
-m_image_map newest-first accumulating a cairo_region_t of the rectangles it has
-seen, freeing any image whose own rectangle is already contained in that union
-- an image drawn completely over by later ones. It is also the only one of the
-three that does not spill the pixels first, because an image nothing can see is
-not one anybody scrolls back to.
+Those three are not the whole of it. m_image_map owns the Images (it is the
+only map of unique_ptr; m_image_by_top_map holds bare pointers), so every free
+is an erase or a clear on it, and there are five such sites:
+
+    $ grep -n 'm_image_map\.\(erase\|clear\)' src/*.cc src/*.hh
+    src/ring.cc:507   image_gc_region()
+    src/ring.cc:990   image_gc()
+    src/ring.cc:1010  erase_image()
+    src/ring.cc:2127  reset()
+    src/ring.cc:3265  append_image(), pool-allocation-failure path
+
+erase_image() is a helper rather than a policy. That grep returns nine call
+sites, in seven functions:
+
+    $ grep -n '= erase_image(it)' src/ring.cc
+    drop_images_before(), drop_images_after(), drop_images_torn_by_rewrap(),
+    erase_images_in_rect(), shift_images_for_insert(),
+    shift_images_for_remove(), rewrap_images_in_range() (three sites)
+
+So the policies that decide an image should go are: the memory and count budget
+(image_gc()), rows leaving either end of the ring (drop_images_before(),
+drop_images_after()), being invisible (image_gc_region()), the user erasing the
+cells (erase_images_in_rect()), rewrap (drop_images_torn_by_rewrap(),
+rewrap_images_in_range()), insert and remove shifting an image off the ring
+(shift_images_for_insert(), shift_images_for_remove()), a reset (reset()), and
+running out of pool ids at placement time (append_image()).
+
+image_gc_region() is the one easily missed: append_image() runs it on every
+placement, and it walks m_image_map newest-first accumulating a cairo_region_t
+of the rectangles it has seen, freeing any image whose own rectangle is already
+contained in that union - an image drawn completely over by later ones.
+
+The pixels are spilled first on exactly two of those paths, and it is a shorter
+list than the freeing one:
+
+    $ grep -n 'spill_image(' src/*.cc src/*.hh
+    src/ring.cc:677   the definition
+    src/ring.cc:985   image_gc()
+    src/ring.cc:1042  drop_images_before()
+
+Every other path above frees without spilling, image_gc_region() among them.
+What image_gc() and drop_images_before() have in common is that the row may yet
+be read back - the eviction is for memory, or the row has gone to the
+scrollback. This document does not establish, path by path, why each of the
+remaining ones is safe not to spill; that was observed, not proved.
 
 
 Where the bytes live
