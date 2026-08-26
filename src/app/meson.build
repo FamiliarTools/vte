@@ -306,7 +306,14 @@ if get_option('sixel') and get_option('sixel_display_tests')
       ],
       depends: [arm[1]],
       suite: 'sixel-display',
-      timeout: 240,
+      # Headroom for the readiness cap, not for the run. Six of this test's
+      # scenarios boot a terminal and STARVE one of the runner's readiness
+      # waits, and every OTHER wait in those runs still carries the runner's
+      # real 90 s cap - so a machine on which one of them is genuinely reached
+      # spends 90 s in a single scenario without anything being wrong with the
+      # gate. Three of those would outlast the 240 s this used to allow and
+      # report a TIMEOUT, which is the one verdict that says nothing.
+      timeout: 900,
     )
 
     # And they are only worth their runtime if they measure the code rather
