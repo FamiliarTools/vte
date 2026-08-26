@@ -624,6 +624,14 @@ public:
                                      long* damage_top,
                                      long* damage_bottom) noexcept;
 
+        bool shift_images_for_vscroll(long top,
+                                      long bottom,
+                                      long left,
+                                      long right,
+                                      long amount,
+                                      long* damage_top,
+                                      long* damage_bottom) noexcept;
+
         void append_image(vte::Freeable<cairo_surface_t> surface,
                           int pixelwidth,
                           int pixelheight,

@@ -1196,6 +1196,50 @@ place_and_stamp(Ring& ring,
         return image;
 }
 
+/* Move the cells of the inclusive rectangle [@top, @bottom] x [@left, @right]
+ * by @amount rows, exactly as the partial-rows branches of
+ * Terminal::scroll_text_up() and scroll_text_down() memcpy them when DECSLRM
+ * margins narrow the region. Positive is downwards.
+ *
+ * As with scroll_row_cells(), the ring does not do this itself - the terminal
+ * does - so a test of what the ring owes the move has to perform the move.
+ */
+static void
+scroll_region_rows(Ring& ring,
+                   long top,
+                   long bottom,
+                   long left,
+                   long right,
+                   long amount)
+{
+        auto const span = right - left + 1;
+
+        for (auto r = top; r <= bottom; r++) {
+                auto* const data = ring.index_writable(r);
+                g_assert_cmpint(long(data->len), >=, right + 1);
+        }
+
+        if (amount > 0) {
+                for (auto r = bottom; r >= top + amount; r--) {
+                        auto* const dst = ring.index_writable(r);
+                        auto* const src = ring.index_writable(r - amount);
+                        memcpy(dst->cells + left, src->cells + left,
+                               span * sizeof(VteCell));
+                }
+                for (auto r = top + amount - 1; r >= top; r--)
+                        std::fill_n(&ring.index_writable(r)->cells[left], span, basic_cell);
+        } else if (amount < 0) {
+                for (auto r = top; r <= bottom + amount; r++) {
+                        auto* const dst = ring.index_writable(r);
+                        auto* const src = ring.index_writable(r - amount);
+                        memcpy(dst->cells + left, src->cells + left,
+                               span * sizeof(VteCell));
+                }
+                for (auto r = bottom + amount + 1; r <= bottom; r++)
+                        std::fill_n(&ring.index_writable(r)->cells[left], span, basic_cell);
+        }
+}
+
 /* ICH, DCH, SL, SR and insert mode move cells sideways inside one row without
  * moving the row. A cell carries its own piece of the picture, so the picture
  * can go with them - but only if the image's own left edge is moved to match,
@@ -1342,6 +1386,169 @@ test_ring_image_torn_by_horizontal_scroll(void)
                 g_assert_true(it != found.end());
                 g_assert_cmpint(it->second.first, ==, top + 1);
                 g_assert_cmpint(it->second.second, ==, left + c);
+        }
+}
+
+/* The vertical sibling. With DECSLRM margins set, scroll_text_up() and
+ * scroll_text_down() memcpy cells from row to row inside a sub-rectangle while
+ * the rows themselves stay put, so the picture can go with its cells - but only
+ * if the image's own top row moves to match, AND only if it is re-filed under
+ * that row in m_image_by_top_map, which is keyed by it. validate_images()
+ * checks both halves.
+ */
+static void
+test_ring_image_follows_vertical_scroll(void)
+{
+        auto const region_top = long{4};
+        auto const region_bottom = long{9};
+        auto const top = long{6};
+        auto const left = long{2};
+        auto const rows_tall = 2;
+        auto const cols_wide = 4;
+        auto const width = long{40};
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        for (auto r = region_top; r <= region_bottom; r++)
+                widen_row(ring, r, width);
+
+        auto* const image = place_and_stamp(ring, top, rows_tall, left, width);
+        auto const id = image->get_pool_id();
+
+        /* The fixture is where the assertions below say it starts from. */
+        g_assert_cmpint(image->get_top(), ==, top);
+        auto const before = image_cell_positions(ring, id);
+        g_assert_cmpuint(before.size(), ==, rows_tall * cols_wide);
+        g_assert_cmpint(before.at({0u, 0u}).first, ==, top);
+
+        /* Scroll the region up one row. Every cell of the picture is inside
+         * it, and stays inside it. */
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+        g_assert_true(ring.shift_images_for_vscroll(region_top, region_bottom,
+                                                    0, width - 1, -1,
+                                                    &damage_top, &damage_bottom));
+        scroll_region_rows(ring, region_top, region_bottom, 0, width - 1, -1);
+
+        ring.validate_images();
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_cmpint(image->get_top(), ==, top - 1);
+        g_assert_cmpint(image->get_left(), ==, left);
+
+        auto const found = image_cell_positions(ring, id);
+        g_assert_cmpuint(found.size(), ==, rows_tall * cols_wide);
+        for (auto r = 0; r < rows_tall; r++) {
+                for (auto c = 0; c < cols_wide; c++) {
+                        auto const it = found.find({uint32_t(r), uint32_t(c)});
+                        g_assert_true(it != found.end());
+                        g_assert_cmpint(it->second.first, ==, top - 1 + r);
+                        g_assert_cmpint(it->second.second, ==, left + c);
+                }
+        }
+
+        /* And back down, which is IL's direction. */
+        g_assert_true(ring.shift_images_for_vscroll(region_top, region_bottom,
+                                                    0, width - 1, 1,
+                                                    &damage_top, &damage_bottom));
+        scroll_region_rows(ring, region_top, region_bottom, 0, width - 1, 1);
+
+        ring.validate_images();
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_cmpint(image->get_top(), ==, top);
+        g_assert_cmpuint(image_cell_positions(ring, id).size(), ==, rows_tall * cols_wide);
+}
+
+/* A picture the region would crop is taken, not cropped: cropping would have to
+ * move its top out of the region, which is the one direction the anchor cannot
+ * go. The full-width vertical scroll of the same region destroys a straddler
+ * too (Ring::shift_images_for_remove()), so this keeps the two agreeing.
+ */
+static void
+test_ring_image_cropped_by_vertical_scroll_is_taken(void)
+{
+        auto const region_top = long{4};
+        auto const region_bottom = long{9};
+        auto const top = long{4};
+        auto const left = long{2};
+        auto const width = long{40};
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        for (auto r = region_top; r <= region_bottom; r++)
+                widen_row(ring, r, width);
+
+        /* The image starts on the region's first row, so scrolling up would
+         * push that row of tiles out of the region. */
+        auto* const image = place_and_stamp(ring, top, 2, left, width);
+        auto const id = image->get_pool_id();
+        g_assert_cmpuint(image_cell_positions(ring, id).size(), ==, 8);
+
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+        g_assert_true(ring.shift_images_for_vscroll(region_top, region_bottom,
+                                                    0, width - 1, -1,
+                                                    &damage_top, &damage_bottom));
+        scroll_region_rows(ring, region_top, region_bottom, 0, width - 1, -1);
+
+        ring.validate_images();
+
+        g_assert_cmpuint(ring.image_map().size(), ==, 0);
+        g_assert_cmpuint(image_cell_positions(ring, id).size(), ==, 0);
+}
+
+/* An image with a cell outside the region's COLUMNS cannot follow either: the
+ * rows inside the margins would move and the rest would stand still.
+ */
+static void
+test_ring_image_torn_by_vertical_scroll(void)
+{
+        auto const region_top = long{4};
+        auto const region_bottom = long{9};
+        auto const top = long{6};
+        auto const left = long{2};
+        auto const width = long{40};
+
+        auto ring = Ring{24, false};
+        ring.set_visible_rows(24);
+        append_rows(ring, 24);
+
+        for (auto r = region_top; r <= region_bottom; r++)
+                widen_row(ring, r, width);
+
+        /* Four cells wide at column 2, so columns 2..5; the region stops at 3. */
+        auto* const image = place_and_stamp(ring, top, 2, left, width);
+        auto const id = image->get_pool_id();
+        g_assert_cmpuint(image_cell_positions(ring, id).size(), ==, 8);
+
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+        g_assert_true(ring.shift_images_for_vscroll(region_top, region_bottom,
+                                                    0, 3, -1,
+                                                    &damage_top, &damage_bottom));
+        scroll_region_rows(ring, region_top, region_bottom, 0, 3, -1);
+
+        ring.validate_images();
+
+        /* It did not move, and the columns inside the margins lost their cells
+         * rather than being dragged out from under the ones outside. */
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+        g_assert_cmpint(image->get_top(), ==, top);
+        g_assert_cmpint(image->get_left(), ==, left);
+
+        auto const found = image_cell_positions(ring, id);
+        g_assert_cmpuint(found.size(), ==, 4);
+        for (auto r = 0; r < 2; r++) {
+                for (auto c = 2; c < 4; c++) {
+                        auto const it = found.find({uint32_t(r), uint32_t(c)});
+                        g_assert_true(it != found.end());
+                        g_assert_cmpint(it->second.first, ==, top + r);
+                        g_assert_cmpint(it->second.second, ==, left + c);
+                }
         }
 }
 
@@ -2404,6 +2611,9 @@ main(int argc,
         g_test_add_func("/vte/ring/image-pool/follows-horizontal-scroll", test_ring_image_follows_horizontal_scroll);
         g_test_add_func("/vte/ring/image-pool/clipped-by-horizontal-scroll", test_ring_image_clipped_by_horizontal_scroll);
         g_test_add_func("/vte/ring/image-pool/torn-by-horizontal-scroll", test_ring_image_torn_by_horizontal_scroll);
+        g_test_add_func("/vte/ring/image-pool/follows-vertical-scroll", test_ring_image_follows_vertical_scroll);
+        g_test_add_func("/vte/ring/image-pool/cropped-by-vertical-scroll-is-taken", test_ring_image_cropped_by_vertical_scroll_is_taken);
+        g_test_add_func("/vte/ring/image-pool/torn-by-vertical-scroll", test_ring_image_torn_by_vertical_scroll);
 
         g_test_add_func("/vte/ring/image-pool/reference-survives-freeze", test_ring_image_reference_survives_freeze);
         g_test_add_func("/vte/ring/image-pool/reference-rebinds-after-thaw", test_ring_image_reference_rebinds_after_thaw);

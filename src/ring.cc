@@ -35,6 +35,7 @@
  * of potential issues related to algorithmic complexity. */
 #define IMAGE_FAST_COUNT_MAX 4096
 
+
 #endif /* WITH_SIXEL */
 
 /*
@@ -1160,8 +1161,18 @@ Ring::shift_images_for_scroll(long top,
                          * happen is every cell going that way, since then the
                          * image would be left resident with nothing naming it.
                          */
-                        auto const first = std::max(long(image->get_top()),
-                                                    long(m_writable));
+                        /* Only the writable rows can be read cell by cell, so
+                         * an image reaching up into the frozen ones has rows
+                         * this test cannot see. Those cells are outside the
+                         * rectangle by definition - the rectangle is writable -
+                         * so such an image would be torn; treat it as one
+                         * rather than judge it on the rows that happen to be
+                         * visible here.
+                         */
+                        if (long(image->get_top()) < long(m_writable))
+                                continue;
+
+                        auto const first = long(image->get_top());
                         auto const last = std::min(long(image->get_bottom()),
                                                    long(m_end) - 1);
 
@@ -1214,6 +1225,150 @@ Ring::shift_images_for_scroll(long top,
                 }
 
                 image->set_left(int(long(image->get_left()) + amount));
+        }
+
+        return damaged;
+}
+
+/*
+ * Ring::shift_images_for_vscroll:
+ * @top, @bottom, @left, @right: the inclusive rectangle of cells about to be
+ *   moved up or down, in ring coordinates
+ * @amount: how far, in rows; positive moves the cells down, negative up
+ * @damage_top, @damage_bottom: out, the rows that need repainting
+ *
+ * The vertical sibling of shift_images_for_scroll(), for the partial-rows
+ * branches of Terminal::scroll_text_up() and scroll_text_down() - the ones
+ * DECSLRM left/right margins select, where the cells are memcpy'd from row to
+ * row and the rows themselves do not move.
+ *
+ * The mechanism is the same one: a cell carries its own tile of the picture and
+ * the draw reads the picture off the cells, so cells copied to another row take
+ * their piece of the image with them. What does not move by itself is the
+ * image's own top row, which is both its anchor and the key it is filed under
+ * in m_image_by_top_map, so a follower is re-anchored AND re-keyed here.
+ *
+ * Where this differs from the horizontal rule is what happens to a picture the
+ * region would crop. Sideways, a cell pushed off the end of the rectangle is
+ * simply dropped and the rest follows clipped. Vertically the same clipping
+ * would have to move the image's top OUT of the region: one row above it for
+ * every tile row the scroll ate. That is not available here.
+ *
+ *   - The full-width vertical scroll of the very same region - the branch taken
+ *     the moment DECSLRM is not narrowing it - goes through ring_remove() and
+ *     ring_insert(), and shift_images_for_remove() destroys an image the seam
+ *     runs through rather than cropping it. Cropping here would make an image
+ *     survive or die according to whether the margins happened to be full
+ *     width, which is not a distinction the user made.
+ *   - row_t is unsigned, so an image cropped up past row 0 is filed under a key
+ *     near ULONG_MAX, where every ordered walk over m_image_by_top_map - all of
+ *     which stop on a key comparison - steps straight past it.
+ *
+ * So a follower here must have every one of its cells inside the rectangle AND
+ * still inside it after the move. Anything else loses the cells the rectangle
+ * takes, exactly as erase_images_in_rect() already does.
+ */
+bool
+Ring::shift_images_for_vscroll(long top,
+                               long bottom,
+                               long left,
+                               long right,
+                               long amount,
+                               long* damage_top,
+                               long* damage_bottom) noexcept
+{
+        if (top > bottom || left > right)
+                return false;
+
+        auto followers = std::vector<vte::image::Image*>{};
+
+        if (amount != 0) {
+                for (auto const& [key, image] : m_image_by_top_map) {
+                        /* Keyed by top row: once past @bottom nothing left
+                         * begins inside the rectangle either. */
+                        if (long(image->get_top()) > bottom)
+                                break;
+
+                        /* An image is exempt from every rule that moves images
+                         * while its own emission burst is running. */
+                        if (image == m_placing_image)
+                                continue;
+
+                        if (long(image->get_bottom()) < top)
+                                continue;
+
+                        /* As in shift_images_for_scroll(): rows below
+                         * m_writable cannot be read cell by cell, and cells
+                         * there are outside a rectangle that is writable by
+                         * definition, so such an image is torn.
+                         */
+                        if (long(image->get_top()) < long(m_writable))
+                                continue;
+
+                        auto const first = long(image->get_top());
+                        auto const last = std::min(long(image->get_bottom()),
+                                                   long(m_end) - 1);
+
+                        auto follows = true;
+                        auto any_cell = false;
+
+                        for (auto r = first; r <= last && follows; r++) {
+                                auto const* const row = get_writable_index(r);
+
+                                for (auto c = long{0}; c < long(row->len); c++) {
+                                        auto const& cell = row->cells[c];
+                                        if (!cell.attr.image())
+                                                continue;
+                                        if (m_image_pool.lookup(cell.attr.image_ref()) != image)
+                                                continue;
+
+                                        any_cell = true;
+
+                                        /* Inside the rectangle now, and inside
+                                         * it still once the move has landed.
+                                         * The columns do not move, so only the
+                                         * row is tested twice.
+                                         */
+                                        if (r < top || r > bottom ||
+                                            c < left || c > right ||
+                                            r + amount < top || r + amount > bottom) {
+                                                follows = false;
+                                                break;
+                                        }
+                                }
+                        }
+
+                        if (any_cell && follows)
+                                followers.push_back(image);
+                }
+        }
+
+        auto damaged = erase_images_in_rect_except(top, bottom, left, right,
+                                                   damage_top, damage_bottom,
+                                                   followers);
+
+        for (auto* const image : followers) {
+                /* Both the rows it is leaving and the rows it is arriving at
+                 * have to be repainted. */
+                auto const t = std::min(long(image->get_top()),
+                                        long(image->get_top()) + amount);
+                auto const b = std::max(long(image->get_bottom()),
+                                        long(image->get_bottom()) + amount);
+                if (!damaged) {
+                        *damage_top = t;
+                        *damage_bottom = b;
+                        damaged = true;
+                } else {
+                        *damage_top = std::min(*damage_top, t);
+                        *damage_bottom = std::max(*damage_bottom, b);
+                }
+
+                /* The anchor and the key are one fact stored twice, so they
+                 * move together or validate_images() catches it. */
+                unlink_image_from_top_map(image);
+                image->set_top(int(long(image->get_top()) + amount));
+                m_image_by_top_map.emplace(row_t(image->get_top()), image);
+                m_images_changed = true;
         }
 
         return damaged;
@@ -3144,7 +3299,7 @@ Ring::append_image(vte::Freeable<cairo_surface_t> surface,
                                    std::forward_as_tuple(image->get_top()),
                                    std::forward_as_tuple(image.get()));
 
-        m_image_fast_memory_used += image->resource_size ();
+        m_image_fast_memory_used += image->resource_size();
 
         /* From here until the caller says otherwise, this image is the one being
          * placed, and the lifetime rules leave it alone. It has to be marked

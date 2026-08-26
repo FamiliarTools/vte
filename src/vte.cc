@@ -2873,9 +2873,12 @@ Terminal::scroll_text_up(scrolling_region const& scrolling_region,
         } else {
                 /* Scroll up partial rows. The line endings and the BiDi flags don't scroll. */
 
-                /* The cells move without the rows moving, so an image over the
-                 * region cannot follow its cells; it is erased along with them. */
-                erase_images_in_rect(top, bottom, left, right);
+                /* The cells move without the rows moving, but a cell carries
+                 * its own piece of a picture, so a picture whose cells are all
+                 * inside the region follows the memcpy below onto the rows the
+                 * cells land on; one the region would tear or crop is taken
+                 * instead. */
+                shift_images_for_vscroll(top, bottom, left, right, -long(amount));
 
                 /* Make sure the area we're about to scroll is present in memory. */
                 long row = top;
@@ -2958,8 +2961,10 @@ Terminal::scroll_text_down(scrolling_region const& scrolling_region,
         } else {
                 /* Scroll down partial rows. The line endings and the BiDi flags don't scroll. */
 
-                /* As in scroll_text_up(): the cells move, the rows don't. */
-                erase_images_in_rect(top, bottom, left, right);
+                /* As in scroll_text_up(): the cells move, the rows don't, and
+                 * a picture whose cells are all inside the region goes with
+                 * them. */
+                shift_images_for_vscroll(top, bottom, left, right, long(amount));
 
                 /* Make sure the area we're about to scroll is present in memory. */
                 long row = top;
@@ -3760,6 +3765,24 @@ Terminal::shift_images_for_scroll_slow(vte::grid::row_t top,
          * rectangle, so repaint the rows the affected images occupied rather
          * than the ones the caller is about to invalidate.
          */
+        invalidate_rows(damage_top, damage_bottom);
+}
+
+void
+Terminal::shift_images_for_vscroll_slow(vte::grid::row_t top,
+                                        vte::grid::row_t bottom,
+                                        vte::grid::column_t left,
+                                        vte::grid::column_t right,
+                                        long amount)
+{
+        auto damage_top = long{};
+        auto damage_bottom = long{};
+
+        if (!m_screen->row_data->shift_images_for_vscroll(top, bottom, left, right,
+                                                          amount,
+                                                          &damage_top, &damage_bottom))
+                return;
+
         invalidate_rows(damage_top, damage_bottom);
 }
 

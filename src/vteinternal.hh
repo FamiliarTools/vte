@@ -1825,6 +1825,11 @@ public:
                                           vte::grid::column_t left,
                                           vte::grid::column_t right,
                                           long amount);
+        void shift_images_for_vscroll_slow(vte::grid::row_t top,
+                                           vte::grid::row_t bottom,
+                                           vte::grid::column_t left,
+                                           vte::grid::column_t right,
+                                           long amount);
 #endif
 
         /* Repaint after the ring's own rules have moved or deleted an image
@@ -1898,6 +1903,28 @@ public:
 
 #if WITH_SIXEL
                 shift_images_for_scroll_slow(top, bottom, left, right, amount);
+#endif
+        }
+
+        /* The same, for a rectangle of cells moving up or down within rows
+         * that stay put - the partial-rows branches of scroll_text_up() and
+         * scroll_text_down(), which DECSLRM margins select. See
+         * Ring::shift_images_for_vscroll(), including why a picture the
+         * region would crop is taken here rather than cropped.
+         *
+         * @amount is signed: positive moves the cells down, negative up.
+         */
+        inline void shift_images_for_vscroll(vte::grid::row_t top,
+                                             vte::grid::row_t bottom,
+                                             vte::grid::column_t left,
+                                             vte::grid::column_t right,
+                                             long amount)
+        {
+                if (!m_screen->row_data->has_images()) [[likely]]
+                        return;
+
+#if WITH_SIXEL
+                shift_images_for_vscroll_slow(top, bottom, left, right, amount);
 #endif
         }
 
