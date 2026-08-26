@@ -122,11 +122,15 @@ option(
                'for the golden-frame ones, ImageMagick. Third requirement, and the ' +
                'one the build cannot check: the golden PNGs were captured against ' +
                'whatever fontconfig resolves "Monospace" to on the author\'s machine. ' +
-               'Three cases move with that resolution - bands-margin, cursor-right-off ' +
-               'and raster-opaque - because they compare regions placed in CELLS (the ' +
-               'right margin, the cursor, the raster rows below the image) rather than ' +
-               'the image itself. So if those fail while sixel-render-bands PASSES, the ' +
-               'cause is font resolution and not a regression: bands is drawn at its own ' +
+               'A render case moves with that resolution whenever its compared ' +
+               'region holds anything the terminal placed in CELLS - the right ' +
+               'margin, a marker glyph, the edge of a window that is 80x24 cells - ' +
+               'and is font-invariant when the region holds nothing but the image ' +
+               'on blank background. Measured on gtk3 over six fonts, five of the ' +
+               'nine cases move and four do not; the count is not worth memorising, ' +
+               'the sentinel below is. So if cases fail while sixel-render-bands ' +
+               'PASSES, the cause is font resolution and not a regression: bands ' +
+               'compares nothing but the image, which is drawn at its own ' +
                'pixel size at the terminal origin and is font-invariant, so a real image ' +
                'regression takes it down too. A builder who hits that should leave this ' +
                'option off, or keep the tests registered and skip them per invocation ' +

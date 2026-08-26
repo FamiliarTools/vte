@@ -235,10 +235,10 @@ if get_option('sixel') and get_option('sixel_display_tests')
   # The case the isolation test runs, which cannot be sixel_render_cases[0].
   #
   # That case is 'bands', and bands is font-invariant: measured on gtk3 it is
-  # byte-identical at Monospace 12, Monospace 30 and DejaVu Serif 12, because
-  # the image is drawn at its own pixel size at the terminal origin. The
-  # isolation test's fontconfig probe has nothing to go red for on such a
-  # case. bands-margin crops to the right margin, which sits at the column
+  # byte-identical at all six fonts the table in render-test.sh reports,
+  # because its crop holds nothing but the image and the image is drawn at its
+  # own pixel size at the terminal origin. The isolation test's fontconfig
+  # probe has nothing to go red for on such a case. bands-margin crops to the right margin, which sits at the column
   # count times the cell width, so it does move with the font - measured
   # AE=1764 under a fontconfig that reassigns Monospace to DejaVu Serif.
   sixel_isolation_case = 'bands-margin'
@@ -298,6 +298,10 @@ if get_option('sixel') and get_option('sixel_display_tests')
         sixel_test_dir,
         sixel_render_cases[0],
         arm[0],
+        # The font sentinel's counterpart: a case that must MOVE under the
+        # alternate font, so the sentinel's invariance is not the alternate
+        # font having been ignored.
+        sixel_isolation_case,
       ],
       depends: [arm[1]],
       suite: 'sixel-display',

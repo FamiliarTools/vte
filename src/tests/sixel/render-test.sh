@@ -208,28 +208,48 @@ fi
 # Not all of them, and it is worth being exact about which, because the loose
 # version of this claim - "a different font renders the image at a different
 # scale, so every golden mismatches by a uniform factor" - was measured on
-# this arm and is false. Running the gtk3 cases against three fonts:
+# this arm and is false. Every gtk3 case against six fonts, AE where it
+# failed and PASS where the frame was byte-identical:
 #
-#   case              Monospace 12   Monospace 30      DejaVu Serif 12
-#   bands             PASS           PASS              PASS
-#   raster-opaque     PASS           FAIL AE=107.294   PASS
-#   cursor-right-off  PASS           FAIL AE=338.792   FAIL AE=89.8
-#   bands-margin      PASS           FAIL AE=1764      FAIL AE=1764
+#   case                 Mono 12  Mono 16   Mono 30   Sans 12  Serif 12  LMono 8
+#   bands                PASS     PASS      PASS      PASS     PASS      PASS
+#   bands-gch            PASS     PASS      PASS      PASS     PASS      PASS
+#   bands-truncated      PASS     PASS      PASS      PASS     PASS      PASS
+#   undefined-registers  PASS     PASS      PASS      PASS     PASS      PASS
+#   cursor-right-on      PASS     126.153   342.424   92.1725  96.451    70.3843
+#   cursor-right-off     PASS      90.5216  338.792   78.0706  89.8      49.5451
+#   raster-transparent   PASS     129.353   400.094   78.0706  89.8      24873.9
+#   raster-opaque        PASS     107.294   107.294   PASS     PASS      7172.14
+#   bands-margin         PASS    1764      1764      1764     1764     29273
 #
-# bands is byte-identical across all three: the image is drawn at its own
-# pixel size at the terminal origin, and neither that size nor that origin
-# follows the font. What follows the font is WHERE ELSE in the window a case
-# looks - the right margin bands-margin crops to sits at the column count
-# times the cell width, and the cursor and the raster rows below the image are
-# placed in cells - so those three move, by different amounts, and not by any
-# single factor. (That the alternate fonts took effect at all is what those
-# failures show; a --font that was ignored would have left all four PASS.)
+# (Serif 12 is DejaVu Serif 12 and LMono 8 Liberation Mono 8. That the
+# alternate fonts took effect at all is what the failures show; a --font that
+# was ignored would have left every cell PASS.)
 #
-# So the pin is here for the three, not for the image scale, and an
-# all-cases-fail run is NOT explained by it - bands would still be passing.
+# The four invariant cases are not a list to be maintained, they are what the
+# rule produces: a case is font-invariant when its compared region holds
+# nothing but the image on blank background, because the image is drawn at its
+# own pixel size at the terminal origin and neither that size nor that origin
+# follows the font. A case moves when the region holds something the terminal
+# placed in CELLS. Each of the five was looked at, and it is one of two things
+# every time: a marker glyph - the cursor cases and both raster cases end by
+# printing one, so their crops contain a character in a cell whose position
+# and shape are the font's (measured, raster-transparent at Sans 12: the whole
+# difference is the single box 13x12+1+25, one cell) - or the right margin
+# bands-margin crops to, which sits at the column count times the cell width.
+# The two four-figure counts are the same thing at the frame's edge: the
+# window is 80x24 CELLS, so at Liberation Mono 8 it measures 576x338 where at
+# Monospace 12 it fills the 800 px screen, and the 800x130 and 400x400 those
+# two crops ask for run off it onto the desktop. That is why the amounts share no common factor: they are different things
+# moving, not one image rescaled. A case added later needs no edit here - read
+# its crop.
+#
+# So the pin is here for the cases that look outside the image, not for the
+# image scale, and an all-cases-fail run is NOT explained by it - bands would
+# still be passing.
 # It does not make this portable either: fontconfig still resolves "Monospace"
 # to whatever the system has, and a system whose Monospace is not the one the
-# goldens were captured against moves the same three cases.
+# goldens were captured against moves the same five cases.
 FONT=${VTE_TEST_FONT:-Monospace 12}
 
 # --sixel is asked for explicitly rather than relied on. The app defaults it
