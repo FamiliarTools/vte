@@ -318,8 +318,11 @@ struct _VTE_GNUC_PACKED VteCellAttr {
          *   - It compares 16 bytes while only VTE_CELL_ATTR_COMMON_BYTES (12)
          *     are persisted, so a field that never reaches the wire can still
          *     end the run. For an image row, where the tile column advances
-         *     by one per cell, that is one record PER CELL - measured at 26
-         *     bytes each, a 500x blowup on a 500 column row.
+         *     by one per cell, that is one record PER CELL where the coding
+         *     exists to write one per RUN - so on a row of N image cells the
+         *     attr stream takes N records instead of one, and each of those
+         *     records is Ring::attr_record_stride() wide, the fixed part plus
+         *     the hyperlink tail plus a whole StreamImageRef.
          *
          *   - It cannot be relaxed to 12 bytes instead, because then two
          *     different hyperlinks of equal length would be conflated: the

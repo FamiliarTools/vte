@@ -161,11 +161,11 @@ private:
          * bytes.
          *
          * Centralised because the freeze, thaw, truncate and rewrap paths
-         * each walk these records independently - seven call sites, which
-         * `grep -c attr_record_stride src/ring.cc` counts - and a stride
-         * that disagrees between any two of them desynchronises the reader
-         * from the writer, which corrupts the scrollback SILENTLY rather
-         * than failing. Anything added to the record's variable tail goes
+         * each walk these records independently, over the lines of ring.cc
+         * that `git grep -c attr_record_stride -- src/ring.cc` counts - and a
+         * stride that disagrees between any two of them desynchronises the
+         * reader from the writer, which corrupts the scrollback SILENTLY
+         * rather than failing. Anything added to the record's variable tail goes
          * here and nowhere else.
          */
         /* The record's trailer is the 2-byte hyperlink length, and it must stay
@@ -432,12 +432,20 @@ private:
          * made against.
          */
 
-        /* m_image_priority_map stores the Image. key is the priority of the image. */
+        /* OWNS the Images - it is the only map of unique_ptr, so every free of
+         * an Image is an erase or a clear on this one. Keyed by the image's
+         * priority, which is monotonic and never reused, so the order is also
+         * oldest-placed first.
+         */
         using image_map_type = std::map<size_t, std::unique_ptr<vte::image::Image>>;
         image_map_type m_image_map{};
 
-        /* m_image_by_top_map stores only an iterator to the Image in m_image_priority_map;
-         * key is the top row of the image.
+        /* A NON-OWNING index of those same Images, keyed by the top row, so
+         * the images touching a row range can be found without walking
+         * m_image_map. The mapped type is a bare Image*, not an iterator into
+         * m_image_map: ownership stays there, and erase_image() is the helper
+         * that takes an entry out of both. A multimap because several images
+         * can begin on the same row.
          */
         using image_by_top_map_type = std::multimap<row_t, vte::image::Image*>;
         image_by_top_map_type m_image_by_top_map{};

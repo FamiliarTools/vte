@@ -10,6 +10,14 @@ Every statement below is meant to be checkable against the code or against a
 test in src/ring-test.cc, src/image-contract-test.cc or src/tests/sixel/. Where
 a test names the behaviour, its name is given.
 
+Every command quoted in this document is run from the top of the source tree.
+They are written as `git grep`, and with LC_ALL pinned where a shell glob would
+otherwise decide the order, so that the output below each one is what the
+command produces under any shell and any locale - not only under the one it was
+first written in. `git grep --show-function` prints the enclosing function
+before each HUNK, so its headers are the SET of functions the hits live in and
+not one header per hit; where the count matters it is asked for separately.
+
 
 The cell is the image
 ═════════════════════
@@ -95,27 +103,40 @@ Those three are not the whole of it. m_image_map owns the Images (it is the
 only map of unique_ptr; m_image_by_top_map holds bare pointers), so every free
 is an erase or a clear on it, and there are five such sites:
 
-    $ grep -h 'm_image_map\.\(erase\|clear\)' src/*.cc src/*.hh
-                            rit = image_map_type::reverse_iterator{m_image_map.erase(std::next(rit).base())};
-                    m_image_map.erase(victim);
-            m_image_map.erase(priority);
-            m_image_map.clear();
-                    m_image_map.erase(it);
+    $ LC_ALL=C git grep --show-function -e 'm_image_map\.\(erase\|clear\)' -- 'src/*.cc' 'src/*.hh'
+    src/ring.cc=Ring::image_gc_region() noexcept
+    src/ring.cc:                        rit = image_map_type::reverse_iterator{m_image_map.erase(std::next(rit).base())};
+    src/ring.cc=Ring::image_gc(vte::image::Image const* exempt) noexcept
+    src/ring.cc:                m_image_map.erase(victim);
+    src/ring.cc=Ring::erase_image(Ring::image_by_top_map_type::iterator it) noexcept
+    src/ring.cc:        m_image_map.erase(priority);
+    src/ring.cc=Ring::reset()
+    src/ring.cc:        m_image_map.clear();
+    src/ring.cc=Ring::append_image(vte::Freeable<cairo_surface_t> surface,
+    src/ring.cc:                m_image_map.erase(it);
 
-In source order those sit in image_gc_region(), image_gc(), erase_image(),
-reset(), and append_image()'s pool-allocation-failure path. Re-run the grep
-with -n for the current line numbers; they are deliberately not written down
-here, because a line number is stale the moment anything above it moves.
+The last of them is append_image()'s pool-allocation-failure path. Line numbers
+are deliberately not written down here, because a line number is stale the
+moment anything above it moves.
 
 erase_image() is a helper rather than a policy, and it has nine call sites:
 
-    $ grep -c '= erase_image(it)' src/ring.cc
-    9
+    $ LC_ALL=C git grep -c '= erase_image(it)' -- src/ring.cc
+    src/ring.cc:9
 
-They live in seven functions - drop_images_before(), drop_images_after(),
-drop_images_torn_by_rewrap(), erase_images_in_rect(),
-shift_images_for_insert(), shift_images_for_remove(), and
-rewrap_images_in_range() (three of the nine).
+They live in seven functions:
+
+    $ LC_ALL=C git grep --show-function -e '= erase_image(it)' -- src/ring.cc | grep -v '^src/ring\.cc:'
+    src/ring.cc=Ring::drop_images_before(row_t row) noexcept
+    src/ring.cc=Ring::drop_images_after(row_t row) noexcept
+    src/ring.cc=Ring::drop_images_torn_by_rewrap(column_t columns) noexcept
+    src/ring.cc=Ring::erase_images_in_rect(long top,
+    src/ring.cc=Ring::shift_images_for_insert(row_t position) noexcept
+    src/ring.cc=Ring::shift_images_for_remove(row_t position) noexcept
+    src/ring.cc=Ring::rewrap_images_in_range(Ring::image_by_top_map_type::iterator& it,
+
+Seven headers for nine calls, so some function holds more than one; which one
+is not established by these commands and nothing here rests on it.
 
 So the policies that decide an image should go are: the memory and count budget
 (image_gc()), rows leaving either end of the ring (drop_images_before(),
@@ -133,18 +154,21 @@ contained in that union - an image drawn completely over by later ones.
 The pixels are spilled first on exactly two of those paths, and it is a shorter
 list than the freeing one:
 
-    $ grep 'spill_image(' src/*.cc src/*.hh
-    src/ring.cc:Ring::spill_image(vte::image::Image const* image) noexcept
-    src/ring.cc: * Rebuild an image previously written by spill_image(), or nullptr if it was
-    src/ring.cc: * same eviction; spill_image() is idempotent so that cycle is stable.
-    src/ring.cc:                spill_image(image.get());
-    src/ring.cc:                spill_image(image);
-    src/ring.hh:        void spill_image(vte::image::Image const* image) noexcept;
-    src/ring-test.cc:         * Held: guarding the spill_image() call in image_gc() with
+    $ LC_ALL=C git grep -n 'spill_image(' -- 'src/*.cc' 'src/*.hh' | wc -l
+    7
 
-Seven lines, of which exactly two are calls: the fourth is in image_gc() and
-the fifth is in drop_images_before(). The rest are the definition, its
-declaration, and prose.
+Seven lines, of which the definition, its declaration and three comments are
+not calls. Ask for the calls alone - a spill_image() opening a statement - and
+for the function each one sits in:
+
+    $ LC_ALL=C git grep --show-function -e '^ *spill_image(' -- 'src/*.cc' 'src/*.hh'
+    src/ring.cc=Ring::image_gc(vte::image::Image const* exempt) noexcept
+    src/ring.cc:                spill_image(image.get());
+    src/ring.cc=Ring::drop_images_before(row_t row) noexcept
+    src/ring.cc:                spill_image(image);
+
+Two calls, in image_gc() and in drop_images_before(). No ordinal into the
+seven-line listing is needed, and none is claimed.
 
 Every other path above frees without spilling, image_gc_region() among them.
 What image_gc() and drop_images_before() have in common is that the row may yet
@@ -169,8 +193,13 @@ Instead the trailer carries the flag: hyperlink lengths are bounded far below
 0x8000 by VTE_HYPERLINK_TOTAL_LENGTH_MAX, so the high bit is free and says
 whether a StreamImageRef (src/ring.hh) precedes the trailer. The record stays
 self-describing in both directions, and attr_record_stride() is the one place
-the stride is computed, because seven call sites walk these records - `grep -c
-attr_record_stride src/ring.cc` - and a stride that disagrees between any two of
+the stride is computed, because the freeze, thaw, truncate and rewrap paths each walk
+these records independently, over the seven lines of src/ring.cc that name it:
+
+    $ git grep -c attr_record_stride -- src/ring.cc
+    src/ring.cc:7
+
+A stride that disagrees between any two of
 them corrupts the scrollback silently.
 
 The StreamImageRef identifies the image by its PRIORITY, not by its pool id. A

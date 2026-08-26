@@ -933,12 +933,14 @@ Ring::image_gc(vte::image::Image const* exempt) noexcept
                  * 'restored != ring.image_map().end()' - the image just read
                  * back missing from the map.
                  *
-                 * Only recoverability is load-bearing here. It is NOT also the
-                 * oldest thing in the map: restore_image() reinserts under the
-                 * image's ORIGINAL priority, so once more than one image has
-                 * been faulted in the earlier ones sort ahead of it. Probed
-                 * over that same test's sweep, @exempt was m_image_map.begin()
-                 * on the first fault-in and on none of the ten after it.
+                 * Only recoverability is load-bearing here, and in particular
+                 * @exempt is NOT reliably the oldest thing in the map, so the
+                 * loop must skip it by identity rather than by position.
+                 * restore_image() reinserts under the image's ORIGINAL
+                 * priority, and m_image_map is ordered by priority, so
+                 * @exempt is m_image_map.begin() exactly when nothing left in
+                 * the map was placed before it - which a sweep faulting rows
+                 * back in out of priority order does not give.
                  */
                 auto victim = m_image_map.end();
                 for (auto it = m_image_map.begin(); it != m_image_map.end(); ++it) {

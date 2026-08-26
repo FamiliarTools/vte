@@ -135,20 +135,107 @@ skip_if_skipped() {
         exit 77
 }
 
-# Require the last run to have reported a frame difference, with $1 said if it
-# did not. Both halves are checked: a non-zero status alone would also be
-# satisfied by the runner failing to run at all.
+# What the last run said about the FRAME, which is the only observable these
+# assertions are about. Read from the line the runner prints for each outcome
+# and not from its exit status, because the status is shared by every way the
+# run can end:
+#
+#   identical      it compared the frame against the golden and found no
+#                  differing pixel
+#   different      it compared them and found some
+#   inconclusive   it never reached a comparison at all - it could not capture,
+#                  the terminal never answered or never drew, ImageMagick
+#                  failed, the golden was missing
+#
+# The third is the point of splitting this out. A run that fell over before
+# comparing anything says NOTHING about whether the planted file reached the
+# app, and reporting it as though it did sends a reader after a config leak on
+# the evidence of a slow machine. It is the same shape as the one require_moved
+# in xtsmgraphics-isolation-test.sh was rewritten to avoid: a verdict that
+# could not tell its own failure mode from the one it tests for.
+frame_verdict() {
+        local out
+        out=$(cat "$WORK/out")
+
+        case "$out" in
+                *"differs from the golden"*)
+                        echo different; return ;;
+        esac
+
+        case "$out" in
+                *"renders identically to the golden"*)
+                        # The words and the status have to agree, or this no
+                        # longer knows what it is being told.
+                        [ "$STATUS" = 0 ] && { echo identical; return; } ;;
+        esac
+
+        echo inconclusive
+}
+
+# Complain that the run never got as far as a frame, naming $1 as what is left
+# unestablished. Deliberately worded so it can never be misread as the planted
+# file having leaked.
+inconclusive() {
+        echo "FAIL: the render runner never reached a comparison, so nothing was established about $1"
+        sed 's/^/  /' "$WORK/out"
+        exit 1
+}
+
+# Require the last run to have reported a frame DIFFERENCE - used for the two
+# probes that establish a planted file is not inert. $1 names the probe; $2 is
+# what to say if the frame came back identical, i.e. the plant did nothing.
 require_difference() {
-        [ "$STATUS" != 0 ] || { echo "FAIL: $1"; sed 's/^/  /' "$WORK/out"; exit 1; }
-        case "$(cat "$WORK/out")" in
-                *"differs from the golden"*) ;;
-                *) echo "FAIL: $1"; sed 's/^/  /' "$WORK/out"; exit 1 ;;
+        case "$(frame_verdict)" in
+                different) ;;
+                identical) echo "FAIL: $2"; sed 's/^/  /' "$WORK/out"; exit 1 ;;
+                *) inconclusive "$1" ;;
         esac
 }
 
+# Require the last run to have reported the frame IDENTICAL to the golden -
+# used for the guard assertions themselves. $1 names the guard; $2 is what to
+# say if the frame differed, i.e. the planted file did reach the app.
 require_identical() {
-        [ "$STATUS" = 0 ] || { echo "FAIL: $1"; sed 's/^/  /' "$WORK/out"; exit 1; }
+        case "$(frame_verdict)" in
+                identical) ;;
+                different) echo "FAIL: $2"; sed 's/^/  /' "$WORK/out"; exit 1 ;;
+                *) inconclusive "$1" ;;
+        esac
 }
+
+# ------------------------------------------------- the verdict reader itself ---
+#
+# frame_verdict() is only worth anything if it really does separate the three,
+# and it keys on words the RUNNER prints, in another file. So both halves are
+# checked before any of the assertions above are trusted.
+#
+# First that the words still exist where they are read from. A rename in the
+# runner would otherwise silently turn every outcome into "inconclusive", and
+# this test would go red for the wrong reason or, worse, stop distinguishing
+# anything.
+for PHRASE in 'renders identically to the golden' 'differs from the golden'; do
+        grep -qF "$PHRASE" "$RUNNER" ||
+                { echo "FAIL: the runner no longer says \"$PHRASE\", so frame_verdict cannot read it"; exit 1; }
+done
+
+# Then that each of the three is actually reached. Driven over $WORK/out and
+# $STATUS directly, which is the whole of frame_verdict's input.
+self_check() {
+        printf '%s\n' "$2" >"$WORK/out"
+        STATUS=$3
+        [ "$(frame_verdict)" = "$1" ] ||
+                { echo "FAIL: frame_verdict read $4 as $(frame_verdict), not $1"; exit 1; }
+}
+
+self_check identical    "PASS: c renders identically to the golden"       0 "a passing run"
+self_check different    "FAIL: c differs from the golden (AE=1234)"       1 "a frame difference"
+self_check inconclusive "FAIL: c was never captured: the terminal never painted its window" 1 "a readiness timeout"
+self_check inconclusive "FAIL: could not capture the window"              1 "a capture failure"
+self_check inconclusive "FAIL: c could not be compared: could not read the golden" 1 "a broken comparison"
+# A pass line the exit status contradicts is not a pass.
+self_check inconclusive "PASS: c renders identically to the golden"       1 "a pass line with a non-zero status"
+rm -f "$WORK/out"
+unset STATUS
 
 # ---------------------------------------------------------------- guard B ---
 
@@ -166,7 +253,8 @@ chmod +x "$FORCED"
 
 run_runner "$FORCED"
 skip_if_skipped
-require_difference "the planted vteapp.ini does not change the frame, so the guard B probe is vacuous"
+require_difference "the guard B probe's premise" \
+        "the planted vteapp.ini does not change the frame, so the guard B probe is vacuous"
 
 # Guard B itself. The wrapper puts the vteapp.ini back where the app looks for
 # it, so the scratch home cannot be what saves this run; --no-load-config is
@@ -182,7 +270,8 @@ make_home_wrapper "$INI_HOME" "$WORK/app-in-ini-home"
 
 run_runner "$WORK/app-in-ini-home"
 skip_if_skipped
-require_identical "a vteapp.ini in the app's own config dir changed the rendered frame"
+require_identical "guard B, --no-load-config" \
+        "a vteapp.ini in the app's own config dir changed the rendered frame"
 
 # ---------------------------------------------------------------- guard A ---
 
@@ -195,7 +284,8 @@ make_home_wrapper "$FC_HOME" "$WORK/app-in-fc-home"
 
 run_runner "$WORK/app-in-fc-home"
 skip_if_skipped
-require_difference "the planted fontconfig does not change the frame, so the guard A probes are vacuous"
+require_difference "the guard A probes' premise" \
+        "the planted fontconfig does not change the frame, so the guard A probes are vacuous"
 
 # Guard A, on each of the two paths the config dir resolves from. They are
 # separate resolutions - $XDG_CONFIG_HOME when set, $HOME/.config otherwise -
@@ -209,7 +299,8 @@ plant_fontconfig "$XDG"
 
 run_runner "$APP" "HOME=$EMPTY_HOME" "XDG_CONFIG_HOME=$XDG"
 skip_if_skipped
-require_identical "a fontconfig in \$XDG_CONFIG_HOME changed the rendered frame"
+require_identical "guard A, via \$XDG_CONFIG_HOME" \
+        "a fontconfig in \$XDG_CONFIG_HOME changed the rendered frame"
 
 FC_ONLY_HOME="$WORK/home"
 mkdir -p "$FC_ONLY_HOME/.config"
@@ -217,7 +308,8 @@ plant_fontconfig "$FC_ONLY_HOME/.config"
 
 run_runner "$APP" -u XDG_CONFIG_HOME "HOME=$FC_ONLY_HOME"
 skip_if_skipped
-require_identical "a fontconfig in \$HOME/.config changed the rendered frame"
+require_identical "guard A, via \$HOME/.config" \
+        "a fontconfig in \$HOME/.config changed the rendered frame"
 
 echo "PASS: the planted vteapp.ini and fontconfig each do change the frame when they reach the app"
 echo "PASS: a vteapp.ini in the app's own config dir does not reach the render test"

@@ -128,12 +128,24 @@ option(
                'and is font-invariant when the region holds nothing but the image ' +
                'on blank background. Measured on gtk3 over six fonts, five of the ' +
                'nine cases move and four do not; the count is not worth memorising, ' +
-               'the sentinel below is. So if cases fail while sixel-render-bands ' +
-               'PASSES, the cause is font resolution and not a regression: bands ' +
-               'compares nothing but the image, which is drawn at its own ' +
-               'pixel size at the terminal origin and is font-invariant, so a real image ' +
-               'regression takes it down too. A builder who hits that should leave this ' +
-               'option off, or keep the tests registered and skip them per invocation ' +
+               'the sentinel below is. To tell a foreign font from a real regression, ' +
+               'read the FAILURE LINE first and then the sentinel. A run that never ' +
+               'got a frame at all reports itself in the terminal\'s own terms - it ' +
+               'never answered, never painted, never drew - and never as a difference ' +
+               'from the golden, so those two are already separate outcomes and not one ' +
+               'signature - the sixel-render-gate case holds both halves of that. ' +
+               'Only a line saying "differs from the golden" is a statement ' +
+               'about pixels. Among those, sixel-render-bands is the discriminator: ' +
+               'bands compares nothing but the image, which is drawn at its own pixel ' +
+               'size at the terminal origin, so an image regression takes bands down ' +
+               'too. Cases failing while bands PASSES is therefore consistent with a ' +
+               'foreign Monospace and not with an image regression - it does not by ' +
+               'itself rule out everything else that lives outside the image, so ' +
+               'confirm it on the frame the runner keeps: each failing case writes a ' +
+               '<case>-<arm>.actual.png and names its path, and a font difference shows ' +
+               'up as text and cell edges moved with the image itself unchanged. ' +
+               'A builder who hits that should leave this option off, or keep ' +
+               'the tests registered and skip them per invocation ' +
                'with `meson test --no-suite sixel-display`. VTE_TEST_FONT overrides the ' +
                'font but is NOT a fix, since it cannot make a foreign Monospace resolve ' +
                'to the captured one',
