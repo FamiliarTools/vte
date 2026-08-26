@@ -956,6 +956,28 @@ if get_option('sixel')
 
   test_units += [test_sixel,]
 
+  # Hostile-input coverage for the decoder. The same two classes as test_sixel
+  # drives, but from the other side: not that valid images decode correctly,
+  # that invalid ones cannot crash, hang or read out of bounds. Kept a separate
+  # binary so the corpus arms can be timed and sanitized on their own.
+  test_sixel_corpus_sources = config_sources + debug_sources + glib_glue_sources + sixel_parser_sources + sixel_context_sources + files(
+    'cairo-glue.hh',
+    'image.hh',
+    'sixel-corpus-test.cc',
+    'vtedefines.hh',
+  )
+
+  test_sixel_corpus = executable(
+    'test-sixel-corpus',
+    cpp_args: ['-DVTE_GTK=0'],
+    sources: test_sixel_corpus_sources,
+    dependencies: test_sixel_deps,
+    include_directories: top_inc,
+    install: false,
+  )
+
+  test_units += [test_sixel_corpus,]
+
   # The ring's image lifetime rules, exercised directly on the Ring rather than
   # through the widget. Pulls in the Image, which differs between the backends,
   # and the generated public headers that ring.hh reaches through <vte/vte.h>,
