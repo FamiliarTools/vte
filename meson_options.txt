@@ -118,7 +118,21 @@ option(
   'sixel_display_tests',
   type: 'boolean',
   value: false,
-  description: 'Register the SIXEL tests that need a running X server (Xvfb) and, for the golden-frame ones, ImageMagick',
+  description: 'Register the SIXEL tests that need a running X server (Xvfb) and, ' +
+               'for the golden-frame ones, ImageMagick. Third requirement, and the ' +
+               'one the build cannot check: the golden PNGs were captured against ' +
+               'whatever fontconfig resolves "Monospace" to on the author\'s machine. ' +
+               'Three cases move with that resolution - bands-margin, cursor-right-off ' +
+               'and raster-opaque - because they compare regions placed in CELLS (the ' +
+               'right margin, the cursor, the raster rows below the image) rather than ' +
+               'the image itself. So if those fail while sixel-render-bands PASSES, the ' +
+               'cause is font resolution and not a regression: bands is drawn at its own ' +
+               'pixel size at the terminal origin and is font-invariant, so a real image ' +
+               'regression takes it down too. A builder who hits that should leave this ' +
+               'option off, or keep the tests registered and skip them per invocation ' +
+               'with `meson test --no-suite sixel-display`. VTE_TEST_FONT overrides the ' +
+               'font but is NOT a fix, since it cannot make a foreign Monospace resolve ' +
+               'to the captured one',
 )
 
 option(

@@ -161,7 +161,8 @@ private:
          * bytes.
          *
          * Centralised because the freeze, thaw, truncate and rewrap paths
-         * each walk these records independently - eight sites - and a stride
+         * each walk these records independently - seven call sites, which
+         * `grep -c attr_record_stride src/ring.cc` counts - and a stride
          * that disagrees between any two of them desynchronises the reader
          * from the writer, which corrupts the scrollback SILENTLY rather
          * than failing. Anything added to the record's variable tail goes

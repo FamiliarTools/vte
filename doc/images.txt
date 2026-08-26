@@ -80,9 +80,12 @@ The stripe is the unit of a RUN, in two places:
     the column is recovered on thaw by counting from the run's first cell, and
     including it would encode what the reader can derive.
 
-  - the GTK4 draw (src/vte.cc) extends a draw run over cells of the same stripe
-    whose tile columns are still consecutive, and stops at a gap, because a gap
-    means a cell in the middle was overwritten and must not be painted.
+  - the draw (Terminal::draw in src/vte.cc) extends a draw run over cells of the
+    same stripe whose tile columns are still consecutive, and stops at a gap,
+    because a gap means a cell in the middle was overwritten and must not be
+    painted. This is BOTH arms: the run loop is under `#if WITH_SIXEL` only, and
+    the `#if VTE_GTK` split below it covers just the final blit - a cairo surface
+    on GTK3, a GdkTexture on GTK4.
 
 The stripe is NOT the unit of lifetime. Lifetime is per IMAGE: m_image_map,
 image_gc() and drop_images_before() all work on whole Images. Nothing in the
@@ -105,8 +108,9 @@ Instead the trailer carries the flag: hyperlink lengths are bounded far below
 0x8000 by VTE_HYPERLINK_TOTAL_LENGTH_MAX, so the high bit is free and says
 whether a StreamImageRef (src/ring.hh) precedes the trailer. The record stays
 self-describing in both directions, and attr_record_stride() is the one place
-the stride is computed, because eight sites walk these records and a stride
-that disagrees between any two of them corrupts the scrollback silently.
+the stride is computed, because seven call sites walk these records - `grep -c
+attr_record_stride src/ring.cc` - and a stride that disagrees between any two of
+them corrupts the scrollback silently.
 
 The StreamImageRef identifies the image by its PRIORITY, not by its pool id. A
 pool id is an index into an in-memory table and is reused once a sweep reclaims
