@@ -158,14 +158,31 @@ BOT_MARK=$'\033[38;2;222;18;254m\033[48;2;222;18;254m        \033[m'
 # saturation channel isolates exactly the band block that runs from 9 px below
 # the top of the image to 62 px below it.
 #
-# Colour is deliberately not the handle, and that is a measurement and not
-# caution. An image drawn in the SCROLLBACK does not come out at the intensity
-# it has on screen: the same fixture that renders #FF0000 while it is on the
-# writable rows renders #7F0000 once it has been scrolled back to, whether or
-# not it was ever evicted. Hunting for #FF0000 therefore finds nothing in any
-# frame this test takes, and pinning #7F0000 instead would make this test fail
-# on the day that difference is fixed. Saturation and the band COUNT below
-# survive both.
+# Colour is deliberately not the handle, and the reason is THIS TEST'S OWN
+# VTE_DEBUG, not anything about the scrollback.
+#
+# ring.cc, in the freeze path that writes a row out to the row stream, carries
+# an upstream debug aid from 2017: under VTE_DEBUG=ring or =hyperlink it flips
+# VTE_ATTR_REVERSE on every cell it freezes, so that rows served from the
+# stream are visibly reversed. This runner exports VTE_DEBUG=ring - it has to,
+# that is where the "Restored image" line comes from - so every scrolled-back
+# row in every frame it takes is reverse-video by construction: text comes back
+# white-on-black, and the image's cells acquire an explicit black background
+# that draw_rows() then composites over the picture at
+# VTE_IMAGE_CELL_BACKGROUND_ALPHA. Half of #FF0000 is #7F0000, which is what
+# the bands measure here.
+#
+# So a frame from this runner does not show what a user's scrollback looks
+# like, and the difference is not a defect to be fixed. Measured, HEAD, gtk4,
+# the same fixture scrolled back to the same rows with no eviction and no
+# selection: with VTE_DEBUG=ring the eight bands come back halved, and with
+# VTE_DEBUG unset the same binary brings them back at full intensity, all
+# eight exact. On bb6ec465^ - before the image survived a background fill at
+# all - the VTE_DEBUG=ring frame is a solid black rectangle instead.
+#
+# Hunting for #FF0000 therefore finds nothing in any frame this test takes,
+# and pinning #7F0000 instead would tie the test to the debug aid. Saturation
+# and the band COUNT below survive both.
 SAT_TOP_OFS=9                     # first saturated band, below the image top
 SAT_HEIGHT=54                     # six 9 px bands
 IMAGE_W=96
@@ -354,15 +371,19 @@ scroll_back_to_the_image() {
                 # clicks land ~100 ms apart - inside GTK's double-click time. The
                 # terminal read the burst as a multiple click and SELECTED, and a
                 # selection is not a neutral thing to photograph through: it
-                # inverts the text under it and composites a tint over the image.
-                # Measured on the frame that produced it: every band of the
-                # fixture came out at exactly half its intensity - #7F0000 where
-                # the resident image draws #FF0000 - and the text rows came back
-                # white-on-black. The verdict would have been taken from a
-                # picture the selection had recoloured.
+                # inverts the text under it and composites a tint over the
+                # image. Measured directly, gtk4, on a RESIDENT image with
+                # VTE_DEBUG unset so nothing else could be recolouring it: the
+                # eight bands go from #FF0000 and its seven fellows to #7F0000
+                # and theirs the moment a drag covers them.
                 #
-                # That this stays true is not left to the spacing; see the
-                # PRIMARY check below.
+                # What that measurement does NOT do is identify a selection in a
+                # frame this runner takes, and an earlier version of this
+                # comment claimed it did. Under the VTE_DEBUG=ring this runner
+                # exports, halved bands and white-on-black text are what EVERY
+                # scrolled-back frame looks like - see the note at SAT_TOP_OFS -
+                # so those two symptoms cannot tell a selected frame from a
+                # clean one here. The PRIMARY check below is what does.
                 local i
                 for i in 1 2 3; do
                         xdotool click 4 2>>"$LOG" || {
