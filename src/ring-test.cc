@@ -472,6 +472,26 @@ test_ring_image_dropping_a_frozen_image_reads_no_row(void)
         g_assert_true(ring.image_pool().lookup(frozen->cells[0].attr.image_ref()) == image);
         g_assert_cmpuint(ring.rows_thawed_for_test(), ==, before_read + 1);
 
+        /* Now give that read back, because it left the counter DEAF to the
+         * very read this test forbids. index() answers from a one-row cache
+         * (m_cached_row_num) and only goes to the stream on a miss, so the
+         * read above left the image's last row cached - and a drop path that
+         * derived the image's extent by reading exactly that row would have
+         * been served from the cache, moving no counter and passing this test.
+         * Measured: with `(void)index(row_t(image->get_bottom()))` spliced into
+         * drop_images_before(), the test as it stood reported OK.
+         *
+         * So displace the cache with a DIFFERENT frozen row, which is a miss
+         * and therefore counts. That second read is what makes the count below
+         * an assertion about the ring rather than about the cache; it is
+         * asserted rather than assumed, since a hit here would silently put
+         * the deafness back.
+         */
+        auto const before_displace = ring.rows_thawed_for_test();
+        g_assert_cmpint(bottom, >, 0);
+        g_assert_nonnull(ring.index(Ring::row_t(0)));
+        g_assert_cmpuint(ring.rows_thawed_for_test(), ==, before_displace + 1);
+
         /* The behaviour: scrolling the image out one line at a time reaches the
          * drop - at the right row - having read no row back.
          */
