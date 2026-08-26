@@ -115,6 +115,47 @@ option(
 )
 
 option(
+  'sixel_display_tests',
+  type: 'boolean',
+  value: false,
+  description: 'Register the SIXEL tests that need a running X server (Xvfb) and, ' +
+               'for the golden-frame ones, ImageMagick. Third requirement, and the ' +
+               'one the build cannot check: the golden PNGs were captured against ' +
+               'whatever fontconfig resolves "Monospace" to on the author\'s machine. ' +
+               'A render case moves with that resolution whenever its compared ' +
+               'region holds anything the terminal placed in CELLS - the right ' +
+               'margin, a marker glyph, the edge of a window that is 80x24 cells - ' +
+               'and is font-invariant when the region holds nothing but the image ' +
+               'on blank background. Measured on gtk3 over six fonts, five of the ' +
+               'nine cases move and four do not; the count is not worth memorising, ' +
+               'the sentinel below is. To tell a foreign font from a real regression, ' +
+               'read the FAILURE LINE first and then the sentinel. A run that never ' +
+               'got a frame at all reports itself in the terminal\'s own terms - it ' +
+               'never answered, never painted, never finished parsing, never drew - ' +
+               'and never as a difference from the golden, so those two are already ' +
+               'separate outcomes and not one signature. The sixel-render-gate case ' +
+               'holds both halves of that, and holds each of the four waits ' +
+               'SEPARATELY, by starving one at a time and requiring the run to name ' +
+               'the wait it stopped at - so the claim made here is exactly the one ' +
+               'that is tested, rather than one wait standing in for four. ' +
+               'Only a line saying "differs from the golden" is a statement ' +
+               'about pixels. Among those, sixel-render-bands is the discriminator: ' +
+               'bands compares nothing but the image, which is drawn at its own pixel ' +
+               'size at the terminal origin, so an image regression takes bands down ' +
+               'too. Cases failing while bands PASSES is therefore consistent with a ' +
+               'foreign Monospace and not with an image regression - it does not by ' +
+               'itself rule out everything else that lives outside the image, so ' +
+               'confirm it on the frame the runner keeps: each failing case writes a ' +
+               '<case>-<arm>.actual.png and names its path, and a font difference shows ' +
+               'up as text and cell edges moved with the image itself unchanged. ' +
+               'A builder who hits that should leave this option off, or keep ' +
+               'the tests registered and skip them per invocation ' +
+               'with `meson test --no-suite sixel-display`. VTE_TEST_FONT overrides the ' +
+               'font but is NOT a fix, since it cannot make a foreign Monospace resolve ' +
+               'to the captured one',
+)
+
+option(
   '_systemd',
   type: 'boolean',
   value: true,

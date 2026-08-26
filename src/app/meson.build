@@ -178,7 +178,31 @@ endif
 # The runner exits 77 (skip) when Xvfb or ImageMagick are absent, so a
 # sandboxed build without a display reports "skipped" rather than a failure it
 # could not tell apart from a real one.
-if get_option('sixel')
+#
+# Registered behind sixel_display_tests, which is OFF by default, rather than
+# behind the sixel option these test. Those are two different questions and
+# they were being answered by one switch: enabling the sixel FEATURE is what a
+# distributor does to ship images, and it was also signing them up to boot an
+# X server for every case and to have Xvfb and ImageMagick's import, compare
+# and convert on the build host. Without the tools the runners do skip rather
+# than fail, but a suite that reports fourteen skips on every build is noise
+# the builder did not ask for, and with the tools installed it is an X server
+# per case they did not ask for either.
+#
+# Measured on this branch, gtk3: `meson test` runs 20 tests with the option off
+# and 34 with it on, the 14 added costing 25.3s of test time.
+#
+# The runner's own skip path is not made redundant by the option. The option
+# decides whether the tests are ASKED FOR; the skip decides what to say when
+# they were asked for and the tools are not there, which is "skipped" and never
+# a pass. Both were exercised: the option off gives the 20 above, and each of
+# Xvfb, import, compare and convert removed from PATH on its own makes the
+# runner print that tool by name and exit 77.
+#
+# They also carry the sixel-display suite name, so a builder who wants the
+# tests registered but not run in a given invocation has
+# `meson test --no-suite sixel-display` without reconfiguring.
+if get_option('sixel') and get_option('sixel_display_tests')
   sixel_render_cases = [
     'bands',
     # Same image with a DECGCH spliced in. A command a VT340 does not
@@ -199,7 +223,25 @@ if get_option('sixel')
     # rows its data needs; opaque must honour the declared raster.
     'raster-transparent',
     'raster-opaque',
+    # A sixel cut off mid-stream, with no terminator. What arrived must still
+    # be drawn - the first four of the eight bands whole and 6 of the fifth
+    # band's 9 pixel rows - which is the xterm #323 behaviour vte.cc
+    # implements in the eos arm of its parser ABORT. Run with
+    # the child exiting rather than sleeping; see the <case>.eof note in
+    # render-test.sh.
+    'bands-truncated',
   ]
+
+  # The case the isolation test runs, which cannot be sixel_render_cases[0].
+  #
+  # That case is 'bands', and bands is font-invariant: measured on gtk3 it is
+  # byte-identical at all six fonts the table in render-test.sh reports,
+  # because its crop holds nothing but the image and the image is drawn at its
+  # own pixel size at the terminal origin. The isolation test's fontconfig
+  # probe has nothing to go red for on such a case. bands-margin crops to the right margin, which sits at the column
+  # count times the cell width, so it does move with the font - measured
+  # AE=1764 under a fontconfig that reassigns Monospace to DejaVu Serif.
+  sixel_isolation_case = 'bands-margin'
 
   sixel_test_apps = []
 
@@ -219,7 +261,96 @@ if get_option('sixel')
       files(sixel_test_dir / 'xtsmgraphics-test.sh'),
       args: [arm[1].full_path()],
       depends: [arm[1]],
+      suite: 'sixel-display',
       timeout: 120,
+    )
+
+    # The one reply above that is not a constant - the geometry, and its
+    # agreement with CSI 14t - is computed in the font's cell, so it answers
+    # whatever is in the config dir the test is run from. That test keeps the
+    # developer's out with a scratch home and --no-load-config, and this one
+    # probes each SEPARATELY, so deleting either alone turns it red: a user
+    # fontconfig for the scratch home, a vteapp.ini forced back onto the app's
+    # own config path for the flag. Each probe is preceded by a run showing
+    # the file it plants is not inert.
+    test(
+      'sixel-xtsmgraphics-isolation-' + arm[0],
+      files(sixel_test_dir / 'xtsmgraphics-isolation-test.sh'),
+      args: [
+        arm[1].full_path(),
+        sixel_test_dir,
+      ],
+      depends: [arm[1]],
+      suite: 'sixel-display',
+      timeout: 420,
+    )
+
+    # The render cases above are only worth their runtime if their verdict
+    # tells a right frame from a wrong one. This one damages the captured frame
+    # in each of the ways it can be wrong - one pixel, every pixel, one column
+    # short - and requires the runner to reject each while still passing the
+    # frame it captured untouched.
+    test(
+      'sixel-render-gate-' + arm[0],
+      files(sixel_test_dir / 'render-gate-test.sh'),
+      args: [
+        arm[1].full_path(),
+        sixel_test_dir,
+        sixel_render_cases[0],
+        arm[0],
+        # The font sentinel's counterpart: a case that must MOVE, and move by
+        # DIFFERENT amounts under the two alternate fonts, which is what shows
+        # the sentinel's invariance is not simply the font having been ignored.
+        # Required, not optional - see the scenario for what its absence cost.
+        sixel_isolation_case,
+      ],
+      depends: [arm[1]],
+      suite: 'sixel-display',
+      # Headroom for the readiness cap, not for the run.
+      #
+      # This test boots a terminal once per starve scenario, and each of those
+      # runs starves ONE named wait while every OTHER wait in it still carries
+      # the runner's real cap - VTE_TEST_READY_TIMEOUT, 90 s by default in
+      # render-test.sh. So a machine on which one of those other waits is
+      # genuinely reached spends a whole cap inside a single scenario with
+      # nothing wrong with the gate, and what this test's budget has to cover
+      # is the cap times the number of starve scenarios. It is NOT a multiple
+      # of how long the test takes when it passes; sizing it from that gave
+      # 240 s, which a single such machine outlasts, and a TIMEOUT is the one
+      # verdict that says nothing.
+      #
+      # The scenario count is deliberately not written down here, because a
+      # number in this comment is falsified by the next scenario added to the
+      # runner and cannot announce it. Derive it:
+      #
+      #   LC_ALL=C git grep -c '^starve_says ' -- src/tests/sixel/render-gate-test.sh
+      #
+      # That counts the calls, not the file's VTE_TEST_STARVE_WAIT uses: the
+      # other one is the no-such-wait scenario, which render-test.sh refuses at
+      # the top, before mktemp and before an X server, so it boots no terminal
+      # and reaches no wait.
+      timeout: 900,
+    )
+
+    # And they are only worth their runtime if they measure the code rather
+    # than whoever ran them. The runner keeps the developer's settings out of
+    # the frame with two guards - a scratch config home, and --no-load-config -
+    # and this one probes each SEPARATELY, so deleting either alone turns it
+    # red with its own message: a user fontconfig for the scratch home, a
+    # vteapp.ini forced back onto the app's own config path for the flag.
+    # Each probe is preceded by a run showing the file it plants is not inert.
+    test(
+      'sixel-render-isolation-' + arm[0],
+      files(sixel_test_dir / 'render-isolation-test.sh'),
+      args: [
+        arm[1].full_path(),
+        sixel_test_dir,
+        sixel_isolation_case,
+        arm[0],
+      ],
+      depends: [arm[1]],
+      suite: 'sixel-display',
+      timeout: 420,
     )
 
     foreach case: sixel_render_cases
@@ -233,6 +364,7 @@ if get_option('sixel')
           arm[0],
         ],
         depends: [arm[1]],
+        suite: 'sixel-display',
         timeout: 120,
       )
     endforeach

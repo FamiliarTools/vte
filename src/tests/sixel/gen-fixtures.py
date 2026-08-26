@@ -72,10 +72,10 @@ def at_right_margin(s):
     """bands.six emitted so that it overhangs the right margin.
 
     DEC STD 070 11.2.2: "Sixels defined to be printed past the right margin
-    are not printed." The image is 96 px wide, which is 10 columns of the
-    emulated 10x20 cell, so starting it at column 75 of an 80 column screen
-    leaves room for 5 and the other 5 must be discarded - not wrapped, not
-    scaled to fit, not drawn over the edge.
+    are not printed." The image is 96 px wide, which is several columns on
+    any cell the terminal can have, so starting it at column 76 of an 80
+    column screen leaves it overhanging: the part past the margin must be
+    discarded - not wrapped, not scaled to fit, not drawn over the edge.
     """
     return '\x1b[1;76H' + s
 
@@ -107,7 +107,14 @@ def truncated(s):
     What a dropped connection or `head -c` produces. xterm has rendered the
     part that arrived since patch #323; discarding it means a user who
     cats a partially-downloaded image sees nothing rather than the top of
-    it. Cut at 60% so several complete bands have arrived.
+    it. Cut at 60%. What that leaves is not a whole number of bands: read
+    off the golden, the first four bands are drawn in full at 9 px each and
+    the fifth (yellow) gets 6 of its 9 rows, y=37..42 where a whole band
+    would run y=37..45.
+
+    Rendered by the sixel-render-bands-truncated-* tests, which need the pty
+    to reach end of stream for it; see bands-truncated.eof and the note it is
+    read by in render-test.sh.
     """
     return s[:int(len(s) * 0.6)]
 
