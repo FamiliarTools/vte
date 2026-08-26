@@ -164,6 +164,88 @@ def oversized_raster(transparent):
     return ''.join(out)
 
 
+def strip_six():
+    """The eight band colours laid out ACROSS one sixel row.
+
+    One sixel row is 6 px tall, which is shorter than any cell the terminal
+    can have, so this image occupies exactly ONE terminal row whatever the
+    font resolves to. That is what the cell-move cases need: ICH, DCH and a
+    margined scroll move a rectangle, and the ring only carries a picture
+    along when every one of its cells is inside that rectangle. An image 12
+    rows tall has cells outside a one-row ICH by construction and would be
+    torn no matter what the code did.
+
+    The colours run along the width rather than the height for the same
+    reason the bands do at all - a frame in which every pixel is one colour
+    cannot show an image that moved by the wrong amount.
+    """
+    # BANDS[-1] is white, and the app's default background is white, so a
+    # white segment is not a pixel anyone can see moving. The strip carries
+    # the other seven. (Which end has to go is not a guess: the captured
+    # frames are white behind the image.)
+    colours = BANDS[:-1]
+    out = ['\x1bPq']
+    for i, (r, g, b) in enumerate(colours):
+        out.append('#%d;2;%d;%d;%d' % (i, r, g, b))
+    span = W // len(colours)          # 13 px per colour
+    for i in range(len(colours)):
+        out.append('#%d%s' % (i, chr(63 + 0b111111) * span))
+    out.append('\x1b\\')
+    return ''.join(out)
+
+
+# Park the cursor far below the compared region. Every case here ends with
+# it: a blinking block inside the crop makes the frame a coin flip on phase.
+PARK = '\x1b[23;1H'
+
+
+def intra_row_move(s, seq):
+    """The strip at the home position, then a sideways cell move over it.
+
+    ICH/DCH move cells within their row and leave the rows where they are.
+    Both used to delete any image over the region outright, so a fixture
+    that renders the picture at all is already saying the picture followed;
+    WHERE it followed to is what the golden pins.
+    """
+    return '\x1b[H' + s + '\x1b[H' + seq + PARK
+
+
+def at_column(s, col):
+    """The strip drawn at a column, with no move at all.
+
+    The ground truth for the ICH case: an image the terminal PLACED one cell
+    to the right is what an image the terminal MOVED one cell to the right
+    has to look like. The two cases share one golden, captured from this one,
+    so 'follows by exactly one cell width' is a comparison and not a number
+    read off a picture.
+    """
+    return '\x1b[1;%dH' % col + s + PARK
+
+
+def region_scroll(s, row):
+    """The strip inside a DECSLRM region, scrolled down one row - or not.
+
+    DECSET 69 plus DECSLRM narrower than the screen is what puts
+    scroll_text_down() on the branch that copies cells between rows while
+    the rows themselves stay put. row=1 draws at the top of the region and
+    scrolls; row=2 draws where the scroll should have left it and does not.
+    One golden, captured from the second, for the same reason as the ICH
+    pair.
+
+    The margins are dropped again before the epilogue: the runner addresses
+    the bottom row after the fixture, and a fixture that changes the
+    addressing the runner depends on is testing the runner.
+    """
+    out = ['\x1b[?69h', '\x1b[1;40s', '\x1b[1;10r']
+    out.append('\x1b[%d;1H' % row)
+    out.append(s)
+    if row == 1:
+        out.append('\x1b[H\x1b[T')    # SD: scroll the region down one row
+    out.append('\x1b[?69l\x1b[r')
+    out.append(PARK)
+    return ''.join(out)
+
+
 if __name__ == '__main__':
     b = bands_six()
     open('bands.six', 'w').write(b)
@@ -175,4 +257,13 @@ if __name__ == '__main__':
     open('cursor-right-off.six', 'w').write(cursor_right(b, False))
     open('raster-transparent.six', 'w').write(oversized_raster(True))
     open('raster-opaque.six', 'w').write(oversized_raster(False))
+
+    strip = strip_six()
+    open('strip-placed.six', 'w').write(at_column(strip, 1))
+    open('strip-ich.six', 'w').write(intra_row_move(strip, '\x1b[@'))
+    open('strip-ich-placed.six', 'w').write(at_column(strip, 2))
+    open('strip-dch.six', 'w').write(intra_row_move(strip, '\x1b[P'))
+    open('strip-region-scroll.six', 'w').write(region_scroll(strip, 1))
+    open('strip-region-placed.six', 'w').write(region_scroll(strip, 2))
+
     print('wrote bands.six (%d bytes), bands-gch.six, bands-margin.six' % len(b))
