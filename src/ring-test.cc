@@ -2154,6 +2154,57 @@ test_ring_image_limit_shrinks_immediately(void)
 }
 
 
+/* The byte budget is the whole bound. It used to have a silent partner - a
+ * hardcoded cap on the NUMBER of resident images - which the public
+ * VteTerminal:image-limit documentation never mentioned, so a caller who
+ * raised the budget still got eviction it was never told about.
+ *
+ * Removing that cap is only safe if the thing it was really bounding, the
+ * fixed per-image bookkeeping the pixel count does not see, is charged to the
+ * budget instead. This is what says it is: a budget sized to hold exactly N
+ * images' worth of PIXELS must hold fewer than N, because each one costs more
+ * than its pixels.
+ */
+static void
+test_ring_image_limit_counts_more_than_pixels(void)
+{
+        auto const n = 100;
+
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 200);
+
+        /* One image's pixels, measured rather than assumed: place one under a
+         * budget nothing can evict it from and read the meter.
+         */
+        ring.set_image_memory_max(size_t{1} << 30);
+        place_image(ring, 2, 1);
+        auto const cost = ring.image_memory_used();
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+
+        auto* const image = ring.image_map().begin()->second.get();
+        auto const pixels = size_t(image->resource_size());
+
+        /* The charge for one image is strictly more than its pixels. */
+        g_assert_cmpuint(cost, >, pixels);
+
+        /* A budget of exactly n images' pixels therefore holds fewer than n,
+         * and the meter still agrees with what is resident.
+         */
+        auto ring2 = Ring{1024, true};
+        ring2.set_visible_rows(24);
+        append_rows(ring2, 200);
+        ring2.set_image_memory_max(pixels * n);
+
+        for (auto i = 0; i < n; i++)
+                place_image(ring2, 2 + i, 1);
+
+        ring2.validate_images();
+        g_assert_cmpuint(ring2.image_map().size(), <, size_t(n));
+        g_assert_cmpuint(ring2.image_map().size(), >, 1);
+        g_assert_cmpuint(ring2.image_memory_used(), <=, pixels * n);
+}
+
 static void
 test_image_footprint_is_font_independent(void)
 {
@@ -2627,6 +2678,7 @@ main(int argc,
         g_test_add_func("/vte/ring/image/limit-is-enforced", test_ring_image_limit_is_enforced);
         g_test_add_func("/vte/ring/image/limit-zero-disables", test_ring_image_limit_zero_disables);
         g_test_add_func("/vte/ring/image/limit-shrinks-immediately", test_ring_image_limit_shrinks_immediately);
+        g_test_add_func("/vte/ring/image/limit-counts-more-than-pixels", test_ring_image_limit_counts_more_than_pixels);
 
         g_test_add_func("/vte/ring/scrollback-restore-respects-the-budget", test_ring_scrollback_restore_respects_the_budget);
         g_test_add_func("/vte/ring/cached-row-holds-its-image-id", test_ring_cached_row_holds_its_image_id);

@@ -393,6 +393,39 @@ private:
          * mutation drains it to repaint. */
         bool m_images_changed{false};
 
+        /* What one resident image costs the terminal in RAM.
+         *
+         * resource_size() is the pixels, which is nearly all of it for a
+         * picture but none of it for a one-band sixel: the Image, the two map
+         * nodes that hold it and the cairo surface's own header are a fixed
+         * cost per image regardless of how few pixels it has.
+         *
+         * That fixed cost used to be bounded separately, by a hardcoded cap on
+         * the NUMBER of resident images, which VteTerminal:image-limit never
+         * mentioned - so a caller who raised the byte budget still got
+         * eviction it was not told about, and on the alternate screen, where
+         * there is no stream to spill to, that eviction destroyed the picture
+         * rather than parking it. Charging the cost to the budget the caller
+         * set makes the byte budget the whole contract; the count cap is then
+         * redundant and is gone.
+         *
+         * The node figures are the standard red-black layout - parent, two
+         * children and a colour word alongside the key and value - which is an
+         * estimate of what libstdc++ allocates, not a measurement of it. It
+         * only has to be the right order of magnitude: what matters is that a
+         * flood of tiny images is bounded by bytes at all.
+         */
+        static constexpr size_t k_image_overhead =
+                sizeof(vte::image::Image) +
+                sizeof(size_t) + sizeof(std::unique_ptr<vte::image::Image>) +
+                sizeof(row_t) + sizeof(vte::image::Image*) +
+                8 * sizeof(void*);
+
+        static constexpr size_t image_cost(vte::image::Image const* image) noexcept
+        {
+                return image->resource_size() + k_image_overhead;
+        }
+
         void image_gc(vte::image::Image const* exempt = nullptr) noexcept;
         void sweep_image_pool() noexcept;
         void image_gc_region() noexcept;
@@ -494,7 +527,7 @@ public:
                 while (!m_image_map.empty()) {
                         auto& image = m_image_map.begin()->second;
                         spill_image(image.get());
-                        m_image_fast_memory_used -= image->resource_size();
+                        m_image_fast_memory_used -= image_cost(image.get());
                         note_image_freed(image.get());
                         unlink_image_from_top_map(image.get());
                         m_image_map.erase(m_image_map.begin());
