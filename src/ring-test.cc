@@ -1415,6 +1415,109 @@ test_ring_image_cells_carry_the_reference(void)
         g_assert_false(a.same_stripe(b));
 }
 
+/* Emit a 4-row-tall image at the bottom of a ring that has only its first row,
+ * the way Terminal::erase_image_rect() does: anchor it, then append and stamp
+ * its remaining rows one at a time. @hold_the_marker says whether the emission
+ * burst keeps the placing marker set for the appends, the way vte.cc's
+ * PlacingGuard does.
+ *
+ * The image's first row is always stamped under the marker, so that the two
+ * variants differ ONLY in what is true across the appends: without it the
+ * image is a resident with cells, which is what the seam rule is written
+ * about, rather than an image no cell ever named.
+ */
+static void
+emit_image_at_the_bottom(Ring& ring,
+                         bool hold_the_marker)
+{
+        auto const width_px = 4 * kCellWidth;
+        auto const height_px = 4 * kCellHeight;
+        auto const top = long(ring.next()) - 1;
+
+        auto surface = vte::take_freeable
+                (cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width_px, height_px));
+
+        ring.append_image(std::move(surface),
+                          width_px, height_px,
+                          0, top,
+                          kCellWidth, kCellHeight);
+
+        widen_row(ring, top, 4);
+        ring.stamp_image_row(vte::grid::coords(top, 0), 4, tile_row_t(0));
+
+        if (!hold_the_marker)
+                ring.set_placing_image(nullptr);
+
+        /* Rows 1..3 of the image do not exist yet, so each of these is an
+         * insert at m_end with the image's bottom already past it.
+         */
+        for (auto r = 1u; r < 4u; r++) {
+                ring.append(0);
+                if (ring.image_map().empty())
+                        break;
+
+                widen_row(ring, top + r, 4);
+                ring.stamp_image_row(vte::grid::coords(top + r, 0), 4, tile_row_t(r));
+        }
+
+        ring.set_placing_image(nullptr);
+        ring.validate_images();
+}
+
+static void
+test_ring_image_emitted_at_the_bottom_survives(void)
+{
+        /* An image is anchored at the cursor before the rows it covers exist,
+         * so for the length of its own emission it straddles the end of the
+         * ring - and shift_images_for_insert() destroys whatever straddles the
+         * seam it is asked about. The placing marker is the whole of what
+         * keeps a sixel at the bottom of the screen from deleting itself, and
+         * this holds both halves of that in one test rather than needing the
+         * guard taken out of the source: with the marker held across the
+         * appends the image survives all three, without it the first append
+         * takes it.
+         *
+         * The figures are the bands fixture's, measured: a 4-row image at row
+         * 0 of a 1-row ring, inserts at 1, 2 and 3 while it still straddles.
+         *
+         * This used to be covered only by the ten sixel render goldens, and
+         * only in combination - shift_images_for_insert() also carried an
+         * `if (position == m_end) return;`, and the whole suite stayed green
+         * with either that or the marker check taken out alone. The exemption
+         * was the redundant half and is gone; this is what holds the half that
+         * stayed, and it goes red for either edit on its own.
+         */
+        {
+                auto ring = Ring{24, false};
+                ring.set_visible_rows(24);
+                append_rows(ring, 1);
+
+                emit_image_at_the_bottom(ring, true);
+
+                g_assert_cmpuint(ring.image_map().size(), ==, 1);
+
+                auto const* const image = ring.image_map().begin()->second.get();
+                g_assert_cmpint(long(image->get_top()), ==, 0);
+                g_assert_cmpint(long(image->get_bottom()), ==, 3);
+        }
+
+        {
+                auto ring = Ring{24, false};
+                ring.set_visible_rows(24);
+                append_rows(ring, 1);
+
+                emit_image_at_the_bottom(ring, false);
+
+                /* Nothing held it out, so the ordinary straddle rule took it -
+                 * which is also what says the appends really do reach that
+                 * rule, rather than the surviving half above being a walk that
+                 * never sees the image at all.
+                 */
+                g_assert_cmpuint(ring.image_map().size(), ==, 0);
+                g_assert_cmpuint(ring.image_pool().live_count(), ==, 0);
+        }
+}
+
 static void
 test_ring_image_sweep_sees_cell_references(void)
 {
@@ -2537,9 +2640,22 @@ test_ring_rewrap_drops_before_the_map_is_rebuilt(void)
          * re-keying an entry mid-walk would move it under the cursor. So from
          * the moment the first image is moved until rebuild_image_top_map()
          * runs, every key in the map is a row number in the OLD ring's
-         * numbering, and drop_images_before() is the one caller that reads a
-         * key rather than the image: it is ordered, and it stops at the first
-         * entry keyed at or after the row it is dropping.
+         * numbering.
+         *
+         * drop_images_before() is not the only key-reader in the ring -
+         * shift_images_for_insert() compares it->first and cur->first,
+         * shift_images_for_remove() the same, unlink_image_from_top_map()
+         * looks an image up by get_top(), and image_invariant_violation()
+         * checks every image against the key it is filed under. The stronger
+         * statement is that NONE of them can run inside that window: the
+         * window is a straight-line stretch of Ring::rewrap() between its
+         * first rewrap_images_in_range() call and rebuild_image_top_map(),
+         * the ring is not re-entered there, and the only image call in it is
+         * rewrap_images_in_range() itself. Even validate() is outside it, on
+         * both sides. So the ordering question is only ever asked of what
+         * rewrap runs AFTER the rebuild, and drop_images_before() is the one
+         * key-reader there: it is ordered, and it stops at the first entry
+         * keyed at or after the row it is dropping.
          *
          * That early exit is exact against fresh keys and arbitrary against
          * stale ones, and the two numberings are not merely offset: rewrap
@@ -2787,6 +2903,8 @@ main(int argc,
         g_test_add_func("/vte/ring/image/partial-erase-keeps-the-rest", test_ring_image_partial_erase_keeps_the_rest);
         g_test_add_func("/vte/ring/image/full-erase-frees-it", test_ring_image_full_erase_frees_it);
 
+        g_test_add_func("/vte/ring/image/emitted-at-the-bottom-survives",
+                        test_ring_image_emitted_at_the_bottom_survives);
         g_test_add_func("/vte/ring/image/pixels-survive-eviction", test_ring_image_pixels_survive_eviction);
         g_test_add_func("/vte/ring/image/spill-is-reclaimed", test_ring_image_spill_is_reclaimed);
 

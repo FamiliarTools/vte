@@ -121,10 +121,13 @@ public:
         inline void set_pool_id(pool_id_t id) noexcept { m_pool_id = id; }
         /* Where the image sits, in cells. This is the ring's row index for the
          * image and not what the draw reads: see the note on the image maps in
-         * ring.hh. The row is the ring's to move, through
-         * Ring::reanchor_image(), which re-keys the by-top map with it; the
-         * column never moves, since every operation that shifts cells sideways
-         * deletes the image instead of following it.
+         * ring.hh. The row is the ring's to move, and it has two movers:
+         * Ring::reanchor_image(), which re-keys the by-top map in the same
+         * step, and Ring::rewrap_images_in_range(), which leaves the key
+         * stale on purpose and is paid for by the rebuild Ring::rewrap() runs
+         * before the next key read (see the note on set_top() above). The
+         * column never moves, since every operation that shifts cells
+         * sideways deletes the image instead of following it.
          */
         inline constexpr auto get_left() const noexcept { return m_left_cells; }
         inline auto get_top() const noexcept { return m_top_cells; }

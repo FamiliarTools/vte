@@ -170,13 +170,23 @@ done and before anything reads a key again; the keys are stale between the two
 and nothing may read them there. So the rule is not one mover, it is: re-key
 with the move, or move under a rebuild that lands before the next key read.
 
-That makes the rebuild's POSITION load-bearing, not just its presence.
-drop_images_before() reads keys rather than images - it is ordered and stops at
-the first entry keyed at or after the row it is dropping - and rewrap() runs it
-to take in the rows the reflow pushed off the front. Rewrap numbers the
-reflowed rows from zero, so a scrolled ring's stale keys are far larger than the
-rows the images now sit on, and that early exit fires on the first entry and
-drops nothing. /vte/ring/rewrap-drops-before-the-map-is-rebuilt holds the order:
+"Nothing may read them there" is a statement about the window, not about
+drop_images_before() being the ring's only key-reader - it is not.
+shift_images_for_insert() and shift_images_for_remove() compare keys against
+the seam, unlink_image_from_top_map() looks an image up by its top row, and
+image_invariant_violation() checks every image against the key it is filed
+under. What holds is that none of them can run inside the window: the window
+is a straight-line stretch of Ring::rewrap(), the ring is not re-entered
+there, and the only image call in it is rewrap_images_in_range(). validate()
+sits outside it on both sides, which is why it can assert on the keys at all.
+
+That makes the rebuild's POSITION load-bearing, not just its presence, for what
+rewrap runs after it. drop_images_before() reads keys rather than images - it is
+ordered and stops at the first entry keyed at or after the row it is dropping -
+and rewrap() runs it to take in the rows the reflow pushed off the front. Rewrap
+numbers the reflowed rows from zero, so a scrolled ring's stale keys are far
+larger than the rows the images now sit on, and that early exit fires on the
+first entry and drops nothing. /vte/ring/rewrap-drops-before-the-map-is-rebuilt holds the order:
 move that call above the rebuild and an image stays resident on rows that have
 left the ring.
 
