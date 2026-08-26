@@ -2366,14 +2366,21 @@ vte_terminal_class_init(VteTerminalClass *klass)
          * The amount of memory, in bytes, that the terminal may use for
          * images received via SIXEL. Images exceeding the limit are evicted,
          * those that have already scrolled into the scrollback first and
-         * oldest first among those; their pixels remain in the scrollback
-         * stream and are drawn again when scrolled back to.
+         * oldest first among those; on the normal screen their pixels remain
+         * in the scrollback stream and are drawn again when scrolled back to,
+         * while on the alternate screen, which has no scrollback, an evicted
+         * image is gone.
          *
          * An image is read back a row at a time, and only the rows that had
          * already scrolled into the scrollback when it was evicted can be.
          * Such an image is therefore evicted only when the limit cannot be met
          * without it, and it then loses the part of itself that had not
          * scrolled in yet.
+         *
+         * This is the whole bound: there is no separate limit on the number of
+         * images. Each image is charged its pixels plus the terminal's own
+         * fixed bookkeeping for it, so a flood of tiny images is bounded by
+         * this budget too.
          *
          * Setting this to 0 disables images.
          *
@@ -7476,13 +7483,19 @@ catch (...)
  *
  * Sets how much memory @terminal may use for images received via SIXEL.
  * Images exceeding the limit are evicted, those that have already scrolled
- * into the scrollback first and oldest first among those; their pixels remain
- * in the scrollback stream and are drawn again when scrolled back to.
+ * into the scrollback first and oldest first among those; on the normal screen
+ * their pixels remain in the scrollback stream and are drawn again when
+ * scrolled back to, while on the alternate screen, which has no scrollback, an
+ * evicted image is gone.
  *
  * An image is read back a row at a time, and only the rows that had already
  * scrolled into the scrollback when it was evicted can be. Such an image is
  * therefore evicted only when the limit cannot be met without it, and it then
  * loses the part of itself that had not scrolled in yet.
+ *
+ * This is the whole bound: there is no separate limit on the number of images.
+ * Each image is charged its pixels plus the terminal's own fixed bookkeeping
+ * for it, so a flood of tiny images is bounded by this budget too.
  *
  * A @limit of 0 disables images.
  *

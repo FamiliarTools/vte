@@ -2862,6 +2862,57 @@ test_ring_image_limit_shrinks_immediately(void)
         g_assert_cmpuint(ring.image_memory_used(), <=, 3200);
 }
 
+/* The byte budget is the whole bound. It used to have a silent partner - a
+ * hardcoded cap on the NUMBER of resident images - which the public
+ * VteTerminal:image-limit documentation never mentioned, so a caller who
+ * raised the budget still got eviction it was never told about.
+ *
+ * Removing that cap is only safe if the thing it was really bounding, the
+ * fixed per-image bookkeeping the pixel count does not see, is charged to the
+ * budget instead. This is what says it is: a budget sized to hold exactly N
+ * images' worth of PIXELS must hold fewer than N, because each one costs more
+ * than its pixels.
+ */
+static void
+test_ring_image_limit_counts_more_than_pixels(void)
+{
+        auto const n = 100;
+
+        auto ring = Ring{1024, true};
+        ring.set_visible_rows(24);
+        append_rows(ring, 200);
+
+        /* One image's pixels, measured rather than assumed: place one under a
+         * budget nothing can evict it from and read the meter.
+         */
+        ring.set_image_memory_max(size_t{1} << 30);
+        place_image(ring, 2, 1);
+        auto const cost = ring.image_memory_used();
+        g_assert_cmpuint(ring.image_map().size(), ==, 1);
+
+        auto* const image = ring.image_map().begin()->second.get();
+        auto const pixels = size_t(image->resource_size());
+
+        /* The charge for one image is strictly more than its pixels. */
+        g_assert_cmpuint(cost, >, pixels);
+
+        /* A budget of exactly n images' pixels therefore holds fewer than n,
+         * and the meter still agrees with what is resident.
+         */
+        auto ring2 = Ring{1024, true};
+        ring2.set_visible_rows(24);
+        append_rows(ring2, 200);
+        ring2.set_image_memory_max(pixels * n);
+
+        for (auto i = 0; i < n; i++)
+                place_image(ring2, 2 + i, 1);
+
+        ring2.validate_images();
+        g_assert_cmpuint(ring2.image_map().size(), <, size_t(n));
+        g_assert_cmpuint(ring2.image_map().size(), >, 1);
+        g_assert_cmpuint(ring2.image_memory_used(), <=, pixels * n);
+}
+
 static void
 test_ring_image_limit_spares_the_unrecoverable(void)
 {
@@ -2896,9 +2947,19 @@ test_ring_image_limit_spares_the_unrecoverable(void)
         g_assert_cmpuint(ring.writable_start_for_test(), >, 2);
         g_assert_cmpuint(ring.writable_start_for_test(), <=, 8);
 
-        /* Both still resident, and together over the budget about to be set. */
+        /* Both still resident, and together over the budget about to be set.
+         *
+         * The budget is what ONE resident image costs the ring, read off the
+         * meter rather than taken from the image's resource_size(): the ring
+         * charges an image its pixels plus its own fixed bookkeeping, so a
+         * budget of the pixels alone would fit neither of them and the
+         * question this test asks - which of two the ring keeps - would never
+         * be put. The two images are the same size, so half the meter is one
+         * of them.
+         */
         g_assert_cmpuint(ring.image_map().size(), ==, 2);
-        auto const budget = ring.image_map().begin()->second->resource_size();
+        auto const budget = ring.image_memory_used() / 2;
+        g_assert_cmpuint(budget, >=, ring.image_map().begin()->second->resource_size());
         g_assert_cmpuint(ring.image_memory_used(), >, budget);
 
         ring.set_image_memory_max(budget);
@@ -3529,6 +3590,7 @@ main(int argc,
         g_test_add_func("/vte/ring/image/limit-is-enforced", test_ring_image_limit_is_enforced);
         g_test_add_func("/vte/ring/image/limit-zero-disables", test_ring_image_limit_zero_disables);
         g_test_add_func("/vte/ring/image/limit-shrinks-immediately", test_ring_image_limit_shrinks_immediately);
+        g_test_add_func("/vte/ring/image/limit-counts-more-than-pixels", test_ring_image_limit_counts_more_than_pixels);
         g_test_add_func("/vte/ring/image/limit-spares-the-unrecoverable", test_ring_image_limit_spares_the_unrecoverable);
 
         g_test_add_func("/vte/ring/scrollback-restore-respects-the-budget", test_ring_scrollback_restore_respects_the_budget);

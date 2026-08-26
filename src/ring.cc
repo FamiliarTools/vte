@@ -31,10 +31,6 @@
 
 #include <algorithm>
 
-/* Hard limit on number of images to keep around. This limits the impact
- * of potential issues related to algorithmic complexity. */
-#define IMAGE_FAST_COUNT_MAX 4096
-
 #endif /* WITH_SIXEL */
 
 /*
@@ -173,7 +169,7 @@ Ring::image_invariant_violation() const noexcept
                 if (!found)
                         return "an image is filed under a top row it does not start at";
 
-                memory_used += image->resource_size();
+                memory_used += image_cost(image.get());
         }
 
         /* What the GC spends its budget against is what the resident images
@@ -498,7 +494,7 @@ Ring::image_gc_region() noexcept
                 if (cairo_region_contains_rectangle(region, &rect) == CAIRO_REGION_OVERLAP_IN) {
                         /* vte::image::Image has been completely overdrawn; delete it */
 
-                        m_image_fast_memory_used -= image->resource_size();
+                        m_image_fast_memory_used -= image_cost(image.get());
 
                         /* Apparently this is the cleanest way to erase() with a reverse iterator... */
                         /* Unlink the image from m_image_by_top_map, then erase it from m_image_map */
@@ -821,7 +817,7 @@ Ring::restore_image(size_t priority) /* throws */
         image->set_pool_id(pool_id);
 
         auto* const raw = image.get();
-        m_image_fast_memory_used += image->resource_size();
+        m_image_fast_memory_used += image_cost(image.get());
         m_image_map[priority] = std::move(image);
         m_image_by_top_map.emplace(raw->get_top(), raw);
         sync_has_images();
@@ -904,8 +900,7 @@ Ring::image_is_recoverable(vte::image::Image const* image) const noexcept
 void
 Ring::image_gc(vte::image::Image const* exempt) noexcept
 {
-        while (m_image_fast_memory_used > m_image_memory_max ||
-               m_image_map.size() > IMAGE_FAST_COUNT_MAX) {
+        while (m_image_fast_memory_used > m_image_memory_max) {
                 if (m_image_map.empty()) {
                         /* If this happens, we've miscounted somehow. */
                         break;
@@ -986,7 +981,7 @@ Ring::image_gc(vte::image::Image const* exempt) noexcept
                  */
                 spill_image(image.get());
 
-                m_image_fast_memory_used -= image->resource_size();
+                m_image_fast_memory_used -= image_cost(image.get());
                 note_image_freed(image.get());
                 unlink_image_from_top_map(image.get());
                 m_image_map.erase(victim);
@@ -1006,7 +1001,7 @@ Ring::erase_image(Ring::image_by_top_map_type::iterator it) noexcept
         auto const image = it->second;
         auto const priority = image->get_priority();
 
-        m_image_fast_memory_used -= image->resource_size();
+        m_image_fast_memory_used -= image_cost(image);
         note_image_freed(image);
         auto const next = m_image_by_top_map.erase(it);
         m_image_map.erase(priority);
@@ -3608,7 +3603,7 @@ Ring::append_image(vte::Freeable<cairo_surface_t> surface,
                                    std::forward_as_tuple(image->get_top()),
                                    std::forward_as_tuple(image.get()));
 
-        m_image_fast_memory_used += image->resource_size ();
+        m_image_fast_memory_used += image_cost(image.get());
 
         /* From here until the caller says otherwise, this image is the one being
          * placed, and the lifetime rules leave it alone. It has to be marked

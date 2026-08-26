@@ -443,22 +443,34 @@ would TEAR, which is one with a cell outside the moving rectangle - a tall
 image under a one-row ICH, most of all.
 
 
-image_gc has a count cap the public API does not mention
-────────────────────────────────────────────────────────
+The byte budget is the whole bound - and it is charged per image, not per pixel
+──────────────────────────────────────────────────────────────────────────────
 
-image_gc() (src/ring.cc) evicts while EITHER
+image_gc() (src/ring.cc) evicts while
 
 	m_image_fast_memory_used > m_image_memory_max
 
-or
+and that is the only condition. It used to have a second one, a hardcoded
+IMAGE_FAST_COUNT_MAX of 4096 on the NUMBER of resident images, which the public
+API - vte_terminal_set_image_limit(), the "image-limit" property, both
+documented purely in bytes - never mentioned. An embedder who raised the byte
+limit for a screenful of sixels still got eviction at 4097 images with nothing
+in the API to say why, and on the alternate screen that eviction did not park
+the picture in a stream: spill_image() returns at once when there is no stream,
+so there the unmentioned cap DESTROYED images.
 
-	m_image_map.size() > IMAGE_FAST_COUNT_MAX
+The cap was bounding something real, though - the per-image cost the byte
+figure does not see. resource_size() is the pixels, which is nearly all of a
+photograph and none of a one-band sixel: the Image, the two map nodes holding
+it and the surface's own header cost the same whether the picture is 4K or
+40x6. Ring::image_cost() is that whole cost, every accounting site goes through
+it, and the cap is then redundant.
 
-IMAGE_FAST_COUNT_MAX is 4096 and is a #define in ring.cc. The public API -
-vte_terminal_set_image_limit(), the "image-limit" property - is documented
-purely in bytes and says nothing about a count. An embedder that sets a large
-byte limit and sends many small images will still see eviction at 4097 images,
-with nothing in the API to tell it why.
+The overhead figure is sizeof-derived, and its node part is the standard
+red-black layout - an estimate of what libstdc++ allocates, not a reading of
+it. It only has to be the right order of magnitude; what matters is that it is
+not zero, and /vte/ring/image/limit-counts-more-than-pixels asserts exactly
+that and nothing finer.
 
 
 An image evicted before it reaches the scrollback loses the rows still writable
