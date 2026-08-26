@@ -1415,6 +1415,30 @@ test_ring_image_cells_carry_the_reference(void)
         g_assert_false(a.same_stripe(b));
 }
 
+/* Anchor a 4-row-tall image at @top of a ring whose last row is @top, stamp
+ * that first row, and leave the placing marker set. The image's rows 1..3 do
+ * not exist, so its bottom is past the end of the ring: it straddles the end
+ * the way a sixel does for the length of its own emission.
+ */
+static void
+anchor_straddling_image(Ring& ring,
+                        long top)
+{
+        auto const width_px = 4 * kCellWidth;
+        auto const height_px = 4 * kCellHeight;
+
+        auto surface = vte::take_freeable
+                (cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width_px, height_px));
+
+        ring.append_image(std::move(surface),
+                          width_px, height_px,
+                          0, int(top),
+                          kCellWidth, kCellHeight);
+
+        widen_row(ring, top, 4);
+        ring.stamp_image_row(vte::grid::coords(top, 0), 4, tile_row_t(0));
+}
+
 /* Emit a 4-row-tall image at the bottom of a ring that has only its first row,
  * the way Terminal::erase_image_rect() does: anchor it, then append and stamp
  * its remaining rows one at a time. @hold_the_marker says whether the emission
@@ -1430,20 +1454,9 @@ static void
 emit_image_at_the_bottom(Ring& ring,
                          bool hold_the_marker)
 {
-        auto const width_px = 4 * kCellWidth;
-        auto const height_px = 4 * kCellHeight;
         auto const top = long(ring.next()) - 1;
 
-        auto surface = vte::take_freeable
-                (cairo_image_surface_create(CAIRO_FORMAT_ARGB32, width_px, height_px));
-
-        ring.append_image(std::move(surface),
-                          width_px, height_px,
-                          0, top,
-                          kCellWidth, kCellHeight);
-
-        widen_row(ring, top, 4);
-        ring.stamp_image_row(vte::grid::coords(top, 0), 4, tile_row_t(0));
+        anchor_straddling_image(ring, top);
 
         if (!hold_the_marker)
                 ring.set_placing_image(nullptr);
@@ -1470,22 +1483,23 @@ test_ring_image_emitted_at_the_bottom_survives(void)
         /* An image is anchored at the cursor before the rows it covers exist,
          * so for the length of its own emission it straddles the end of the
          * ring - and shift_images_for_insert() destroys whatever straddles the
-         * seam it is asked about. The placing marker is the whole of what
-         * keeps a sixel at the bottom of the screen from deleting itself, and
-         * this holds both halves of that in one test rather than needing the
-         * guard taken out of the source: with the marker held across the
-         * appends the image survives all three, without it the first append
-         * takes it.
+         * seam it is asked about. TWO guards there spare it: the exemption for
+         * an insert at the end of the ring, and the placing marker. Both apply
+         * to every append of the emission, so the emission on its own cannot
+         * tell them apart and cannot hold either of them.
+         *
+         * So the emission is only the first case here. The two after it sit in
+         * the part of the set one guard covers and the other does not, which
+         * makes each of them the red run for exactly one guard, and the last
+         * block is the control for the third. The test's name is the
+         * trajectory they are all cut from, not the whole of what it checks.
          *
          * The figures are the bands fixture's, measured: a 4-row image at row
          * 0 of a 1-row ring, inserts at 1, 2 and 3 while it still straddles.
-         *
-         * This used to be covered only by the ten sixel render goldens, and
-         * only in combination - shift_images_for_insert() also carried an
-         * `if (position == m_end) return;`, and the whole suite stayed green
-         * with either that or the marker check taken out alone. The exemption
-         * was the redundant half and is gone; this is what holds the half that
-         * stayed, and it goes red for either edit on its own.
+         */
+
+        /* The emission itself, both guards in place. Green either way; it is
+         * here as the trajectory the other two are cut from.
          */
         {
                 auto ring = Ring{24, false};
@@ -1501,6 +1515,15 @@ test_ring_image_emitted_at_the_bottom_survives(void)
                 g_assert_cmpint(long(image->get_bottom()), ==, 3);
         }
 
+        /* The exemption's own half: an image straddling the END of the ring
+         * that is NOT the one being placed. Measured: with the exemption taken
+         * out this goes red (image_map().size() == 1: (0 == 1)), and with the
+         * placing check taken out instead it stays green.
+         *
+         * Nothing in the terminal is known to reach this state - see the note
+         * in shift_images_for_insert(). This says what the guard DOES, not
+         * that a sixel depends on it.
+         */
         {
                 auto ring = Ring{24, false};
                 ring.set_visible_rows(24);
@@ -1508,11 +1531,47 @@ test_ring_image_emitted_at_the_bottom_survives(void)
 
                 emit_image_at_the_bottom(ring, false);
 
-                /* Nothing held it out, so the ordinary straddle rule took it -
-                 * which is also what says the appends really do reach that
-                 * rule, rather than the surviving half above being a walk that
-                 * never sees the image at all.
-                 */
+                g_assert_cmpuint(ring.image_map().size(), ==, 1);
+                g_assert_cmpuint(ring.image_pool().live_count(), ==, 1);
+
+                auto const* const image = ring.image_map().begin()->second.get();
+                g_assert_cmpint(long(image->get_top()), ==, 0);
+                g_assert_cmpint(long(image->get_bottom()), ==, 3);
+        }
+
+        /* The marker's own half: the image being placed, at a seam that is NOT
+         * the end of the ring, so the exemption is not taken. Measured: with
+         * the placing check taken out this goes red (image_map().size() == 1:
+         * (0 == 1)), and with the exemption taken out instead it stays green.
+         * The control below says the destroying rule really does apply at this
+         * seam, rather than it being one the walk never looks at.
+         */
+        {
+                auto ring = Ring{24, false};
+                ring.set_visible_rows(24);
+                append_rows(ring, 4);
+
+                anchor_straddling_image(ring, 1);
+                g_assert_nonnull(ring.placing_image());
+
+                /* top 1 < 2 <= bottom 4, and 2 is not the end (4). */
+                ring.insert(2, 0);
+
+                g_assert_cmpuint(ring.image_map().size(), ==, 1);
+
+                ring.set_placing_image(nullptr);
+        }
+
+        {
+                auto ring = Ring{24, false};
+                ring.set_visible_rows(24);
+                append_rows(ring, 4);
+
+                anchor_straddling_image(ring, 1);
+                ring.set_placing_image(nullptr);
+
+                ring.insert(2, 0);
+
                 g_assert_cmpuint(ring.image_map().size(), ==, 0);
                 g_assert_cmpuint(ring.image_pool().live_count(), ==, 0);
         }

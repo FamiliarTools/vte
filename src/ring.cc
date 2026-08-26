@@ -1310,26 +1310,36 @@ Ring::image_has_any_cell(vte::image::Image const* image) const noexcept
  * "an image inside the scrolled region moves, an image straddling its edge
  * dies" rule that the region scroll needs.
  *
- * A sixel emitted at the bottom of the screen does straddle this seam, and
- * what spares it is the placing marker, not any exemption for the end of the
- * ring. append_image() anchors the image at the cursor BEFORE the rows it
- * covers exist, and erase_image_rect() then appends those rows one at a time;
- * every one of those appends inserts at m_end with the image's bottom already
- * at or past it. Measured on the bands render fixture: a 4-row image anchored
- * at row 0 of a 1-row ring sees inserts at 1, 2 and 3 while it is still
- * straddling, and is the image being placed at each of them. From row 4 on its
- * bottom is behind the seam and it is an ordinary resident.
+ * A sixel emitted at the bottom of the screen does straddle this seam.
+ * append_image() anchors the image at the cursor BEFORE the rows it covers
+ * exist, and erase_image_rect() then appends those rows one at a time; every
+ * one of those appends inserts at m_end with the image's bottom already at or
+ * past it. Measured on the bands render fixture: a 4-row image anchored at row
+ * 0 of a 1-row ring sees inserts at 1, 2 and 3 while it is still straddling,
+ * and is the image being placed at each of them. From row 4 on its bottom is
+ * behind the seam and it is an ordinary resident.
  *
- * This carried an `if (position == m_end) return;` above, justified as the
- * thing that kept that image alive. It was not. It and the placing check were
- * a redundant pair, and each alone held the whole suite green: removing only
- * the exemption, gtk3 Ok:34 Fail:0; removing only the placing check, gtk3
- * Ok:34 Fail:0; removing both, gtk3 Fail:10, every sixel render golden. The
- * exemption was the one to drop, since the placing marker is the guard built
- * for this - vte.cc's PlacingGuard exists to hold an image out of its own
- * emission - while the exemption's reach was an accident of where the rows
- * happen to be appended. /vte/ring/image/emitted-at-the-bottom-survives is the
- * cheap red run for the half that stayed.
+ * TWO guards spare it, and they are kept as a pair on purpose. The exemption
+ * above returns before the walks whenever the insert is at the end of the
+ * ring; the placing marker - vte.cc's PlacingGuard, which exists to hold an
+ * image out of its own emission - is read by both walks below. What is known
+ * about them, and it is only this:
+ *
+ *  - Each alone holds the whole suite green. Removing only the exemption,
+ *    gtk3 Ok:34 Fail:0; removing only the placing check, gtk3 Ok:34 Fail:0;
+ *    removing both, gtk3 Fail:10, every sixel render golden.
+ *  - They do NOT cover the same set. The exemption spares every image
+ *    straddling the end of the ring, whoever it belongs to; the marker spares
+ *    only the one image being placed, at any seam. So neither is a restatement
+ *    of the other, and dropping either is a behaviour change rather than a
+ *    tidy-up.
+ *  - Which of the two actually carries the emission case in the terminal is
+ *    NOT established here. On the trajectory above they both apply to every
+ *    one of the three appends.
+ *
+ * /vte/ring/image/emitted-at-the-bottom-survives holds each of them by the
+ * half of the set the other does not reach, so either one taken out of this
+ * function on its own goes red.
  *
  * The keys of m_image_by_top_map are the images' top rows, and no image can be
  * above row 0: the rules only ever move an image between existing rows, and
@@ -1339,6 +1349,9 @@ Ring::image_has_any_cell(vte::image::Image const* image) const noexcept
 void
 Ring::shift_images_for_insert(row_t position) noexcept
 {
+        if (position == m_end)
+                return;
+
         /* Destroyed: top strictly above the seam, bottom at or below it. */
         for (auto it = m_image_by_top_map.begin();
              it != m_image_by_top_map.end() && it->first < position; ) {
@@ -1383,9 +1396,11 @@ Ring::shift_images_for_insert(row_t position) noexcept
  *
  * The counterpart of shift_images_for_insert(): everything below @position
  * moves one row up, an image containing @position loses one of its rows and is
- * destroyed. The placing marker holds an image out of this the same way, and
- * for the same reason: a region scroll driven by erase_image_rect() removes a
- * row at the top of the region for every row it appends at the bottom.
+ * destroyed. There is no end-of-ring exemption to make here, since a row that
+ * is being removed exists by definition. The placing marker is read the same
+ * way as in the insert, and for the same reason: a region scroll driven by
+ * erase_image_rect() removes a row at the top of the region for every row it
+ * appends at the bottom.
  */
 void
 Ring::shift_images_for_remove(row_t position) noexcept
